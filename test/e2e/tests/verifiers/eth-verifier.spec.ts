@@ -211,7 +211,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SYNC_COMMITTEE_SIZE)}
         });
 
@@ -229,7 +229,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY - 1)}
         });
 
@@ -244,7 +244,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {
                 committee,
                 participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY),
@@ -291,7 +291,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)},
             rotation: {committee: nextCommittee, mismatchUncompressed: true}
         });
@@ -310,7 +310,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)}
         });
         const wrongAnchor = encodeEthTrustAnchor(channelId, wrongCodeHash, {
@@ -326,7 +326,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)}
         });
 
@@ -342,7 +342,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId: wrongChannelId,
-            payloads: [],
+            payloads: [TEST_PAYLOAD],
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)}
         });
         const mismatchedAnchor = encodeEthTrustAnchor(channelId, serviceCodeHash, {
