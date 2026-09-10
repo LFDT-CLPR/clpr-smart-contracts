@@ -9,7 +9,7 @@ import {QbftContractValidatorSource} from "@hiero-ledger/clpr/libraries/proof/qb
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {QbftContractProofs} from "@test/helpers/QbftContractProofs.sol";
-import {ContractSourceHarness} from "@test/helpers/QbftContractHarness.sol";
+import {ContractSourceHarness, OpenCommitmentHarness} from "@test/helpers/QbftContractHarness.sol";
 
 contract QbftContractModeVerifierTest is QbftContractProofs {
     QBFTVerifier internal verifier;
@@ -201,6 +201,52 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
             )
         );
         verifier.verifyBundle(RLP.encode(top), anchor, _syntheticChannelContext());
+    }
+
+    /// @dev Any order opens the commitment: the list is sorted in place before hashing.
+    function test_openCommitment_unsortedListOpens() public {
+        OpenCommitmentHarness oc = new OpenCommitmentHarness();
+        address[] memory members = new address[](3);
+        members[0] = address(0xBBB3);
+        members[1] = address(0x0002);
+        members[2] = address(0xAAA1);
+        address[] memory got = oc.open(_memberListRlp(members), _commit(members));
+        assertEq(got.length, 3);
+        assertEq(got[0], address(0x0002));
+        assertEq(got[1], address(0xAAA1));
+        assertEq(got[2], address(0xBBB3));
+    }
+
+    /// @dev A list carrying a duplicate still opens the deduped commitment (wire acceptance kept).
+    function test_openCommitment_duplicateMembersTolerated() public {
+        OpenCommitmentHarness oc = new OpenCommitmentHarness();
+        address[] memory members = new address[](3);
+        members[0] = address(0xAAA1);
+        members[1] = address(0xBBB3);
+        members[2] = address(0xAAA1);
+        address[] memory got = oc.open(_memberListRlp(members), _commit(members));
+        assertEq(got.length, 2);
+        assertEq(got[0], address(0xAAA1));
+        assertEq(got[1], address(0xBBB3));
+    }
+
+    function test_revertWhen_TrustedSetNotAList() public {
+        OpenCommitmentHarness oc = new OpenCommitmentHarness();
+        vm.expectRevert(QbftContractModeVerifier.InvalidTrustedSet.selector);
+        oc.open(RLP.encode(bytes(hex"deadbeef")), bytes32(0));
+    }
+
+    function test_revertWhen_TrustedSetMemberNotAnAddress() public {
+        OpenCommitmentHarness oc = new OpenCommitmentHarness();
+        bytes[] memory items = new bytes[](2);
+        items[0] = RLP.encode(address(0xAAA1));
+        items[1] = RLP.encode(bytes(hex"0102030405060708090a0b0c0d0e0f1011121314151617")); // 23 bytes
+        vm.expectRevert(QbftContractModeVerifier.InvalidTrustedSet.selector);
+        oc.open(RLP.encode(items), bytes32(0));
+
+        items[1] = RLP.encode(new bytes[](0)); // a list where an address belongs
+        vm.expectRevert(QbftContractModeVerifier.InvalidTrustedSet.selector);
+        oc.open(RLP.encode(items), bytes32(0));
     }
 
     function test_revertWhen_ValidatorSetTooLarge() public {

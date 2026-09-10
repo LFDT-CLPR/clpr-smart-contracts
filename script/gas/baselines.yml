@@ -34,11 +34,10 @@ log_benchmarks:
 # function + column (contract-aware: ClprService.submitBundle is distinct from
 # BundleLogic.submitBundle). column ∈ {min, avg, median, max, calls}.
 #
-# We track the `min` column for submitBundle and each verifier's verifyBundle.
-# Each is exercised by a success-only test that calls the function EXACTLY once on
-# the happy path, so min == the real success-path cost. (The full HieroVerifier /
-# QBFTVerifier suites also call verifyBundle on cheap early-revert paths, which is
-# why those metrics point at the dedicated VerifyBundleGas.t.sol files instead.)
+# Single-scenario metrics track the `min` column: a success-only test calls the
+# function EXACTLY once on the happy path, so min == the real success-path cost.
+# (The full HieroVerifier / QBFTVerifier suites also call verifyBundle on cheap
+# early-revert paths, which is why those metrics point at dedicated gas files.)
 gas_report_benchmarks:
   # TODO: test skipped until the real state-proof fixture regeneration work is done.
   #  - name: ClprService.submitBundle (Hiero, real state proof)
@@ -58,29 +57,29 @@ gas_report_benchmarks:
     contract: QBFTVerifier
     function: verifyBundle
     column: min
-    baseline: 294706
+    baseline: 111841
   # QBFT Contract mode, calling verifier directly
   - name: QbftContractModeVerifier.verifyBundle (steady state)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: min
-    baseline: 783680
+    baseline: 217402
   - name: QbftContractModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: median
-    baseline: 3364305
+    baseline: 689398
   - name: QbftContractModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: max
-    baseline: 29874677
+    baseline: 3203410
   - name: QbftContractModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyConfig
     column: min
-    baseline: 518564
+    baseline: 184199

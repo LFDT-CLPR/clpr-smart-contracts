@@ -20,11 +20,13 @@ QBFTVerifier implements `IClprVerifier` for bundles whose source ledger is a Bes
 - Zero or more **epoch block headers**, each advancing the trust-anchor validator to the next committee.
 - The **current block header**, sealed by the (possibly updated) validator and carrying the state root.
 - The **peer service account** in the state trie, by walking the Merkle-Patricia proof for the configured service contract against `header.stateRoot`.
-- **Four fixed storage slots** of that account (plus an optional fifth for outbound message integrity), derived from the `channelId` stored in the trust anchor.
+- **Five fixed storage slots** of that account (plus an optional sixth for outbound message integrity), derived from the `channelId` stored in the trust anchor.
 
 On success it returns queue metadata extracted from the proven slots, the message payloads decoded from the protobuf bundle content, and — when epoch headers were processed — an updated `newTrustAnchor` advancing the trust anchor to the latest epoch.
 
 The verifier is **view** (reads no contract storage). All persistent trust is carried in the per-call `trustAnchor` bytes, which CLPRService stores per channel.
+
+**Trust assumption: validator keys identify the chain.** A QBFT header is authenticated by its committed seals alone; the sealed hash carries no chain id, so nothing in a header ties it to one network. The verifier therefore trusts the validator keys, not a chain identity. If the same validator keys seal blocks on more than one network — a fork, or a test network cloned from production with the same contract addresses — a relay can present a header from the other network and the verifier cannot tell them apart. The anchor's `codeHash` and service address narrow this, but a clone shares both. Operators must not reuse validator keys across networks a channel could be pointed at. This applies to both header and contract mode.
 
 ## Construction
 
@@ -70,13 +72,14 @@ Reverts:
 | 0 | Current block header | RLP list of 15–22 fields; field 3 = `stateRoot`, field 8 = `blockNumber`, field 12 = `extraData` (byte-string wrapping the inner QBFT extraData RLP). |
 | 1 | Epoch block headers | RLP list of zero or more block headers. Each must fall on an epoch boundary (`blockNumber == (trustAnchorEpoch + i + 1) * epochLength`). May be empty (no rotation). |
 | 2 | Account proof | RLP-encoded MPT proof for `clprService` against `header.stateRoot`. |
-| 3 | Storage proof | RLP list of **5 or 6** entries, each a 3-tuple `[slotKey32, ignoredValue, proofNodes]` (five Channel slots +1/+2/+4/+5/+16; sixth = last-message running hash when the bundle carries messages). |
+| 3 | Storage proof | RLP list of **5 or 6** entries, each a 2-tuple `[slotKey32, proofNodes]` (no value field: the proven value is read from the Merkle leaf) (five Channel slots +1/+2/+4/+5/+16; sixth = last-message running hash when the bundle carries messages). |
 | 4 | Bundle content | Byte-string containing a protobuf-encoded `ClprBundleContent`. |
 | 5 | Manifest storage proof | *(7-item shape only)* Single-entry storage proof of the peer service's endpoint-manifest commitment slot (18). |
 | 6 | Manifest preimage | *(7-item shape only)* `ClprEndpointManifest` protobuf bytes; `keccak256` must equal the proven commitment. |
 
 Reverts:
-- `InvalidPayloadShape()` — top-level list ∉ {5, 7} items, or storage proof entries ∉ {5, 6}.
+- `InvalidPayloadShape()` — top-level list ∉ {5, 7} items.
+- `InvalidStorageProofShape()` — storage proof entries ∉ {5, 6} *(from ClprEvmBundleVerifier)*. Entry shape is validated while the list is indexed, so a malformed entry reverts `InvalidStorageEntry()` before the count is checked.
 - `InvalidHeader()` — a header's field count is outside [15, 22], or an epoch header's block number does not equal the expected epoch boundary.
 
 ## verifyBundle
@@ -112,8 +115,7 @@ Processing steps:
    - Compute `currentEpoch = blockNumber / epochLength`; require `currentEpoch == trustAnchorEpoch + epochHeaders.length`. Reverts `EpochMismatch()`.
 
 5. **Verify the account proof** (payload[2]):
-   - `ClprEvmStateProof.verifyAccount(payload[2], stateRoot, clprService)` walks the MPT and returns the ABI-encoded account.
-   - `ClprEvmStateProof.decodeAccount(accountRlp)` returns `(storageRoot, accountCodeHash)`.
+   - `ClprEvmStateProof.verifyAccountFields(payload[2], stateRoot, clprService)` walks the MPT to the account leaf and decodes `(storageRoot, accountCodeHash)` in place.
    - Require `accountCodeHash == codeHash`. Reverts `CodeHashMismatch()`.
 
 6. **Verify the storage proof** (payload[3]) — see [Storage layout](#storage-layout).
@@ -134,7 +136,8 @@ Reverts and failure modes:
 | Selector | Cause |
 | --- | --- |
 | `InvalidTrustAnchor()` | Trust anchor length ≠ 192. |
-| `InvalidPayloadShape()` | Top-level list ≠ 5 items, or storage proof entry count ∉ {4, 5}. |
+| `InvalidPayloadShape()` | Top-level list ∉ {5, 7} items. |
+| `InvalidStorageProofShape()` | Storage proof entry count ∉ {5, 6}, checked after the entries are indexed (a malformed entry reverts `InvalidStorageEntry()` first). *(from ClprEvmBundleVerifier)* |
 | `InvalidHeader()` | Header field count outside [15, 22], or epoch header block number wrong. |
 | `EpochMismatch()` | Current block's epoch ≠ `trustAnchorEpoch + epochHeaders.length`. |
 | `EmptyValidator()` | An epoch header's `validators[]` list is empty. |
@@ -145,12 +148,23 @@ Reverts and failure modes:
 | `SealLengthMismatch(got)` | A committed seal is not 65 bytes. *(from ClprQbftSeal)* |
 | `SealRecoverFailed()` | `ecrecover` returned `address(0)`. *(from ClprQbftSeal)* |
 | `ValidatorSealNotFound(expected)` | None of the recovered sealers matches the expected validator. *(from ClprQbftSeal)* |
-| `InvalidStorageEntry()` | A storage entry is malformed (not a 3-tuple, or slot key ≠ 32 bytes). *(from ClprEvmStateProof)* |
-| `RLPInvalidEncoding()` | Malformed RLP item. *(from OZ RLP library)* |
+| `InvalidStorageProof()` | The storage proof item is not an RLP list filling its range. *(from ClprEvmStateProof)* |
+| `InvalidStorageEntry()` | A storage entry is malformed: not a non-empty 2-item list `[slotKey, proofNodes]`, slot field not a scalar of at most 32 bytes, proof field not a list ending at the entry's end, or a leaf value that is not a byte-string envelope around a scalar filling it. Every entry is validated up front, so this fires regardless of entry order. *(from ClprEvmStateProof)* |
+| `InvalidAccount()` | The account leaf is not a byte-string envelope around a 4-item list `[nonce, balance, storageRoot, codeHash]` of byte-string fields that fills it. *(from ClprEvmStateProof)* |
+| `SlotNotProven(slot)` | No storage entry carries the expected slot key. *(from ClprEvmStateProof)* |
+| `MPTEmptyProof()` | The proof list carries no nodes. *(from MerklePatriciaProof)* |
+| `MPTInvalidNode()` | The proof container or a node has the wrong shape: not a list filling its range, a node envelope that is a list, a node that is neither a 2- nor a 17-item list, or a path item that is a list. (A hash-valid node that is an empty list reverts `RlpCursorOutOfBounds()` from the first item read instead.) *(from MerklePatriciaProof)* |
+| `MPTInvalidHashRef()` | A node's `keccak256` differs from the hash its parent — or the root — committed to. *(from MerklePatriciaProof)* |
+| `MPTInvalidPathPrefix()` | A leaf/extension path is empty, has a prefix nibble above 3, or an even-length path with a non-zero padding nibble. *(from MerklePatriciaProof)* |
+| `MPTInlineNodeUnsupported()` | A child reference is not a 32-byte hash (an inline node, or a list). *(from MerklePatriciaProof)* |
+| `MPTKeyMismatch()` / `MPTKeyAbsent()` | The account proof (strict walk) leaves the key's path / reaches an empty child: the service account is not in the trie under `stateRoot`. Storage walks are lenient — an absent slot reads as zero. *(from MerklePatriciaProof)* |
+| `MPTProofEndedEarly()` | The proof ran out of nodes before the key was resolved. *(from MerklePatriciaProof)* |
+| `RlpCursorOutOfBounds()` / `RlpCursorUnexpectedList()` / `RlpCursorScalarTooLong()` | An RLP item inside a proof or entry overruns its range; a list where a byte string was expected (the contract-mode validator-source item, see `qbft-contract-mode.md` §4); a scalar longer than 32 bytes where a `bytes32`/uint is expected (a storage leaf scalar, an account `storageRoot`/`codeHash`). *(from RlpCursor)* |
+| `RLPInvalidEncoding()` | Malformed RLP in the payload/config/header decodes that still use the OZ library. *(from OZ RLP library)* |
 
 ## Storage layout
 
-The storage proof proves four mandatory slots derived from the `channelId` stored in the trust anchor, plus an optional fifth for outbound message integrity.
+The storage proof proves five mandatory slots derived from the `channelId` stored in the trust anchor, plus an optional sixth for outbound message integrity.
 
 **Slot derivation:**
 ```
@@ -164,16 +178,17 @@ cBase = keccak256(abi.encode(channelId, CHANNELS_BASE_SLOT))
 | 1 (mandatory) | `cBase + 2` | `Channel` slot+2 | `receivedMessageId = uint64(value >> 64)` |
 | 2 (mandatory) | `cBase + 4` | `Channel.sentRunningHash` | `sentRunningHash = value` |
 | 3 (mandatory) | `cBase + 5` | `Channel.receivedRunningHash` | `receivedRunningHash = value` |
-| 4 (optional)  | derived from `nextMessageId` | `MessageValue.runningHashAfterProcessing` | verified but not surfaced |
+| 4 (mandatory) | `cBase + 16` | `Channel.endpointManifestVersion` | `endpointManifestVersion = uint64(value)` |
+| 5 (optional)  | derived from `nextMessageId` | `MessageValue.runningHashAfterProcessing` | verified but not surfaced |
 
-The optional 5th entry (present when the bundle carries outbound messages) binds the last message's running hash:
+The optional 6th entry (present when the bundle carries outbound messages) binds the last message's running hash:
 ```
 qBase   = keccak256(abi.encode(channelId, MESSAGE_QUEUES_BASE_SLOT))
 msgBase = keccak256(abi.encode(uint64(nextMessageId - 1), qBase))
 slot    = msgBase + 1   // MessageValue.runningHashAfterProcessing
 ```
 
-`verifyProvenSlots` in `ClprEvmStateProof` accepts entries in any order — it matches each expected slot key against the entry's 32-byte `slotKey` field.
+`verifyProvenSlots` in `ClprEvmStateProof` accepts entries in any order — it matches each expected slot key against the entry's `slotKey` field. Relays SHOULD emit entries in the order the verifier derives its expected slots (the five Channel slots, then the message slot): the matcher keeps a rotating cursor, so ordered entries are found in one probe each, while a disordered layout still verifies but costs the sender O(N²) scanning gas.
 
 > **Note.** Slot packing (`state` and `nextMessageId` packed into `Channel` slot+1 above the 20-byte `address verifier`) mirrors the Solidity `ClprTypes.Channel` struct storage layout. Any change to the struct order on the peer chain requires a corresponding update here.
 
@@ -227,31 +242,29 @@ Reverts:
 
 ## Test fixture
 
-A self-contained happy-path fixture lives at `test/verifiers/qbft/fixtures/`:
+A self-contained happy-path fixture lives at `test/verifiers/evm/qbft/fixtures/` (generated by `tools/qbft-proof-generator/`, gitignored):
 
 | File | Content |
 | --- | --- |
-| `bundlePayload.hex` | Full RLP-encoded proof bundle captured from a single-validator Besu QBFT node. Uses the 4-entry storage proof format (channelId in trust anchor). Fixture-dependent tests are skipped if the storage proof has the old 5/6-entry format. |
-| `trustAnchor.hex` | `RLP([validator20, service20, codeHash32])`. The test re-encodes this with synthetic `epochLength`, `epochNumber`, and a placeholder `channelId` appended to produce the 192-byte ABI form. |
+| `bundlePayload.hex` | Full RLP-encoded proof bundle captured from a single-validator Besu QBFT node, with the 5-entry (ACK-only) channel storage proof. |
+| `trustAnchor.hex` | `RLP([validator20, service20, codeHash32])`. The test re-encodes this with synthetic `epochLength` and `epochNumber` appended to produce the 128-byte ABI form. |
 | `configProof.hex` | RLP-encoded 10-field configProof for integration tests. |
 | `serviceAddress.hex` | Expected service address for assertion in `test_verifyConfig_success`. |
 
-The test loader (`_readHexFile`) reads via `vm.readFile`, strips trailing CRLF, and parses with `vm.parseBytes`. Foundry's `fs_permissions` must include `test/verifiers/qbft/fixtures` as a literal prefix.
+The test loader (`_readHexFile`) reads via `vm.readFile`, strips trailing CRLF, and parses with `vm.parseBytes`. Foundry's `fs_permissions` (in `foundry.toml`) grants read access to `test/verifiers/evm/qbft/fixtures`.
 
-The negative-path tests (`test_revertWhen_*`) build minimal synthetic payloads in-test and never reach storage-proof decoding. Fixture-dependent tests skip with `vm.skip(true)` when the fixture format is stale (outer payload ≠ 5 items, or storage proof ∉ {4, 5} entries).
-
-The test suite currently has 25 passing tests and 2 skipped (fixture-dependent, pending fixture regeneration with the new 4-entry storage proof format).
+The negative-path tests (`test_revertWhen_*`) build minimal synthetic payloads in-test (see `test/helpers/QbftSyntheticProofs.sol`); the happy paths run on synthetic proofs too, so the suite does not depend on the generated fixture. Fixture-dependent tests skip when the fixture is absent or its shape is stale (outer payload ∉ {5, 7} items, storage proof ∉ {5, 6} entries).
 
 ## File map
 
 | Path | Role |
 | --- | --- |
-| `src/verifiers/qbft/QBFTVerifier.sol` | The verifier contract. |
-| `src/libraries/ClprEvmStateProof.sol` | Account-proof and storage-proof verification; `verifyAccount`, `decodeAccount`, `verifyProvenSlots`. |
-| `src/libraries/ClprQbftSeal.sol` | QBFT committed-seal verification; `verify` checks ≥ N seals and finds the expected validator among the recovered signers. |
-| `src/libraries/MerklePatriciaProof.sol` | MPT walker (`verifyInclusion`). |
-| `src/libraries/ClprProtobufHelpers.sol` | Protobuf varint / length-delimited helpers used for bundle content decoding. |
+| `src/verifiers/evm/qbft/QBFTVerifier.sol` | The verifier contract. |
+| `src/libraries/proof/evm/ClprEvmStateProof.sol` | Account-proof and storage-proof verification; `verifyAccountFields`, `verifyProvenSlots`. |
+| `src/libraries/proof/qbft/ClprQbftSeal.sol` | QBFT committed-seal verification; `verify` checks ≥ N seals and finds the expected validator among the recovered signers. |
+| `src/libraries/proof/evm/MerklePatriciaProof.sol` | MPT walker (`requireValueRange`, `valueRangeOrZero`), over `RlpCursor`. |
+| `src/libraries/codec/ClprProtobufHelpers.sol` | Protobuf varint / length-delimited helpers used for bundle content decoding. |
 | `lib/openzeppelin-contracts/contracts/utils/RLP.sol` | OZ RLP decode / encode. |
-| `test/verifiers/qbft/QBFTVerifier.t.sol` | Forge test suite (25 passing, 2 skipped). |
-| `test/verifiers/qbft/fixtures/` | Captured Besu QBFT proof fixture. |
+| `test/verifiers/evm/qbft/QBFTVerifier.t.sol` | Forge test suite. |
+| `test/verifiers/evm/qbft/fixtures/` | Generated Besu QBFT proof fixture (gitignored). |
 | `test/integration/IntegrationQBFT.t.sol` | End-to-end lifecycle test against the fixture (skips when fixture is stale). |

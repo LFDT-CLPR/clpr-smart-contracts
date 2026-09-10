@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
+import {MptWire} from "@test/helpers/MptWire.sol";
 
 /// @dev Shared proof-building utilities for QBFT synthetic tests.
 ///      Produces fully valid QBFT block headers, MPT account/storage proofs, and
@@ -207,19 +208,9 @@ abstract contract QbftSyntheticProofs is Test {
         pure
         returns (bytes32 root, bytes memory proofRlp)
     {
-        bytes memory compactPath = new bytes(33);
-        compactPath[0] = 0x20; // leaf, even
-        for (uint256 i = 0; i < 32; i++) {
-            compactPath[i + 1] = keyHash[i];
-        }
-        bytes[] memory leafItems = new bytes[](2);
-        leafItems[0] = RLP.encode(compactPath);
-        leafItems[1] = RLP.encode(leafValue);
-        bytes memory leafNode = RLP.encode(leafItems);
+        bytes memory leafNode = MptWire.leaf(keyHash, RLP.encode(leafValue));
         root = keccak256(leafNode);
-        bytes[] memory proofNodes = new bytes[](1);
-        proofNodes[0] = RLP.encode(leafNode);
-        proofRlp = RLP.encode(proofNodes);
+        proofRlp = MptWire.wrapOne(leafNode);
     }
 
     function _buildAccountRlp(bytes32 storageRoot, bytes32 codeHash) internal pure returns (bytes memory) {
@@ -246,20 +237,9 @@ abstract contract QbftSyntheticProofs is Test {
         pure
         returns (bytes32 storageRoot, bytes memory storageProofRlp)
     {
-        bytes32 dummyKey = bytes32(type(uint256).max);
-        bytes memory dummyPath = new bytes(33);
-        dummyPath[0] = 0x20;
-        for (uint256 i = 0; i < 32; i++) {
-            dummyPath[i + 1] = dummyKey[i];
-        }
-        bytes[] memory dummyLeafItems = new bytes[](2);
-        dummyLeafItems[0] = RLP.encode(dummyPath);
-        dummyLeafItems[1] = RLP.encode(new bytes(0));
-        bytes memory dummyLeafNode = RLP.encode(dummyLeafItems);
+        bytes memory dummyLeafNode = MptWire.leaf(bytes32(type(uint256).max), RLP.encode(new bytes(0)));
         storageRoot = keccak256(dummyLeafNode);
-        bytes[] memory nodeList = new bytes[](1);
-        nodeList[0] = RLP.encode(dummyLeafNode);
-        bytes memory nodeListRlp = RLP.encode(nodeList);
+        bytes memory nodeListRlp = MptWire.wrapOne(dummyLeafNode);
         bytes[] memory entries = new bytes[](count);
         for (uint256 i = 0; i < count; i++) {
             bytes[] memory entry = new bytes[](2);

@@ -23,17 +23,19 @@ library QbftContractValidatorSource {
     /// @notice Prove the validator set held by a contract and return it.
     /// @dev The proof's contract address and array slot must equal the pinned ones. Without this
     ///      rule, a relay can prove the array of a contract it controls.
-    /// @param sourceProof      `RLP([validatorContract, accountProof, arraySlot, storageProof])`.
+    /// @param sourceProof      The RLP list `[validatorContract, accountProof, arraySlot, storageProof]`
+    ///                         as a Slice (no copy; strip a byte-string envelope with
+    ///                         {RlpCursor-payloadSlice} first).
     /// @param stateRoot        The state root already proven for the block.
     /// @param expectedContract The validator contract the trust anchor pins.
     /// @param expectedSlot     The array slot the trust anchor pins.
     /// @return set             The proven validator set, sorted ascending and deduped.
-    function resolveSet(bytes memory sourceProof, bytes32 stateRoot, address expectedContract, bytes32 expectedSlot)
+    function resolveSet(Memory.Slice sourceProof, bytes32 stateRoot, address expectedContract, bytes32 expectedSlot)
         internal
         pure
         returns (ValidatorSet memory set)
     {
-        Memory.Slice[] memory p = RLP.decodeList(sourceProof);
+        Memory.Slice[] memory p = RLP.readList(sourceProof);
         if (p.length != 4) revert InvalidProofShape();
         address validatorContract = RLP.readAddress(p[0]);
         bytes32 arraySlot = RLP.readBytes32(p[2]);
@@ -41,15 +43,14 @@ library QbftContractValidatorSource {
         if (arraySlot != expectedSlot) revert WrongArraySlot(arraySlot, expectedSlot);
 
         // 1. Account proof: state root -> the contract's storage root.
-        bytes memory accountRlp = ClprEvmStateProof.verifyAccount(p[1], stateRoot, validatorContract);
-        (bytes32 storageRoot,) = ClprEvmStateProof.decodeAccount(accountRlp);
+        (bytes32 storageRoot,) = ClprEvmStateProof.verifyAccountFields(p[1], stateRoot, validatorContract);
 
-        Memory.Slice[] memory entries = RLP.readList(p[3]);
+        (bytes32[] memory labels, Memory.Slice[] memory proofs) = ClprEvmStateProof.indexEntries(p[3]);
 
         // 2. Prove the array length. The array slot holds the count.
         bytes32[] memory lengthSlot = new bytes32[](1);
         lengthSlot[0] = arraySlot;
-        uint256 n = uint256(ClprEvmStateProof.verifyProvenSlots(entries, storageRoot, lengthSlot)[0]);
+        uint256 n = uint256(ClprEvmStateProof.verifyIndexedSlots(labels, proofs, storageRoot, lengthSlot)[0]);
         if (n == 0) revert EmptyValidatorSet();
         if (n > ClprQbftQuorum.MAX_VALIDATORS) revert TooManyValidators(n);
 
@@ -62,7 +63,7 @@ library QbftContractValidatorSource {
                 i++;
             }
         }
-        bytes32[] memory values = ClprEvmStateProof.verifyProvenSlots(entries, storageRoot, elementSlots);
+        bytes32[] memory values = ClprEvmStateProof.verifyIndexedSlots(labels, proofs, storageRoot, elementSlots);
 
         address[] memory members = new address[](n);
         for (uint256 i = 0; i < n;) {
@@ -74,7 +75,8 @@ library QbftContractValidatorSource {
                 i++;
             }
         }
-        set.members = QbftValidators.sortedDedup(members);
-        if (set.members.length != n) revert DuplicateValidator(n, set.members.length);
+        uint256 distinct = QbftValidators.sortInPlace(members);
+        if (distinct != n) revert DuplicateValidator(n, distinct);
+        set.members = members;
     }
 }

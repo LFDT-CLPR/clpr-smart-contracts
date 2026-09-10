@@ -11,6 +11,7 @@ import {
     ValidatorSet,
     QbftValidatorMode
 } from "@hiero-ledger/clpr/libraries/proof/qbft/QbftValidators.sol";
+import {RlpCursor} from "@hiero-ledger/clpr/libraries/proof/evm/RlpCursor.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
@@ -67,6 +68,7 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
     error UnknownValidatorMode(uint8 mode);
     /// @notice The submitted member list does not hash to the anchor's set commitment.
     error WrongSetCommitment(bytes32 got, bytes32 expected);
+    error InvalidTrustedSet();
 
     struct QbftAnchor {
         bytes32 setCommitment;
@@ -172,7 +174,7 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
             if (number <= lastNumber) revert HandoffHeaderNotAscending(number, lastNumber);
             ClprQbftQuorum.verifyQuorum(currentSet, hopHeader);
             currentSet = QbftContractValidatorSource.resolveSet(
-                RLP.readBytes(hop[1]),
+                RlpCursor.payloadSlice(hop[1]),
                 RLP.readBytes32(hopHeader[BLOCK_HEADER_STATE_ROOT_INDEX]),
                 anchor.validatorContract,
                 anchor.arraySlot
@@ -185,32 +187,64 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
 
         _verifyCurrentAgainstWalk(currentSet, header, currentBlockNumber, lastNumber);
         ValidatorSet memory next = QbftContractValidatorSource.resolveSet(
-            RLP.readBytes(proofItem), stateRoot, anchor.validatorContract, anchor.arraySlot
+            RlpCursor.payloadSlice(proofItem), stateRoot, anchor.validatorContract, anchor.arraySlot
         );
         currentValidators = next.members;
         rotate = !QbftValidators.equals(next.members, trustedSet.members);
     }
 
     /// @dev The submitted member list, sorted and deduped, must hash to the anchor's commitment.
-    ///      The size cap runs BEFORE the O(n²) sortedDedup: `verifyBundle` accepts arbitrary
-    ///      payloads, so without it a relay could feed thousands of entries and burn gas in the
-    ///      sort. An oversized list could never match `expected` anyway - anchors only ever commit
-    ///      to resolveSet outputs, which are capped at ClprQbftQuorum.MAX_VALIDATORS.
+    ///      The list is parsed in place ({_readMemberList}) and sorted in place; a list carrying
+    ///      duplicates is still accepted (compacted) so the wire format is unchanged. Anchors only
+    ///      ever commit to resolveSet outputs, which are sorted, so a relay that submits the set as
+    ///      it received it pays only the O(n) pass of an already-sorted insertion sort.
     function _openCommitment(Memory.Slice listItem, bytes32 expected) internal pure returns (ValidatorSet memory set) {
-        Memory.Slice[] memory items = RLP.readList(listItem);
-        if (items.length > ClprQbftQuorum.MAX_VALIDATORS) {
-            revert ClprQbftQuorum.ValidatorSetTooLarge(items.length);
+        address[] memory members = _readMemberList(listItem);
+        if (QbftValidators.sortInPlace(members) != members.length) {
+            members = QbftValidators.sortedDedup(members);
         }
-        address[] memory members = new address[](items.length);
-        for (uint256 i = 0; i < items.length;) {
-            members[i] = RLP.readAddress(items[i]);
+        set.members = members;
+        bytes32 got = QbftValidators.commit(set);
+        if (got != expected) revert WrongSetCommitment(got, expected);
+    }
+
+    /// @dev The trusted-set list `[address, ...]` read with the cursor: no per-item slice
+    ///      allocation. An oversized list can never match the commitment anyway
+    ///      anchors only commit to resolveSet outputs, capped at ClprQbftQuorum.MAX_VALIDATORS.
+    function _readMemberList(Memory.Slice listItem) private pure returns (address[] memory members) {
+        (uint256 ptr, uint256 itemEnd) = RlpCursor.bounds(listItem);
+        (uint256 cur, uint256 len, bool isList) = RlpCursor.head(ptr, itemEnd);
+        uint256 end;
+        unchecked {
+            end = cur + len;
+        }
+        if (!isList || end != itemEnd) revert InvalidTrustedSet();
+
+        uint256 n;
+        for (uint256 p = cur; p < end;) {
+            (uint256 payloadPtr, uint256 payloadLen,) = RlpCursor.head(p, end);
             unchecked {
+                p = payloadPtr + payloadLen;
+                n++;
+            }
+        }
+        if (n > ClprQbftQuorum.MAX_VALIDATORS) revert ClprQbftQuorum.ValidatorSetTooLarge(n);
+
+        members = new address[](n);
+        for (uint256 i = 0; i < n;) {
+            (uint256 payloadPtr, uint256 payloadLen, bool memberIsList) = RlpCursor.head(cur, end);
+            uint256 itemLen;
+            unchecked {
+                itemLen = payloadPtr + payloadLen - cur;
+            }
+            if (memberIsList || (itemLen != 21 && itemLen != 1)) revert InvalidTrustedSet();
+            // forge-lint: disable-next-line(unsafe-typecast)
+            members[i] = address(uint160(RlpCursor.uintValue(payloadPtr, payloadLen)));
+            unchecked {
+                cur = payloadPtr + payloadLen;
                 i++;
             }
         }
-        set.members = QbftValidators.sortedDedup(members);
-        bytes32 got = QbftValidators.commit(set);
-        if (got != expected) revert WrongSetCommitment(got, expected);
     }
 
     function _verifyCurrentAgainstWalk(
@@ -296,7 +330,9 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
         bytes32 stateRoot = RLP.readBytes32(header[BLOCK_HEADER_STATE_ROOT_INDEX]);
         address validatorContract = RLP.readAddress(ta[3]);
         bytes32 arraySlot = RLP.readBytes32(ta[4]);
-        set = QbftContractValidatorSource.resolveSet(RLP.readBytes(proof[5]), stateRoot, validatorContract, arraySlot);
+        set = QbftContractValidatorSource.resolveSet(
+            RlpCursor.payloadSlice(proof[5]), stateRoot, validatorContract, arraySlot
+        );
         ClprQbftQuorum.verifyQuorum(set, header);
         anchor = _encodeContractAnchor(
             QbftValidators.commit(set), RLP.readBytes32(ta[2]), validatorContract, arraySlot, blockNumber

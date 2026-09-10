@@ -3,11 +3,14 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {EvmMptBuilder} from "@test/helpers/EvmMptBuilder.sol";
-import {MerklePatriciaProof} from "@hiero-ledger/clpr/libraries/proof/evm/MerklePatriciaProof.sol";
+import {MptWalk} from "@test/helpers/MptWalk.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
+import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
 /// @dev Unit tests for the test-only trie builder.
 contract EvmMptBuilderTest is Test {
+    using Memory for bytes;
+
     EvmMptBuilder internal trie;
 
     function setUp() public {
@@ -19,8 +22,8 @@ contract EvmMptBuilderTest is Test {
         return RLP.encode(v);
     }
 
-    function _nodes(bytes32 key) internal view returns (bytes[] memory) {
-        return trie.proof(key);
+    function _nodes(bytes32 key) internal view returns (Memory.Slice) {
+        return trie.proofRlp(key).asSlice();
     }
 
     // ── Inclusion ───────────────────────────────────────────────────────────
@@ -34,7 +37,7 @@ contract EvmMptBuilderTest is Test {
         bytes32 root = trie.build(keys, vals);
         assertEq(trie.proofDepth(keys[0]), 1, "lone key is the root leaf");
 
-        bytes memory got = MerklePatriciaProof.verifyInclusion(root, keys[0], _nodes(keys[0]));
+        bytes memory got = MptWalk.verifyInclusion(root, keys[0], _nodes(keys[0]));
         assertEq(RLP.decodeUint256(RLP.decodeBytes(got)), 42);
     }
 
@@ -50,11 +53,9 @@ contract EvmMptBuilderTest is Test {
 
         bytes32 root = trie.build(keys, vals);
 
+        assertEq(RLP.decodeUint256(RLP.decodeBytes(MptWalk.verifyInclusion(root, keys[0], _nodes(keys[0])))), 7);
         assertEq(
-            RLP.decodeUint256(RLP.decodeBytes(MerklePatriciaProof.verifyInclusion(root, keys[0], _nodes(keys[0])))), 7
-        );
-        assertEq(
-            RLP.decodeUint256(RLP.decodeBytes(MerklePatriciaProof.verifyInclusion(root, keys[1], _nodes(keys[1])))),
+            RLP.decodeUint256(RLP.decodeBytes(MptWalk.verifyInclusion(root, keys[1], _nodes(keys[1])))),
             type(uint256).max
         );
     }
@@ -70,7 +71,7 @@ contract EvmMptBuilderTest is Test {
         bytes32 root = trie.build(keys, vals);
 
         for (uint256 i = 0; i < n; i++) {
-            bytes memory got = MerklePatriciaProof.verifyInclusion(root, keys[i], _nodes(keys[i]));
+            bytes memory got = MptWalk.verifyInclusion(root, keys[i], _nodes(keys[i]));
             assertEq(RLP.decodeUint256(RLP.decodeBytes(got)), i + 1, "value round-trips");
         }
     }
@@ -87,17 +88,17 @@ contract EvmMptBuilderTest is Test {
         bytes32 root = trie.build(keys, vals);
 
         bytes32 missing = keccak256("absent");
-        // Resolve the proof BEFORE arming expectRevert: `proof` is itself an external call, and
+        // Resolve the proof BEFORE arming expectRevert: `proofRlp` is itself an external call, and
         // vm.expectRevert applies to the very next one.
-        bytes[] memory nodes = _nodes(missing);
-        assertEq(MerklePatriciaProof.getOrEmpty(root, missing, nodes).length, 0, "absent slot reads as empty");
+        bytes memory proofRlp = trie.proofRlp(missing);
+        assertEq(MptWalk.getOrEmpty(root, missing, proofRlp.asSlice()).length, 0, "absent slot reads as empty");
         // The strict walker must reject what the lenient one tolerates.
         vm.expectRevert();
-        this.verifyInclusionExt(root, missing, nodes);
+        this.verifyInclusionExt(root, missing, proofRlp);
     }
 
-    function verifyInclusionExt(bytes32 root, bytes32 key, bytes[] memory nodes) external pure {
-        MerklePatriciaProof.verifyInclusion(root, key, nodes);
+    function verifyInclusionExt(bytes32 root, bytes32 key, bytes memory proofRlp) external pure {
+        MptWalk.verifyInclusion(root, key, proofRlp.asSlice());
     }
 
     // ── Depth control ───────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ contract EvmMptBuilderTest is Test {
         bytes32 root = trie.build(keys, vals);
         assertEq(trie.proofDepth(target), depth + 1, "depth branches + leaf");
 
-        bytes memory got = MerklePatriciaProof.verifyInclusion(root, target, _nodes(target));
+        bytes memory got = MptWalk.verifyInclusion(root, target, _nodes(target));
         assertEq(RLP.decodeUint256(RLP.decodeBytes(got)), 0xDEAD);
     }
 
@@ -137,7 +138,7 @@ contract EvmMptBuilderTest is Test {
 
         bytes32 root = trie.build(pad, vals);
         assertEq(trie.proofDepth(target), depth + 1, "target never inserted, path still deep");
-        assertEq(MerklePatriciaProof.getOrEmpty(root, target, _nodes(target)).length, 0, "reads as zero");
+        assertEq(MptWalk.getOrEmpty(root, target, _nodes(target)).length, 0, "reads as zero");
     }
 
     /// @dev Deeper proof ⇒ strictly more gas. This is the relationship the gas report leans on when
@@ -160,11 +161,11 @@ contract EvmMptBuilderTest is Test {
             vals[i + 1] = _slotValue(i + 2);
         }
         bytes32 root = t.build(keys, vals);
-        bytes[] memory nodes = t.proof(target);
-        assertEq(nodes.length, depth + 1, "requested depth achieved");
+        assertEq(t.proof(target).length, depth + 1, "requested depth achieved");
+        Memory.Slice proofItem = t.proofRlp(target).asSlice();
 
         uint256 g0 = gasleft();
-        MerklePatriciaProof.verifyInclusion(root, target, nodes);
+        MptWalk.verifyInclusion(root, target, proofItem);
         gasUsed = g0 - gasleft();
     }
 }

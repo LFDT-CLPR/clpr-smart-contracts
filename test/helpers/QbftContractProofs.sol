@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {QbftValidators, ValidatorSet} from "@hiero-ledger/clpr/libraries/proof/qbft/QbftValidators.sol";
 import {QbftSyntheticProofs} from "@test/helpers/QbftSyntheticProofs.sol";
+import {MptWire} from "@test/helpers/MptWire.sol";
 
 /// @dev Proof-building utilities for QBFT Contract-mode tests, on top of {QbftSyntheticProofs}:
 ///      headers with an explicit (possibly empty) validator list, and synthetic MPT proofs for a
@@ -154,9 +155,9 @@ abstract contract QbftContractProofs is QbftSyntheticProofs {
         proofs = new bytes[](n);
         for (uint256 i = 0; i < n; i++) {
             bytes[] memory nodes = new bytes[](2);
-            nodes[0] = RLP.encode(branchNode);
-            nodes[1] = RLP.encode(leaves[i]);
-            proofs[i] = RLP.encode(nodes);
+            nodes[0] = branchNode;
+            nodes[1] = leaves[i];
+            proofs[i] = MptWire.wrap(nodes);
         }
     }
 
@@ -215,10 +216,10 @@ abstract contract QbftContractProofs is QbftSyntheticProofs {
         proofs = new bytes[](n);
         for (uint256 i = 0; i < n; i++) {
             bytes[] memory nodes = new bytes[](3);
-            nodes[0] = RLP.encode(rootNode);
-            nodes[1] = RLP.encode(childNodes[uint8(pathKeys[i][0]) >> 4]);
-            nodes[2] = RLP.encode(leaves[i]);
-            proofs[i] = RLP.encode(nodes);
+            nodes[0] = rootNode;
+            nodes[1] = childNodes[uint8(pathKeys[i][0]) >> 4];
+            nodes[2] = leaves[i];
+            proofs[i] = MptWire.wrap(nodes);
         }
     }
 

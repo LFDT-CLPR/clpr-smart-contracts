@@ -18,7 +18,10 @@ library ClprQbftQuorum {
     ///         signer as one bit of a single uint256 bitmask (bit i = member index i), so the
     ///         word width — 256 — is the structural limit. Besu itself imposes no cap, and QBFT's
     ///         all-to-all messaging keeps real validator sets far below this bound, so the bitmask
-    ///         is never the binding constraint in practice.
+    ///         is never the binding constraint in practice. It is deliberately NOT lowered to a
+    ///         gas-derived figure: contract mode re-proves the whole set per bundle, so the usable
+    ///         size is set by the target chain's block gas limit, not by this contract (see
+    ///         `qbft-contract-mode.md` §8 and `GAS_REPORT.md`).
     uint256 internal constant MAX_VALIDATORS = 256;
 
     /// @param set               A sorted, deduped validator set to check the seals against.

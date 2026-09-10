@@ -60,6 +60,35 @@ library QbftValidators {
         }
     }
 
+    /// @notice Sort `members` ascending IN PLACE and return the number of distinct members.
+    /// @dev For callers that reject duplicates anyway ({QbftContractValidatorSource-resolveSet}) this
+    ///      replaces {sortedDedup}: no compaction pass and no copy into a fresh array. Insertion sort
+    ///      in assembly; every caller caps the list at `ClprQbftQuorum.MAX_VALIDATORS` first.
+    function sortInPlace(address[] memory members) internal pure returns (uint256 distinct) {
+        assembly ("memory-safe") {
+            let n := mload(members)
+            let base := add(members, 0x20)
+            let end := add(base, shl(5, n))
+            for { let p := add(base, 0x20) } lt(p, end) { p := add(p, 0x20) } {
+                let v := mload(p)
+                let q := p
+                for {} gt(q, base) {} {
+                    let prev := mload(sub(q, 0x20))
+                    if iszero(gt(prev, v)) { break }
+                    mstore(q, prev)
+                    q := sub(q, 0x20)
+                }
+                mstore(q, v)
+            }
+            if n {
+                distinct := 1
+                for { let p := add(base, 0x20) } lt(p, end) { p := add(p, 0x20) } {
+                    distinct := add(distinct, iszero(eq(mload(p), mload(sub(p, 0x20)))))
+                }
+            }
+        }
+    }
+
     /// @notice True when two sorted, deduped member lists are equal.
     function equals(address[] memory a, address[] memory b) internal pure returns (bool) {
         if (a.length != b.length) return false;

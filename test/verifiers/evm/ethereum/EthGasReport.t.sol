@@ -5,6 +5,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {console} from "forge-std/Test.sol";
 import {EthBundleProofFactory} from "@test/verifiers/evm/ethereum/EthBundleProofFactory.sol";
 import {ClprDeployHelper} from "@test/helpers/ClprDeployHelper.sol";
+import {CalldataGas} from "@test/helpers/CalldataGas.sol";
 import {ConnectorRegistrar} from "@test/helpers/ConnectorRegistrar.sol";
 import {MinimalMockApplication} from "@test/mocks/MinimalMockApplication.sol";
 import {MinimalMockConnector} from "@test/mocks/MinimalMockConnector.sol";
@@ -414,12 +415,8 @@ abstract contract EthGasReportBase is EthBundleProofFactory {
         });
     }
 
-    /// @dev EIP-2028 intrinsic calldata cost: 4 gas per zero byte, 16 per non-zero. Charged before
-    ///      execution begins, so it is invisible to `gasleft()` deltas
-    function _calldataGas(bytes memory data) internal pure returns (uint256 g) {
-        for (uint256 i = 0; i < data.length; i++) {
-            g += data[i] == 0 ? 4 : 16;
-        }
+    function _calldataGas(bytes memory data) internal pure returns (uint256) {
+        return CalldataGas.eip2028(data);
     }
 }
 

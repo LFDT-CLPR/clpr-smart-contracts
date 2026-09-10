@@ -169,12 +169,13 @@ block `n` you need to submit the data from block n-1.
 
 | Item | Name | What it holds |
 |------|------|---------------|
-| 0 | trusted set | the full member list behind the anchor's `setCommitment` (sort + dedup, the hash must equal it) |
+| 0 | trusted set | the full member list behind the anchor's `setCommitment` (sort + dedup, the hash must equal it). An RLP list of 20-byte address items; anything else reverts `InvalidTrustedSet` |
 | 1 | hops | a list of rotation hops. Empty when no rotation occurred |
-| 2 | contract proof | the contract proof at the **current** block |
+| 2 | contract proof | the contract proof at the **current** block, as a byte string (see below) |
 
 A **hop** is one crossed rotation: `RLP([blockHeader, contractProof])`. The block header is the
-change block. The contract proof is taken under the state root of **that** header.
+change block. The contract proof is taken under the state root of **that** header, and is carried
+as a byte string (see below).
 
 ```mermaid
 flowchart TB
@@ -193,8 +194,14 @@ flowchart TB
 4. Each hop must use the change block itself. A later block is sealed by the new set and fails.
 5. If no change occurred, send an empty hop list. This is the normal case.
 
-**The contract proof.** Each hop, item 1 of field 1, and config field 7 use the same shape: an RLP
-list of 4 items.
+**The contract proof.** Each hop, item 2 of field 1, and config field 5 use the same shape: an RLP
+list of 4 items, **wrapped in an RLP byte string**. The verifier strips that envelope in place
+(`RlpCursor.payloadSlice`) and then reads the list. A bare list in its place reverts
+`RlpCursorUnexpectedList`.
+
+```
+contractProofItem = RLP(bytes(RLP([validatorContract, accountProof, arraySlot, storageProof])))
+```
 
 ```mermaid
 flowchart TB
@@ -227,7 +234,7 @@ The config proof is one RLP list of 8 fields. It creates the first trust anchor.
 | 2 | peer config nanos | the config time |
 | 3 | throttles | RLP list, 5 or 7 items |
 | 4 | trust anchor descriptor | `RLP([1, serviceAddress, codeHash, validatorContract, arraySlot])` — 5 items |
-| 5 | validator contract proof | required. The same 4-item shape as in the bundle |
+| 5 | validator contract proof | required. The same 4-item shape as in the bundle, wrapped in a byte string |
 | 6 | block header | a recent block whose state root proves the contract (field 5) |
 | 7 | epoch length | kept for shape. Contract mode does not use it |
 
@@ -267,3 +274,20 @@ admin, not from proofs. The channel is then not trustless.
 
 **Relay rule:** one channel keeps one mode for its full life. Never send a mode that differs
 from the anchor mode.
+
+## 8. Validator-set size: a gas ceiling, not a hard cap
+
+The verifier caps the set at `ClprQbftQuorum.MAX_VALIDATORS = 256`. That cap is structural (the
+signer bitmask is one 256-bit word), not a design limit on set size. There is deliberately no
+lower hard limit: a chain running with a higher block gas limit must not be locked out by a
+number chosen for a block, and the same rule applies elsewhere in the protocol (message counts
+are not hard-limited either).
+
+The binding constraint is gas. Every contract-mode bundle re-proves the **whole** array, so cost
+grows with the set (see `GAS_REPORT.md` §2), and a rotation proves it twice. Measured on a 30M
+block: a 52-validator steady-state bundle is ~2.5M and a 51 → 52 rotation ~4.8M in total, with
+calldata already over 40% of the execution cost. Extrapolating from the per-validator terms, a
+one-hop rotation crosses ~20M around 200 validators and approaches the block limit near the 256
+cap; two hops in one bundle roughly halve those numbers. Before deploying against a Besu network
+that expects a validator set in the low hundreds, measure the target block gas limit against
+`GAS_REPORT.md` - above that, contract mode is not usable on that chain.

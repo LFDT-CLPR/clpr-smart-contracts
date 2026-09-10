@@ -60,9 +60,8 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
         address service,
         bytes32 expectedCodeHash
     ) internal pure returns (bytes32 storageRoot) {
-        bytes memory accountRlp = ClprEvmStateProof.verifyAccount(accountProofItem, stateRoot, service);
         bytes32 codeHash;
-        (storageRoot, codeHash) = ClprEvmStateProof.decodeAccount(accountRlp);
+        (storageRoot, codeHash) = ClprEvmStateProof.verifyAccountFields(accountProofItem, stateRoot, service);
         if (expectedCodeHash != bytes32(0) && codeHash != expectedCodeHash) revert CodeHashMismatch();
     }
 
@@ -109,14 +108,14 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
         pure
         returns (ClprTypes.QueueMetadata memory metadata)
     {
-        Memory.Slice[] memory entries = RLP.readList(storageProofItem);
-        if (entries.length != 5 && entries.length != 6) revert InvalidStorageProofShape();
+        (bytes32[] memory labels, Memory.Slice[] memory proofs) = ClprEvmStateProof.indexEntries(storageProofItem);
+        if (labels.length != 5 && labels.length != 6) revert InvalidStorageProofShape();
 
         bytes32[] memory connValues =
-            ClprEvmStateProof.verifyProvenSlots(entries, storageRoot, _channelMetadataSlots(channelId));
+            ClprEvmStateProof.verifyIndexedSlots(labels, proofs, storageRoot, _channelMetadataSlots(channelId));
         metadata = _buildQueueMetadata(connValues);
 
-        if (entries.length == 6) {
+        if (labels.length == 6) {
             // A 6th entry proves the last sent message's running hash, which only exists once
             // nextMessageId > 0. Guard explicitly so `nextMessageId - 1` cannot underflow into an
             // opaque arithmetic panic; the proof is invalid either way.
@@ -124,10 +123,10 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
             bytes32[] memory msgSlots = new bytes32[](1);
             msgSlots[0] = _lastMessageRunningHashSlot(channelId, uint64(metadata.nextMessageId - 1));
 
-            // Call verifyProvenSlots to validate the message slot exists in the storage proof.
-            // Return value (the proven hash) is not needed — we only verify the proof is valid.
+            // Validate that the message slot is proven in the storage proof. The return value (the
+            // proven hash) is not needed — only that the proof holds.
             // slither-disable=unused-return
-            ClprEvmStateProof.verifyProvenSlots(entries, storageRoot, msgSlots);
+            ClprEvmStateProof.verifyIndexedSlots(labels, proofs, storageRoot, msgSlots);
         }
     }
 
@@ -204,8 +203,7 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
     ) internal pure returns (ClprTypes.ClprEndpointManifest memory manifest) {
         bytes32[] memory slots = new bytes32[](1);
         slots[0] = bytes32(ENDPOINT_MANIFEST_COMMITMENT_SLOT);
-        bytes32[] memory proven =
-            ClprEvmStateProof.verifyProvenSlots(RLP.readList(manifestStorageProofItem), storageRoot, slots);
+        bytes32[] memory proven = ClprEvmStateProof.verifyProvenSlots(manifestStorageProofItem, storageRoot, slots);
 
         if (keccak256(manifestProtobuf) != proven[0]) revert ManifestCommitmentMismatch();
 

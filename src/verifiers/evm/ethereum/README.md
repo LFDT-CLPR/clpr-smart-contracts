@@ -113,7 +113,7 @@ The bundle proof is a **top-level RLP list of 11 items**:
 | 5 | `nextCommittee` | window-advance committee `[uncompressedPubkeys[512], uncompressedAgg128]` (128 B EIP-2537 keys), or an empty RLP **string** if absent. The contract derives the compressed form on-chain to rebuild the SSZ root. |
 | 6 | `nextCommitteeBranch` | 6 SSZ siblings (gindex 87), or an empty RLP **list** if absent |
 | 7 | `accountProof` | MPT account proof against `executionStateRoot` |
-| 8 | `storageProof` | 4 × `[slotKey, proofNodes]` (ACK-only) or 5 (with outbound messages) against the account `storageRoot` |
+| 8 | `storageProof` | 5 × `[slotKey, proofNodes]` (ACK-only) or 6 (with outbound messages) against the account `storageRoot` |
 | 9 | `bundleContent` | protobuf `ClprBundleContent` |
 | 10 | `nonSignerProofs` | one 416-byte entry `uncompressedKey(128) ‖ 9 Merkle siblings (288)` per **clear** participation bit, in ascending index order; each is authenticated against the *selected* member's `committeeMerkleRoot`. Empty RLP list at full 512/512 participation. |
 
@@ -133,7 +133,7 @@ flowchart TD
     S2B["Step 2b · window selection\np = period(signatureSlot)\np == anchorPeriod → current\np == anchorPeriod+1 → next\nelse SignaturePeriodOutOfWindow"] --> S3
     S3["Step 3 · BLS (EIP-2537)\nparticipants by bits ≥ ⅔\nnon-signer keys (item 10) Merkle-\nauthenticated vs the SELECTED\nmember's committeeMerkleRoot\ndomain = f(forkVersion, gvr)\nsigningRoot = sha256(root ∥ domain)\naggregateVerifyComplement(...)"] --> S4
     S4["Step 4 · execution state root\nSSZ verifyProof(stateRoot, branch,\n  bodyRoot, gindex 802)"] --> S5
-    S5["Step 5 · account proof (MPT)\nverifyAccount(...) → storageRoot, codeHash\ncodeHash == EXPECTED_CODE_HASH?"] --> S6
+    S5["Step 5 · account proof (MPT)\nverifyAccountFields(...) → storageRoot, codeHash\ncodeHash == EXPECTED_CODE_HASH?"] --> S6
     S6["Step 6 · storage proof (MPT)\nverifyProvenSlots(channelId slots)\n→ QueueMetadata"] --> S7
     S7["Step 7 · bundle content\nprotobuf field 2 → messagePayloads[]"] --> S8
     S8["Step 8 · window advance (optional)\nif nextCommittee present:\n  SSZ verifyProof(committeeRoot,\n    branch, stateRoot, gindex 87)\n  p == anchorPeriod → widen (no move)\n  p == anchorPeriod+1 → shift"] --> OUT
@@ -197,7 +197,7 @@ The committee root is `sha256(merkleize(512 × sha256(pad64(pubkey48))) ∥ sha2
 Shared with QBFTVerifier via [ClprEvmStateProof](../../libraries/proof/evm/ClprEvmStateProof.sol).
 
 - **Account proof** — walks the state trie from `executionStateRoot` to `keccak256(EXPECTED_CONTRACT_ADDRESS)`, yielding `[nonce, balance, storageRoot, codeHash]`. `codeHash` is checked against the immutable.
-- **Storage proof** — `verifyProvenSlots` proves each entry against the **caller-derived** slot for `channelId` (from the trust anchor), exactly like QBFTVerifier. The slots are never read from the proof, so the proven values are cryptographically bound to *this* channel's `Channel` struct — a relay cannot reorder them or substitute another channel's slot. The proof carries 4 entries (ACK-only) or 5 (with outbound messages):
+- **Storage proof** — `verifyProvenSlots` proves each entry against the **caller-derived** slot for `channelId` (from the trust anchor), exactly like QBFTVerifier. The slots are never read from the proof, so the proven values are cryptographically bound to *this* channel's `Channel` struct — a relay cannot reorder them or substitute another channel's slot. The proof carries 5 entries (ACK-only) or 6 (with outbound messages), each a 2-tuple `[slotKey, proofNodes]`:
 
 | Slot index | Channel slot | Decoded field(s) |
 |---|---|---|
@@ -205,7 +205,8 @@ Shared with QBFTVerifier via [ClprEvmStateProof](../../libraries/proof/evm/ClprE
 | 1 | `+2` `acked(8)\|received(8)\|nextExpectedReply(8)` | `receivedMessageId = slot>>64` |
 | 2 | `+4` `sentRunningHash` | `sentRunningHash` |
 | 3 | `+5` `receivedRunningHash` | `receivedRunningHash` |
-| 4 | `_messageQueues[channelId][nextMessageId-1]` `runningHashAfterProcessing` | proven but not surfaced in metadata |
+| 4 | `+16` `endpointManifestVersion` | `endpointManifestVersion` |
+| 5 | `_messageQueues[channelId][nextMessageId-1]` `runningHashAfterProcessing` | proven but not surfaced in metadata |
 
 ---
 

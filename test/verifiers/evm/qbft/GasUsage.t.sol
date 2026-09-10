@@ -90,17 +90,11 @@ contract QBFTGasBenchmarkTest is QbftSyntheticProofs {
         uint256 gasSealVerify = g0 - gasleft();
         console.log("QBFT seal verify      :", gasSealVerify);
 
-        // ── Account proof verification ──────────────────────────────────────
+        // ── Account proof verification + field decode ───────────────────────
         g0 = gasleft();
-        bytes memory accountRlp = ClprEvmStateProof.verifyAccount(payload[2], stateRoot, clprService);
+        ClprEvmStateProof.verifyAccountFields(payload[2], stateRoot, clprService);
         uint256 gasAccountProof = g0 - gasleft();
         console.log("Account proof verify  :", gasAccountProof);
-
-        // ── Account RLP decode ──────────────────────────────────────────────
-        g0 = gasleft();
-        ClprEvmStateProof.decodeAccount(accountRlp);
-        uint256 gasAccountDecode = g0 - gasleft();
-        console.log("Account decode        :", gasAccountDecode);
 
         // Note: Storage proof verification skipped due to stale fixture format.
         // The fixture bundlePayload.hex uses channelId=0 but storage slots aren't
@@ -119,7 +113,7 @@ contract QBFTGasBenchmarkTest is QbftSyntheticProofs {
         console.log("Protobuf decode       :", gasProtobuf);
 
         uint256 gasTotal = gasTrustAnchor + gasChannelContext + gasRlpPayload + gasEpochHeaders + gasBlockHeader
-            + gasSealVerify + gasAccountProof + gasAccountDecode + gasBundleRead + gasProtobuf;
+            + gasSealVerify + gasAccountProof + gasBundleRead + gasProtobuf;
         console.log("TOTAL                 :", gasTotal);
     }
 

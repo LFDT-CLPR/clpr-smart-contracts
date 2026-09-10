@@ -243,4 +243,4 @@ timing a dedicated transition transaction at the boundary.
 | `test/verifiers/evm/ethereum/EthGasReport.t.sol` | The measurement suite (20 tests) — real service, real verifier, real bundles. `EthGasReportTest` measures against a channel on the attested-period window; `EthGasReportShiftTest` opens the channel a period behind for the `submitBundle` shift. |
 | `test/verifiers/evm/ethereum/EthBundleProofFactory.sol` | Builds complete, self-consistent bundle proofs at a chosen depth/density/participation, with `Rotation.None`, `.Widen` or `.Shift`. |
 | `test/helpers/EvmMptBuilder.sol` | Real hexary Merkle-Patricia trie builder: inclusion and exclusion proofs, with depth and branch-density padding. |
-| `test/libraries/EvmMptBuilder.t.sol` | Validates the builder against the **production** walker (`MerklePatriciaProof`), not a test-side mirror. |
+| `test/libraries/EvmMptBuilder.t.sol` | Validates the builder against the **production** walker (`MerklePatriciaProof`, through the `test/helpers/MptWalk.sol` copy-out wrapper), not a test-side mirror. |

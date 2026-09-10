@@ -729,7 +729,7 @@ contract QBFTVerifierTest is QbftSyntheticProofs {
     //   verifyBundle — synthetic MPT proof paths
     // ════════════════════════════════════════════════════════════════════════
 
-    /// @dev verifyAccount succeeds but returns a codeHash that differs from the trust-anchor
+    /// @dev The account proof verifies but yields a codeHash that differs from the trust-anchor
     ///      expectedCodeHash → CodeHashMismatch.
     function test_revertWhen_CodeHashMismatch() public {
         QBFTVerifier v1 = _qbftVerifier(1);
@@ -750,25 +750,23 @@ contract QBFTVerifierTest is QbftSyntheticProofs {
         v1.verifyBundle(RLP.encode(top), _syntheticTrustAnchor(), _syntheticChannelContext());
     }
 
-    /// @dev verifyAccount succeeds and codeHash matches, but the storage list has 3 entries
-    ///      (neither 4 nor 5) → InvalidStorageProofShape.
+    /// @dev The account proof verifies and codeHash matches, but the storage list has 3 entries
+    ///      (neither 5 nor 6) → InvalidStorageProofShape. The entries are well-formed: entry shape
+    ///      is validated while the list is indexed, so a malformed entry would revert
+    ///      InvalidStorageEntry before the count is checked.
     function test_revertWhen_StorageCountWrong() public {
         QBFTVerifier v1 = _qbftVerifier(1);
+        (bytes32 storageRoot, bytes memory storageProofRlp) = _buildZeroStorageProof(3);
         (bytes32 stateRoot, bytes memory accountProofRlp) =
-            _buildSyntheticAccountProof(SERVICE_ADDR, bytes32(0), SERVICE_CODE_HASH);
+            _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
 
         bytes memory header = _buildSealedCurrentHeader(1, stateRoot, VALIDATOR_PK);
-
-        bytes[] memory storageItems = new bytes[](3);
-        storageItems[0] = hex"80";
-        storageItems[1] = hex"80";
-        storageItems[2] = hex"80";
 
         bytes[] memory top = new bytes[](5);
         top[0] = header;
         top[1] = hex"c0";
         top[2] = accountProofRlp;
-        top[3] = RLP.encode(storageItems);
+        top[3] = storageProofRlp;
         top[4] = RLP.encode(new bytes(0));
 
         vm.expectRevert(ClprEvmBundleVerifier.InvalidStorageProofShape.selector);
@@ -788,7 +786,7 @@ contract QBFTVerifierTest is QbftSyntheticProofs {
         bytes[] memory epochList = new bytes[](1);
         epochList[0] = epochHeader;
 
-        // Synthetic storage proof: 4 channel metadata slots; channelId comes from ChannelContext.
+        // Synthetic storage proof: 5 channel metadata slots; channelId comes from ChannelContext.
         (bytes32 storageRoot, bytes memory storageProofRlp) = _buildChannelStorageProof(SYNTHETIC_CHANNEL_ID);
 
         // Synthetic account proof for SERVICE_ADDR with SERVICE_CODE_HASH and the storage root.

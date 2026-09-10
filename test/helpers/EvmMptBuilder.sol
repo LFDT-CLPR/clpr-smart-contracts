@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
+import {MptWire} from "@test/helpers/MptWire.sol";
 
 /// @title EvmMptBuilder
 /// @dev Why this exists. {ClprEvmStateProof.verifyProvenSlots} verifies each storage-proof entry
@@ -162,12 +163,7 @@ contract EvmMptBuilder {
     /// @notice {proof} in the wire shape the verifiers consume: an RLP list whose items are
     ///         byte strings wrapping each node's own RLP.
     function proofRlp(bytes32 keyHash) public view returns (bytes memory) {
-        bytes[] memory nodes = proof(keyHash);
-        bytes[] memory wrapped = new bytes[](nodes.length);
-        for (uint256 i = 0; i < nodes.length; i++) {
-            wrapped[i] = RLP.encode(nodes[i]);
-        }
-        return RLP.encode(wrapped);
+        return MptWire.wrap(proof(keyHash));
     }
 
     /// @notice Proof depth for `keyHash`

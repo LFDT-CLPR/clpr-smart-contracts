@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
+import {QbftValidators} from "@hiero-ledger/clpr/libraries/proof/qbft/QbftValidators.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {QbftContractProofs} from "@test/helpers/QbftContractProofs.sol";
 
@@ -17,21 +18,6 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         bytes svcAccountProof;
         bytes channelProofRlp;
         bytes currentVcProof;
-    }
-
-    /// @dev A 3-member set built from key seeds (each member is vm.addr(keccak256(seed))).
-    function _set3(string memory s0, string memory s1, string memory s2) internal pure returns (address[] memory s) {
-        s = new address[](3);
-        s[0] = vm.addr(uint256(keccak256(bytes(s0))));
-        s[1] = vm.addr(uint256(keccak256(bytes(s1))));
-        s[2] = vm.addr(uint256(keccak256(bytes(s2))));
-    }
-
-    /// @dev The two sealer private keys for a 2-of-3 quorum, from the same seeds as _set3.
-    function _pks2(string memory s0, string memory s1) internal pure returns (uint256[] memory p) {
-        p = new uint256[](2);
-        p[0] = uint256(keccak256(bytes(s0)));
-        p[1] = uint256(keccak256(bytes(s1)));
     }
 
     /// @dev An `n`-member set from one seed: member i is vm.addr(keccak256(seed, i)). A larger `n`
@@ -77,8 +63,19 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         pure
         returns (bytes memory)
     {
-        (bytes32 hopStateRoot,, bytes memory hopVcProof) = _validatorContractProof(VALIDATOR_CONTRACT, nextSet);
-        return _hop(_buildListedSealedHeader(blockNo, hopStateRoot, new address[](0), sealers), hopVcProof);
+        (bytes memory hopHeader,,, bytes memory hopVcProof) = _buildHopParts(nextSet, sealers, blockNo);
+        return _hop(hopHeader, hopVcProof);
+    }
+
+    /// @dev {_buildHop}'s intermediates, for suites that measure the hop's components separately.
+    ///      Kept as the single construction point so the hop shape cannot drift between suites.
+    function _buildHopParts(address[] memory nextSet, uint256[] memory sealers, uint64 blockNo)
+        internal
+        pure
+        returns (bytes memory hopHeader, bytes32 hopStateRoot, bytes32 arraySlot, bytes memory hopVcProof)
+    {
+        (hopStateRoot, arraySlot, hopVcProof) = _validatorContractProof(VALIDATOR_CONTRACT, nextSet);
+        hopHeader = _buildListedSealedHeader(blockNo, hopStateRoot, new address[](0), sealers);
     }
 
     /// @dev The current block at `blockNo`: header sealed by `sealers`, two-account state (service +
@@ -143,5 +140,45 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         items[6] = header;
         items[7] = RLP.encode(uint256(30000));
         return RLP.encode(items);
+    }
+
+    // ── Shared gas/benchmark scenarios ────────────────────────────────────────
+    // One construction point for the bundles both the baseline suite (ContractModeGasUsage) and
+    // the report suite (QbftGasReport) measure, so the two cannot silently diverge.
+
+    /// @dev A steady-state bundle over an `n`-member set derived from `seed`, sealed by quorum(n).
+    function _steadyScenario(string memory seed, uint256 n)
+        internal
+        pure
+        returns (bytes memory proof, bytes memory anchor)
+    {
+        address[] memory set = _setN(seed, n);
+        CurrentBlock memory cb = _buildCurrentBlock(set, _pksN(seed, QbftValidators.quorum(n)), 100);
+        proof = _topProof(cb, set, new bytes[](0));
+        anchor = _contractAnchor(set, VALIDATOR_CONTRACT, cb.arraySlot, 0);
+    }
+
+    /// @dev A one-hop rotation bundle `n -> n+1`: change block 300, current block 301.
+    function _rotationScenario(string memory seed, uint256 n)
+        internal
+        pure
+        returns (bytes memory proof, bytes memory anchor)
+    {
+        address[] memory oldSet = _setN(seed, n);
+        address[] memory newSet = _setN(seed, n + 1);
+        bytes[] memory hops = new bytes[](1);
+        hops[0] = _buildHop(newSet, _pksN(seed, QbftValidators.quorum(n)), 300);
+        CurrentBlock memory cb = _buildCurrentBlock(newSet, _pksN(seed, QbftValidators.quorum(n + 1)), 301);
+        proof = _topProof(cb, oldSet, hops);
+        anchor = _contractAnchor(oldSet, VALIDATOR_CONTRACT, cb.arraySlot, 0);
+    }
+
+    /// @dev An 8-field config proof over a 3-member set derived from `seed`, 2 seals at block 500.
+    function _configScenario(string memory seed) internal pure returns (bytes memory configProof) {
+        address[] memory vals = _setN(seed, 3);
+        uint256[] memory pks = _pksN(seed, 2);
+        (bytes32 stateRoot, bytes32 arraySlot, bytes memory vcProof) = _validatorContractProof(VALIDATOR_CONTRACT, vals);
+        bytes memory header = _buildMultiSealedHeaderAtBlock(500, stateRoot, 0, pks[0], pks[1]);
+        configProof = _buildContractConfigProof(arraySlot, vcProof, header);
     }
 }
