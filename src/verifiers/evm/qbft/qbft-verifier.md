@@ -4,6 +4,15 @@
 **Scope:** Reference implementation of `IClprVerifier` for bundles originating from a Besu QBFT chain, using RLP-encoded block headers with QBFT committed seals plus Merkle-Patricia state and storage proofs.
 **Anchors to:** `IClprVerifier` interface, CLPR §3.1, `hiero-verifier.md` (sibling implementation).
 
+> **Header mode vs. contract mode.** This document specifies **header mode**, where the validator
+> set lives in each block header's `extraData`. Besu QBFT can instead keep the set in an on-chain
+> validator contract — **contract mode** — specified in [`qbft-contract-mode.md`](qbft-contract-mode.md).
+> One channel keeps one mode for its whole life. `QBFTVerifier` inspects the stored trust anchor and
+> config proof and routes contract-mode inputs to the embedded `QbftContractModeVerifier`; the two
+> anchor encodings are currently distinguished by shape (length and first word). Keep any change to
+> the header-mode anchor layout below disjoint from the contract-mode anchor
+> (`abi.encode(uint8 mode=1, …)`, 192 bytes) so the router stays unambiguous.
+
 ## Overview
 
 QBFTVerifier implements `IClprVerifier` for bundles whose source ledger is a Besu QBFT chain. Each call to `verifyBundle` authenticates:

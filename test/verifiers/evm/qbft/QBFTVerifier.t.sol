@@ -149,11 +149,20 @@ contract QBFTVerifierTest is QbftSyntheticProofs {
         verifier.verifyBundle(payload, _syntheticTrustAnchor(), _syntheticChannelContext());
     }
 
+    /// @dev Empty extraData must surface the library's structural error, not the generic
+    ///      RLPInvalidEncoding that RLP.decodeList raises on empty input.
+    function test_revertWhen_ExtraDataEmpty() public {
+        bytes memory header = _buildHeader(bytes32(0), new bytes(0));
+        bytes memory payload = _buildPayloadWithHeader(header);
+        vm.expectRevert(ClprQbftSeal.InvalidExtraData.selector);
+        verifier.verifyBundle(payload, _syntheticTrustAnchor(), _syntheticChannelContext());
+    }
+
     function test_revertWhen_NoCommittedSeal() public {
         bytes memory innerExtra = _buildExtraData(new bytes[](0), 0);
         bytes memory header = _buildHeader(bytes32(0), innerExtra);
         bytes memory payload = _buildPayloadWithHeader(header);
-        vm.expectRevert(abi.encodeWithSelector(ClprQbftSeal.WrongSealCount.selector, uint256(0)));
+        vm.expectRevert(abi.encodeWithSelector(ClprQbftSeal.WrongSealCount.selector, uint256(0), uint256(2)));
         verifier.verifyBundle(payload, _syntheticTrustAnchor(), _syntheticChannelContext());
     }
 
@@ -164,7 +173,7 @@ contract QBFTVerifierTest is QbftSyntheticProofs {
         bytes memory header = _buildHeader(bytes32(0), innerExtra);
         bytes memory payload = _buildPayloadWithHeader(header);
         // MIN_COMMITTED_SEALS == 2; 1 < 2 → WrongSealCount
-        vm.expectRevert(abi.encodeWithSelector(ClprQbftSeal.WrongSealCount.selector, uint256(1)));
+        vm.expectRevert(abi.encodeWithSelector(ClprQbftSeal.WrongSealCount.selector, uint256(1), uint256(2)));
         verifier.verifyBundle(payload, _syntheticTrustAnchor(), _syntheticChannelContext());
     }
 

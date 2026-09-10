@@ -5,6 +5,7 @@ import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/Clp
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprQbftSeal} from "@hiero-ledger/clpr/libraries/proof/qbft/ClprQbftSeal.sol";
+import {QbftContractModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftContractModeVerifier.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
@@ -65,9 +66,12 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
     /// @dev Minimum number of committed seals required.
     uint8 public immutable MIN_COMMITTED_SEALS;
 
+    IClprVerifier public immutable CONTRACT_MODE;
+
     constructor(uint8 _sealSignatures) {
         if (_sealSignatures == 0) revert InvalidNumberOfSealSignatures();
         MIN_COMMITTED_SEALS = _sealSignatures;
+        CONTRACT_MODE = new QbftContractModeVerifier();
     }
 
     /// @inheritdoc IClprVerifier
@@ -83,6 +87,10 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
             ClprTypes.ClprEndpointManifest memory newEndpointManifest
         )
     {
+        if (_isContractModeAnchor(trustAnchor)) {
+            return CONTRACT_MODE.verifyBundle(proofBytes, trustAnchor, channelContext);
+        }
+
         (address validator, bytes32 expectedCodeHash, uint64 epochLength, uint64 trustAnchorEpoch) =
             _decodeTrustAnchor(trustAnchor);
         ClprTypes.ChannelContext memory ctx = ClprTypes.decodeChannelContext(channelContext);
@@ -196,6 +204,9 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
         )
     {
         if (configProofBytes.length == 0) revert InvalidPayloadShape();
+        if (_isContractModeConfig(configProofBytes)) {
+            return CONTRACT_MODE.verifyConfig(configProofBytes, channelId, endpointManifestProofBytes);
+        }
 
         Memory.Slice[] memory proof = RLP.decodeList(configProofBytes);
         if (proof.length != 10) revert InvalidProofPayloadShape();
@@ -295,6 +306,16 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
         Memory.Slice[] memory fields = RLP.decodeList(rlpBytes);
         if (fields.length != 3) revert InvalidTrustAnchorFields();
         return abi.encode(RLP.readAddress(fields[0]), RLP.readBytes32(fields[2]), epochLength, epochNumber);
+    }
+
+    // FIXME: format should be shared for both modes, remove this temporary helper when header mode works correctly.
+    function _isContractModeAnchor(bytes calldata trustAnchor) private pure returns (bool) {
+        return trustAnchor.length == 192 && uint256(bytes32(trustAnchor[:32])) == 1;
+    }
+
+    // FIXME: format should be shared for both modes, remove this temporary helper when header mode works correctly.
+    function _isContractModeConfig(bytes calldata configProofBytes) private pure returns (bool) {
+        return RLP.decodeList(configProofBytes).length == 8;
     }
 
     function _decodeTrustAnchor(bytes calldata trustAnchor)
