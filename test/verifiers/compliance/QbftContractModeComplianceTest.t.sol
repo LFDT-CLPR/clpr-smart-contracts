@@ -178,7 +178,15 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
 
     function _validTrustAnchor() private pure returns (bytes memory) {
         (bytes32 arraySlot,,) = _validatorStorageProof(_cmSet());
-        return abi.encode(uint8(1), _commit(_cmSet()), SERVICE_CODE_HASH, VALIDATOR_CONTRACT, arraySlot, uint64(0));
+        return abi.encode(
+            uint8(1),
+            _commit(_cmSet()),
+            SERVICE_CODE_HASH,
+            VALIDATOR_CONTRACT,
+            arraySlot,
+            uint64(0),
+            VALIDATOR_CODE_HASH
+        );
     }
 
     function _validChannelContext() private pure returns (bytes memory) {

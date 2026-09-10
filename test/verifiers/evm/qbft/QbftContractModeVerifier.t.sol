@@ -8,6 +8,7 @@ import {ClprQbftQuorum} from "@hiero-ledger/clpr/libraries/proof/qbft/ClprQbftQu
 import {QbftContractValidatorSource} from "@hiero-ledger/clpr/libraries/proof/qbft/QbftContractValidatorSource.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
+import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 import {QbftContractProofs} from "@test/helpers/QbftContractProofs.sol";
 import {ContractSourceHarness, OpenCommitmentHarness} from "@test/helpers/QbftContractHarness.sol";
 
@@ -29,6 +30,16 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         bytes currentVcProof;
     }
 
+    struct DecodedAnchor {
+        uint8 mode;
+        bytes32 setCommitment;
+        bytes32 codeHash;
+        address validatorContract;
+        bytes32 arraySlot;
+        uint64 anchorBlockNumber;
+        bytes32 validatorCodeHash;
+    }
+
     function setUp() public {
         validatorAddr = vm.addr(VALIDATOR_PK);
         verifier = _qbftVerifier(2);
@@ -36,6 +47,23 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
 
     function _qbftVerifier(uint8 n) private returns (QBFTVerifier) {
         return QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier", abi.encode(n)));
+    }
+
+    function _decodeAnchor(bytes memory anchor) internal pure returns (DecodedAnchor memory a) {
+        assertEq(anchor.length, 224, "contract-mode anchor is 7 words");
+        a.mode = uint8(uint256(_word(anchor, 0)));
+        a.setCommitment = _word(anchor, 1);
+        a.codeHash = _word(anchor, 2);
+        a.validatorContract = address(uint160(uint256(_word(anchor, 3))));
+        a.arraySlot = _word(anchor, 4);
+        a.anchorBlockNumber = uint64(uint256(_word(anchor, 5)));
+        a.validatorCodeHash = _word(anchor, 6);
+    }
+
+    function _word(bytes memory b, uint256 i) private pure returns (bytes32 w) {
+        assembly ("memory-safe") {
+            w := mload(add(add(b, 0x20), shl(5, i)))
+        }
     }
 
     // ── Shared builders ──────────────────────────────────────────────────────
@@ -51,13 +79,16 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     }
 
     /// @dev A Contract-mode trust anchor:
-    ///      abi.encode(mode=1, setCommitment, codeHash, validatorContract, arraySlot, anchorBlockNumber).
+    ///      abi.encode(mode=1, setCommitment, codeHash, validatorContract, arraySlot, anchorBlockNumber,
+    ///      validatorCodeHash).
     function _contractAnchor(address[] memory validators, address validatorContract, bytes32 arraySlot, uint64 blockNo)
         internal
         pure
         returns (bytes memory)
     {
-        return abi.encode(uint8(1), _commit(validators), SERVICE_CODE_HASH, validatorContract, arraySlot, blockNo);
+        return abi.encode(
+            uint8(1), _commit(validators), SERVICE_CODE_HASH, validatorContract, arraySlot, blockNo, VALIDATOR_CODE_HASH
+        );
     }
 
     /// @dev Build an 8-field Contract-mode config proof: descriptor [mode=1, service, codeHash,
@@ -150,6 +181,29 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         return RLP.encode(top);
     }
 
+    function _withStorageEntries(bytes memory vcProof, uint256 count) private pure returns (bytes memory) {
+        Memory.Slice[] memory items = RLP.decodeList(vcProof);
+        Memory.Slice[] memory entries = RLP.readList(items[3]);
+        bytes memory nodes = Memory.toBytes(RLP.readList(entries[0])[1]);
+        bytes[] memory all = new bytes[](count);
+        for (uint256 i = 0; i < count; i++) {
+            if (i < entries.length) {
+                all[i] = Memory.toBytes(entries[i]);
+            } else {
+                bytes[] memory pad = new bytes[](2);
+                pad[0] = RLP.encode(bytes32(uint256(0xDEAD0000) + i));
+                pad[1] = nodes;
+                all[i] = RLP.encode(pad);
+            }
+        }
+        bytes[] memory out = new bytes[](4);
+        out[0] = Memory.toBytes(items[0]);
+        out[1] = Memory.toBytes(items[1]);
+        out[2] = Memory.toBytes(items[2]);
+        out[3] = RLP.encode(all);
+        return RLP.encode(out);
+    }
+
     function test_revertWhen_SealSignatureIsZero() public {
         bytes memory code = abi.encodePacked(vm.getCode("QBFTVerifier.sol:QBFTVerifier"), abi.encode(uint8(0)));
         vm.expectRevert(QBFTVerifier.InvalidNumberOfSealSignatures.selector);
@@ -174,9 +228,17 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
 
-    /// @dev A 6-word anchor whose mode word is not 1 is not forwarded. The legacy path rejects it.
+    /// @dev A 6-word anchor (the pre-pin contract shape) is not forwarded. The legacy path rejects it.
+    function test_revertWhen_SixWordContractAnchor_staysOnLegacyPath() public {
+        bytes memory anchor = abi.encode(uint8(1), bytes32(0), SERVICE_CODE_HASH, address(0), bytes32(0), uint64(0));
+        vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
+        verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
+    }
+
+    /// @dev A 7-word anchor whose mode word is not 1 is not forwarded. The legacy path rejects it.
     function test_revertWhen_UnknownModeAnchor_staysOnLegacyPath() public {
-        bytes memory anchor = abi.encode(uint8(2), bytes32(0), SERVICE_CODE_HASH, address(0), bytes32(0), uint64(0));
+        bytes memory anchor =
+            abi.encode(uint8(2), bytes32(0), SERVICE_CODE_HASH, address(0), bytes32(0), uint64(0), VALIDATOR_CODE_HASH);
         vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
@@ -249,6 +311,24 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         oc.open(RLP.encode(items), bytes32(0));
     }
 
+    function test_revertWhen_WrongValidatorCodeHash() public {
+        address[] memory set = new address[](1);
+        set[0] = validatorAddr;
+        uint256[] memory pks = new uint256[](1);
+        pks[0] = VALIDATOR_PK;
+        CurrentBlock memory cb = _buildCurrentBlock(VALIDATOR_CONTRACT, set, pks, 10);
+        bytes32 otherCodeHash = bytes32(uint256(0xBAD));
+        bytes memory anchor = abi.encode(
+            uint8(1), _commit(set), SERVICE_CODE_HASH, VALIDATOR_CONTRACT, cb.arraySlot, uint64(0), otherCodeHash
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                QbftContractModeVerifier.WrongValidatorCodeHash.selector, VALIDATOR_CODE_HASH, otherCodeHash
+            )
+        );
+        verifier.verifyBundle(_topProof(cb, set, new bytes[](0)), anchor, _syntheticChannelContext());
+    }
+
     function test_revertWhen_ValidatorSetTooLarge() public {
         address[] memory bigSet = new address[](257);
         for (uint256 i = 0; i < 257; i++) {
@@ -316,6 +396,26 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         cs.resolve(proof, stateRoot, address(0x1234), arraySlot);
     }
 
+    /// @dev 257 entries (length slot + 256 elements) is the most a proof can need; 258 is rejected
+    ///      before any slot is looked up.
+    function test_contractSource_tooManyStorageEntries_reverts() public {
+        ContractSourceHarness cs = new ContractSourceHarness();
+        address[] memory vals = new address[](3);
+        vals[0] = address(0xAAA1);
+        vals[1] = address(0x0002);
+        vals[2] = address(0xBBB3);
+        (bytes32 stateRoot, bytes32 arraySlot, bytes memory proof) = _validatorContractProof(address(0x1234), vals);
+        uint256 max = ClprQbftQuorum.MAX_VALIDATORS + 1;
+        assertEq(max, 257);
+
+        bytes memory atMax = _withStorageEntries(proof, max);
+        assertEq(cs.resolve(atMax, stateRoot, address(0x1234), arraySlot).length, 3);
+
+        bytes memory overMax = _withStorageEntries(proof, max + 1);
+        vm.expectRevert(abi.encodeWithSelector(QbftContractValidatorSource.TooManyStorageEntries.selector, max + 1));
+        cs.resolve(overMax, stateRoot, address(0x1234), arraySlot);
+    }
+
     function test_contractSource_wrongProofShape_reverts() public {
         ContractSourceHarness cs = new ContractSourceHarness();
         bytes[] memory items = new bytes[](3);
@@ -378,13 +478,15 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         (,,,,, bytes memory initialTrustAnchor, bytes memory initialTrustAnchorId,) =
             v.verifyConfig(configProof, SYNTHETIC_CHANNEL_ID, "");
 
-        (uint8 mode, bytes32 anchorCommitment,, address vc, bytes32 slot, uint64 anchorBlock) =
-            abi.decode(initialTrustAnchor, (uint8, bytes32, bytes32, address, bytes32, uint64));
-        assertEq(mode, 1, "contract mode");
-        assertEq(anchorCommitment, _commit(vals), "commitment of the proven set");
-        assertEq(vc, validatorContract);
-        assertEq(slot, arraySlot);
-        assertEq(anchorBlock, 500, "anchor pinned to the config block");
+        DecodedAnchor memory a = _decodeAnchor(initialTrustAnchor);
+        assertEq(a.mode, 1, "contract mode");
+        assertEq(a.setCommitment, _commit(vals), "commitment of the proven set");
+        assertEq(a.validatorContract, validatorContract);
+        assertEq(a.arraySlot, arraySlot);
+        assertEq(a.anchorBlockNumber, 500, "anchor pinned to the config block");
+        assertEq(
+            a.validatorCodeHash, VALIDATOR_CODE_HASH, "validator contract code hash pinned from its proven account"
+        );
         assertEq(initialTrustAnchorId, abi.encodePacked(uint64(500)), "anchor id is the block number");
     }
 
@@ -458,11 +560,11 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         (,, bytes memory newTrustAnchor, bytes memory newTrustAnchorId,) =
             v.verifyBundle(RLP.encode(top), anchor, _syntheticChannelContext());
 
-        (uint8 mode, bytes32 rotatedCommitment,,,, uint64 anchorBlock) =
-            abi.decode(newTrustAnchor, (uint8, bytes32, bytes32, address, bytes32, uint64));
-        assertEq(mode, 1, "contract mode");
-        assertEq(rotatedCommitment, _commit(newSet), "commitment of the harvested set");
-        assertEq(anchorBlock, 777, "anchor pinned to the proven block");
+        DecodedAnchor memory a = _decodeAnchor(newTrustAnchor);
+        assertEq(a.mode, 1, "contract mode");
+        assertEq(a.setCommitment, _commit(newSet), "commitment of the harvested set");
+        assertEq(a.anchorBlockNumber, 777, "anchor pinned to the proven block");
+        assertEq(a.validatorCodeHash, VALIDATOR_CODE_HASH, "validator code hash carried through the rotation");
         assertEq(newTrustAnchorId, abi.encodePacked(uint64(777)), "rotation id is block number");
     }
 
@@ -481,10 +583,9 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         (,, bytes memory newTrustAnchor, bytes memory newTrustAnchorId,) =
             v.verifyBundle(_topProof(cb, oldSet, hops), anchor, _syntheticChannelContext());
 
-        (, bytes32 rotatedCommitment,,,, uint64 anchorBlock) =
-            abi.decode(newTrustAnchor, (uint8, bytes32, bytes32, address, bytes32, uint64));
-        assertEq(rotatedCommitment, _commit(midSet), "commitment of the harvested set");
-        assertEq(anchorBlock, 301);
+        DecodedAnchor memory a = _decodeAnchor(newTrustAnchor);
+        assertEq(a.setCommitment, _commit(midSet), "commitment of the harvested set");
+        assertEq(a.anchorBlockNumber, 301);
         assertEq(newTrustAnchorId, abi.encodePacked(uint64(301)));
     }
 
@@ -508,11 +609,10 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         );
 
         assertGt(newTrustAnchor.length, 0, "floor must advance even without a net rotation");
-        (uint8 mode, bytes32 commitment,,,, uint64 anchorBlock) =
-            abi.decode(newTrustAnchor, (uint8, bytes32, bytes32, address, bytes32, uint64));
-        assertEq(mode, 1);
-        assertEq(commitment, _commit(setA), "commitment stays the trusted set A");
-        assertEq(anchorBlock, 400, "anchor floor advanced to the current block");
+        DecodedAnchor memory a = _decodeAnchor(newTrustAnchor);
+        assertEq(a.mode, 1);
+        assertEq(a.setCommitment, _commit(setA), "commitment stays the trusted set A");
+        assertEq(a.anchorBlockNumber, 400, "anchor floor advanced to the current block");
         assertEq(newTrustAnchorId, abi.encodePacked(uint64(400)));
 
         // The advanced anchor (floor 400) must now reject a replay of hop1 @200.

@@ -39,12 +39,12 @@ ACK-only service overhead (107,585), the EIP-2028 calldata gas, and the 21,000 t
 | Scenario | Execution (verify) | Service overhead | Calldata | Tx base | **Total** |
 |---|---|---|---|---|---|
 | Header mode, steady state (1 validator) | 111,841 | 107,585 | 12,704 | 21,000 | **253,130** |
-| Contract mode, steady, 3 validators | 217,402 | 107,585 | 34,648 | 21,000 | **380,635** |
-| Contract mode, steady, 10 validators | 365,558 | 107,585 | 109,852 | 21,000 | **603,995** |
-| Contract mode, steady, 25 validators | 863,878 | 107,585 | 346,836 | 21,000 | **1,339,299** |
-| Contract mode, steady, 52 validators | 1,685,370 | 107,585 | 730,920 | 21,000 | **2,544,875** |
-| Contract mode, rotation 10 → 11 (1 hop) | 689,398 | 107,585 | 232,456 | 21,000 | **1,050,439** |
-| Contract mode, rotation 51 → 52 (1 hop) | 3,203,410 | 107,585 | 1,432,904 | 21,000 | **4,764,899** |
+| Contract mode, steady, 3 validators | 217,610 | 107,585 | 34,788 | 21,000 | **380,983** |
+| Contract mode, steady, 10 validators | 365,767 | 107,585 | 109,992 | 21,000 | **604,344** |
+| Contract mode, steady, 25 validators | 864,092 | 107,585 | 346,976 | 21,000 | **1,339,653** |
+| Contract mode, steady, 52 validators | 1,685,593 | 107,585 | 731,060 | 21,000 | **2,545,238** |
+| Contract mode, rotation 10 → 11 (1 hop) | 689,857 | 107,585 | 232,596 | 21,000 | **1,051,038** |
+| Contract mode, rotation 51 → 52 (1 hop) | 3,203,931 | 107,585 | 1,433,044 | 21,000 | **4,765,560** |
 
 The worst case above (a 51 → 52 rotation, ~4.8M) is roughly a sixth of a 30M block. Each additional
 hop crossed in one bundle adds approximately one hop-quorum + one hop-resolveSet (§3) plus its share
@@ -59,7 +59,7 @@ those sizes (they exhaust test memory above ~60 validators), so treat these as e
 on the target chain's block gas limit.
 
 `verifyConfig` (contract mode, 3 validators, channel setup — runs once per channel, via
-`completeChannel` rather than `submitBundle`): **184,199** execution + 23,204 calldata gas over a
+`completeChannel` rather than `submitBundle`): **184,245** execution + 23,204 calldata gas over a
 1,958-byte config proof.
 
 ## 2. Why contract mode scales with the validator-set size
@@ -71,10 +71,10 @@ detection is exactly this harvest; there is no cheaper "nothing changed" path.
 
 | Validators | Execution | Δ vs previous row | Proof bytes | Calldata gas |
 |---|---|---|---|---|
-| 3 | 217,402 | — | 2,770 B | 34,648 |
-| 10 | 365,558 | +21.2k/validator | 7,471 B | 109,852 |
-| 25 | 863,878 | +33.2k/validator | 22,335 B | 346,836 |
-| 52 | 1,685,370 | +30.4k/validator | 46,461 B | 730,920 |
+| 3 | 217,610 | — | 2,802 B | 34,788 |
+| 10 | 365,767 | +21.2k/validator | 7,503 B | 109,992 |
+| 25 | 864,092 | +33.2k/validator | 22,367 B | 346,976 |
+| 52 | 1,685,593 | +30.4k/validator | 46,493 B | 731,060 |
 
 The per-validator marginal cost grows with the set because each validator adds (a) one storage-slot
 MPT walk in `resolveSet`, (b) its share of quorum `ecrecover`s (⌈2N/3⌉ seals per verified header),
@@ -96,9 +96,9 @@ channel/service-account proofs sit in the remainder.
 | **Hop `resolveSet` (52 slot proofs)** | **1,146,007** | **35.8%** |
 | Current-header quorum (35 `ecrecover` seals) | 346,799 | 10.8% |
 | **Final `resolveSet` (52 slot proofs)** | **1,152,338** | **36.0%** |
-| Measured steps sum | 3,064,245 | 95.7% |
-| Remainder (payload decode, trusted-set parse, service account proof, channel slots) | 139,165 | 4.3% |
-| **Full `verifyBundle`** | **3,203,410** |  |
+| Measured steps sum | 3,064,245 | 95.6% |
+| Remainder (payload decode, trusted-set parse, service account proof, channel slots) | 139,686 | 4.4% |
+| **Full `verifyBundle`** | **3,203,931** |  |
 
 The two `resolveSet` harvests — one under the hop's state root, one under the current block's — are
 ~72% of the rotation. A quorum check costs ~10k gas per seal (`ecrecover` + the sealing-digest keccak

@@ -54,6 +54,10 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
     /// @dev Descriptor field count: [mode, serviceAddr, codeHash, validatorContract, arraySlot].
     uint256 internal constant CONFIG_ANCHOR_FIELDS_CONTRACT = 5;
 
+    /// @dev abi.encode(uint8 mode, bytes32 setCommitment, bytes32 codeHash, address validatorContract,
+    ///      bytes32 arraySlot, uint64 anchorBlockNumber, bytes32 validatorCodeHash).
+    uint256 internal constant CONTRACT_ANCHOR_LENGTH = 224;
+
     error InvalidTrustAnchor();
     error InvalidPayloadShape();
     error InvalidProofPayloadShape();
@@ -68,6 +72,7 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
     error UnknownValidatorMode(uint8 mode);
     /// @notice The submitted member list does not hash to the anchor's set commitment.
     error WrongSetCommitment(bytes32 got, bytes32 expected);
+    error WrongValidatorCodeHash(bytes32 got, bytes32 expected);
     error InvalidTrustedSet();
 
     struct QbftAnchor {
@@ -76,6 +81,7 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
         address validatorContract;
         bytes32 arraySlot;
         uint64 anchorBlockNumber;
+        bytes32 validatorCodeHash;
     }
 
     /// @inheritdoc IClprVerifier
@@ -141,7 +147,12 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
             bytes32 newCommitment =
                 rotate ? QbftValidators.commit(ValidatorSet({members: currentValidators})) : anchor.setCommitment;
             newTrustAnchor = _encodeContractAnchor(
-                newCommitment, anchor.codeHash, anchor.validatorContract, anchor.arraySlot, currentBlockNumber
+                newCommitment,
+                anchor.codeHash,
+                anchor.validatorContract,
+                anchor.arraySlot,
+                currentBlockNumber,
+                anchor.validatorCodeHash
             );
             newTrustAnchorId = abi.encodePacked(currentBlockNumber);
         }
@@ -173,12 +184,7 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
             uint64 number = uint64(RLP.readUint256(hopHeader[BLOCK_HEADER_NUMBER_INDEX]));
             if (number <= lastNumber) revert HandoffHeaderNotAscending(number, lastNumber);
             ClprQbftQuorum.verifyQuorum(currentSet, hopHeader);
-            currentSet = QbftContractValidatorSource.resolveSet(
-                RlpCursor.payloadSlice(hop[1]),
-                RLP.readBytes32(hopHeader[BLOCK_HEADER_STATE_ROOT_INDEX]),
-                anchor.validatorContract,
-                anchor.arraySlot
-            );
+            currentSet = _resolvePinnedSet(hop[1], RLP.readBytes32(hopHeader[BLOCK_HEADER_STATE_ROOT_INDEX]), anchor);
             lastNumber = number;
             unchecked {
                 i++;
@@ -186,11 +192,21 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
         }
 
         _verifyCurrentAgainstWalk(currentSet, header, currentBlockNumber, lastNumber);
-        ValidatorSet memory next = QbftContractValidatorSource.resolveSet(
-            RlpCursor.payloadSlice(proofItem), stateRoot, anchor.validatorContract, anchor.arraySlot
-        );
+        ValidatorSet memory next = _resolvePinnedSet(proofItem, stateRoot, anchor);
         currentValidators = next.members;
         rotate = !QbftValidators.equals(next.members, trustedSet.members);
+    }
+
+    function _resolvePinnedSet(Memory.Slice proofItem, bytes32 stateRoot, QbftAnchor memory anchor)
+        private
+        pure
+        returns (ValidatorSet memory set)
+    {
+        bytes32 codeHash;
+        (set, codeHash) = QbftContractValidatorSource.resolveSet(
+            RlpCursor.payloadSlice(proofItem), stateRoot, anchor.validatorContract, anchor.arraySlot
+        );
+        if (codeHash != anchor.validatorCodeHash) revert WrongValidatorCodeHash(codeHash, anchor.validatorCodeHash);
     }
 
     /// @dev The submitted member list, sorted and deduped, must hash to the anchor's commitment.
@@ -262,8 +278,8 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
     /// @inheritdoc IClprVerifier
     /// @dev configProof is RLP([serviceAddr, chainId, peerConfigNanos, throttles, descriptor,
     ///      validatorContractProof, blockHeader, epochLength]). The descriptor must be
-    ///      [mode = 1, serviceAddr, codeHash, validatorContract, arraySlot]. Field 7 is kept for
-    ///      shape. This verifier does not use it.
+    ///      [mode = 1, serviceAddr, codeHash, validatorContract, arraySlot].
+    ///      Field 7 is kept for shape. This verifier does not use it.
     function verifyConfig(bytes calldata configProofBytes, bytes32 channelId, bytes calldata endpointManifestProofBytes)
         external
         pure
@@ -330,12 +346,18 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
         bytes32 stateRoot = RLP.readBytes32(header[BLOCK_HEADER_STATE_ROOT_INDEX]);
         address validatorContract = RLP.readAddress(ta[3]);
         bytes32 arraySlot = RLP.readBytes32(ta[4]);
-        set = QbftContractValidatorSource.resolveSet(
+        bytes32 validatorCodeHash;
+        (set, validatorCodeHash) = QbftContractValidatorSource.resolveSet(
             RlpCursor.payloadSlice(proof[5]), stateRoot, validatorContract, arraySlot
         );
         ClprQbftQuorum.verifyQuorum(set, header);
         anchor = _encodeContractAnchor(
-            QbftValidators.commit(set), RLP.readBytes32(ta[2]), validatorContract, arraySlot, blockNumber
+            QbftValidators.commit(set),
+            RLP.readBytes32(ta[2]),
+            validatorContract,
+            arraySlot,
+            blockNumber,
+            validatorCodeHash
         );
         anchorId = abi.encodePacked(blockNumber);
     }
@@ -394,7 +416,7 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
 
     /// @dev Word 0 must be {QbftValidatorMode.Contract}.
     function _decodeTrustAnchor(bytes calldata trustAnchor) internal pure returns (QbftAnchor memory a) {
-        if (trustAnchor.length != 192) revert InvalidTrustAnchor();
+        if (trustAnchor.length != CONTRACT_ANCHOR_LENGTH) revert InvalidTrustAnchor();
         uint8 mode = uint8(uint256(bytes32(trustAnchor[:32])));
         if (mode != uint8(QbftValidatorMode.Contract)) revert UnknownValidatorMode(mode);
         (
@@ -403,13 +425,15 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
             bytes32 codeHash,
             address validatorContract,
             bytes32 arraySlot,
-            uint64 anchorBlockNumber
-        ) = abi.decode(trustAnchor, (uint8, bytes32, bytes32, address, bytes32, uint64));
+            uint64 anchorBlockNumber,
+            bytes32 validatorCodeHash
+        ) = abi.decode(trustAnchor, (uint8, bytes32, bytes32, address, bytes32, uint64, bytes32));
         a.setCommitment = setCommitment;
         a.codeHash = codeHash;
         a.validatorContract = validatorContract;
         a.arraySlot = arraySlot;
         a.anchorBlockNumber = anchorBlockNumber;
+        a.validatorCodeHash = validatorCodeHash;
     }
 
     function _encodeContractAnchor(
@@ -417,10 +441,17 @@ contract QbftContractModeVerifier is ClprEvmBundleVerifier {
         bytes32 codeHash,
         address validatorContract,
         bytes32 arraySlot,
-        uint64 anchorBlockNumber
+        uint64 anchorBlockNumber,
+        bytes32 validatorCodeHash
     ) internal pure returns (bytes memory) {
         return abi.encode(
-            uint8(QbftValidatorMode.Contract), setCommitment, codeHash, validatorContract, arraySlot, anchorBlockNumber
+            uint8(QbftValidatorMode.Contract),
+            setCommitment,
+            codeHash,
+            validatorContract,
+            arraySlot,
+            anchorBlockNumber,
+            validatorCodeHash
         );
     }
 }

@@ -48,13 +48,16 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
     }
 
     /// @dev A Contract-mode trust anchor:
-    ///      abi.encode(mode=1, setCommitment, codeHash, validatorContract, arraySlot, anchorBlockNumber).
+    ///      abi.encode(mode=1, setCommitment, codeHash, validatorContract, arraySlot, anchorBlockNumber,
+    ///      validatorCodeHash).
     function _contractAnchor(address[] memory validators, address validatorContract, bytes32 arraySlot, uint64 blockNo)
         internal
         pure
         returns (bytes memory)
     {
-        return abi.encode(uint8(1), _commit(validators), SERVICE_CODE_HASH, validatorContract, arraySlot, blockNo);
+        return abi.encode(
+            uint8(1), _commit(validators), SERVICE_CODE_HASH, validatorContract, arraySlot, blockNo, VALIDATOR_CODE_HASH
+        );
     }
 
     /// @dev One rotation hop: the change block at `blockNo` sealed by `sealers`, its state holding `nextSet`.

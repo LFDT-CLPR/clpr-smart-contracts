@@ -199,7 +199,8 @@ contract BreakdownHarness {
         pure
         returns (uint256)
     {
-        return QbftContractValidatorSource.resolveSet(vcProof.asSlice(), stateRoot, validatorContract, arraySlot)
-            .members.length;
+        (ValidatorSet memory set,) =
+            QbftContractValidatorSource.resolveSet(vcProof.asSlice(), stateRoot, validatorContract, arraySlot);
+        return set.members.length;
     }
 }

@@ -64,22 +64,22 @@ gas_report_benchmarks:
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: min
-    baseline: 217402
+    baseline: 217635
   - name: QbftContractModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: median
-    baseline: 689398
+    baseline: 689907
   - name: QbftContractModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: max
-    baseline: 3203410
+    baseline: 3203981
   - name: QbftContractModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyConfig
     column: min
-    baseline: 184199
+    baseline: 184270

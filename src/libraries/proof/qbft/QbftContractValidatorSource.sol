@@ -11,6 +11,7 @@ import {QbftValidators, ValidatorSet} from "@hiero-ledger/clpr/libraries/proof/q
 /// @notice A validator source that reads the set from a validator contract on the source chain.
 library QbftContractValidatorSource {
     error InvalidProofShape();
+    error TooManyStorageEntries(uint256 count);
     error EmptyValidatorSet();
     error TooManyValidators(uint256 count);
     error WrongValidatorContract(address got, address expected);
@@ -30,10 +31,11 @@ library QbftContractValidatorSource {
     /// @param expectedContract The validator contract the trust anchor pins.
     /// @param expectedSlot     The array slot the trust anchor pins.
     /// @return set             The proven validator set, sorted ascending and deduped.
+    /// @return codeHash        The validator contract's proven `codeHash`, for the caller to pin.
     function resolveSet(Memory.Slice sourceProof, bytes32 stateRoot, address expectedContract, bytes32 expectedSlot)
         internal
         pure
-        returns (ValidatorSet memory set)
+        returns (ValidatorSet memory set, bytes32 codeHash)
     {
         Memory.Slice[] memory p = RLP.readList(sourceProof);
         if (p.length != 4) revert InvalidProofShape();
@@ -43,9 +45,14 @@ library QbftContractValidatorSource {
         if (arraySlot != expectedSlot) revert WrongArraySlot(arraySlot, expectedSlot);
 
         // 1. Account proof: state root -> the contract's storage root.
-        (bytes32 storageRoot,) = ClprEvmStateProof.verifyAccountFields(p[1], stateRoot, validatorContract);
+        (bytes32 storageRoot, bytes32 provenCodeHash) =
+            ClprEvmStateProof.verifyAccountFields(p[1], stateRoot, validatorContract);
+        codeHash = provenCodeHash;
 
         (bytes32[] memory labels, Memory.Slice[] memory proofs) = ClprEvmStateProof.indexEntries(p[3]);
+
+        // The number of slots should equal the number of validators (1 slot each) + 1 additional slot for the length.
+        if (labels.length > ClprQbftQuorum.MAX_VALIDATORS + 1) revert TooManyStorageEntries(labels.length);
 
         // 2. Prove the array length. The array slot holds the count.
         bytes32[] memory lengthSlot = new bytes32[](1);

@@ -10,6 +10,8 @@ import {MptWire} from "@test/helpers/MptWire.sol";
 ///      headers with an explicit (possibly empty) validator list, and synthetic MPT proofs for a
 ///      validator contract's `address[] validators` array.
 abstract contract QbftContractProofs is QbftSyntheticProofs {
+    bytes32 internal constant VALIDATOR_CODE_HASH = bytes32(uint256(0xC0));
+
     /// @dev extraData carrying a validator list (already RLP-encoded) plus the committed seals.
     function _buildExtraDataFull(bytes memory validatorListRlp, bytes[] memory seals, uint256 round)
         internal
@@ -310,8 +312,7 @@ abstract contract QbftContractProofs is QbftSyntheticProofs {
         bytes memory storageProofRlp;
         (arraySlot, storageRoot, storageProofRlp) = _validatorStorageProof(validators);
         bytes memory accountProofRlp;
-        (stateRoot, accountProofRlp) =
-            _buildSyntheticAccountProof(validatorContract, storageRoot, bytes32(uint256(0xC0)));
+        (stateRoot, accountProofRlp) = _buildSyntheticAccountProof(validatorContract, storageRoot, VALIDATOR_CODE_HASH);
         bytes[] memory items = new bytes[](4);
         items[0] = RLP.encode(validatorContract);
         items[1] = accountProofRlp;
@@ -334,7 +335,7 @@ abstract contract QbftContractProofs is QbftSyntheticProofs {
         pathKeys[1] = keccak256(abi.encodePacked(vc));
         bytes[] memory values = new bytes[](2);
         values[0] = _buildAccountRlp(svcStorageRoot, svcCodeHash);
-        values[1] = _buildAccountRlp(vcStorageRoot, bytes32(uint256(0xC0)));
+        values[1] = _buildAccountRlp(vcStorageRoot, VALIDATOR_CODE_HASH);
         bytes[] memory proofs;
         (stateRoot, proofs) = _buildBranchTrie(pathKeys, values);
         svcProof = proofs[0];

@@ -101,12 +101,21 @@ committee needs only non-signer proofs because BLS aggregates. ECDSA does not ag
 | 3 | validatorContract | address | the contract that holds the array |
 | 4 | arraySlot | bytes32 | the storage slot of the `address[] validators` array |
 | 5 | anchorBlockNumber | uint64 | the block whose state gave this set |
+| 6 | validatorCodeHash | bytes32 | the validator contract's code hash. Pins its code |
 
-Encoded as `abi.encode(uint8, bytes32, bytes32, address, bytes32, uint64)`. The anchor has a fixed
-size, for any set size.
+Encoded as `abi.encode(uint8, bytes32, bytes32, address, bytes32, uint64, bytes32)`, 224 bytes. The
+anchor has a fixed size, for any set size.
 
-The verifier checks every contract proof against the pinned `validatorContract` and `arraySlot`. A
-proof for a different contract or slot reverts.
+The verifier checks every contract proof against the pinned `validatorContract`, `arraySlot` and
+`validatorCodeHash`. A proof for a different contract or slot reverts (`WrongValidatorContract`,
+`WrongArraySlot`). A proof whose validator account carries a different code hash reverts
+`WrongValidatorCodeHash`.
+
+**Why pin the validator code.** Besu reads the set by calling the contract. The verifier reads a raw
+storage slot. A code change under the same address can move the array while Besu's call keeps
+working; the verifier would then read another slot as the set. With the pin, the channel halts
+instead, and a new channel confirms the slot against the new code. The pin sees the code at the
+address: for a proxy, that is the proxy, not the implementation behind it.
 
 ## 4. The bundle proof bytes (the relay builds this)
 
@@ -233,7 +242,7 @@ The config proof is one RLP list of 8 fields. It creates the first trust anchor.
 | 1 | chain id | for example `eip155:1` |
 | 2 | peer config nanos | the config time |
 | 3 | throttles | RLP list, 5 or 7 items |
-| 4 | trust anchor descriptor | `RLP([1, serviceAddress, codeHash, validatorContract, arraySlot])` — 5 items |
+| 4 | trust anchor descriptor | `RLP([1, serviceAddress, codeHash, validatorContract, arraySlot])` — 5 items. The validator contract's code hash is not declared here: the verifier takes it from the proven account in field 5 and pins it |
 | 5 | validator contract proof | required. The same 4-item shape as in the bundle, wrapped in a byte string |
 | 6 | block header | a recent block whose state root proves the contract (field 5) |
 | 7 | epoch length | kept for shape. Contract mode does not use it |
@@ -242,9 +251,10 @@ The config proof is one RLP list of 8 fields. It creates the first trust anchor.
 
 ```mermaid
 flowchart TB
-  A["decode anchor<br/>setCommitment, validatorContract,<br/>arraySlot, codeHash"] --> A2["open the commitment:<br/>sort + hash the submitted list,<br/>must equal setCommitment"]
+  A["decode anchor<br/>setCommitment, validatorContract,<br/>arraySlot, codeHash, validatorCodeHash"] --> A2["open the commitment:<br/>sort + hash the submitted list,<br/>must equal setCommitment"]
   A2 --> B["for each hop:<br/>block number must ascend past the anchor,<br/>verify quorum with the current set,<br/>read the next set from the hop's contract proof"]
-  B --> C["verify the current block<br/>quorum with the final set"]
+  B --> B2["each contract proof:<br/>account code hash must equal validatorCodeHash"]
+  B2 --> C["verify the current block<br/>quorum with the final set"]
   C --> D["read the set from the contract proof<br/>at the current block"]
   D --> E["verify the service account<br/>pin the codeHash -> storage root"]
   E --> F["verify the channel slots,<br/>decode the bundle content"]

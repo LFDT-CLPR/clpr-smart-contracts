@@ -310,7 +310,8 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
 
     // FIXME: format should be shared for both modes, remove this temporary helper when header mode works correctly.
     function _isContractModeAnchor(bytes calldata trustAnchor) private pure returns (bool) {
-        return trustAnchor.length == 192 && uint256(bytes32(trustAnchor[:32])) == 1;
+        // 224 = QbftContractModeVerifier.CONTRACT_ANCHOR_LENGTH (7 words); the header-mode anchor is 192.
+        return trustAnchor.length == 224 && uint256(bytes32(trustAnchor[:32])) == 1;
     }
 
     // FIXME: format should be shared for both modes, remove this temporary helper when header mode works correctly.

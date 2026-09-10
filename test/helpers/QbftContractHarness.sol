@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {QbftContractValidatorSource} from "@hiero-ledger/clpr/libraries/proof/qbft/QbftContractValidatorSource.sol";
 import {QbftContractModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftContractModeVerifier.sol";
+import {ValidatorSet} from "@hiero-ledger/clpr/libraries/proof/qbft/QbftValidators.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
 /// @dev Exposes {QbftContractValidatorSource.resolveSet} for direct unit tests.
@@ -14,8 +15,9 @@ contract ContractSourceHarness {
         pure
         returns (address[] memory)
     {
-        return QbftContractValidatorSource.resolveSet(proof.asSlice(), stateRoot, expectedContract, expectedSlot)
-        .members;
+        (ValidatorSet memory set,) =
+            QbftContractValidatorSource.resolveSet(proof.asSlice(), stateRoot, expectedContract, expectedSlot);
+        return set.members;
     }
 }
 
