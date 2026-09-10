@@ -15,86 +15,101 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 /// @notice Verifies CLPR bundle proofs anchored to Ethereum mainnet via the consensus-layer light
 ///         client protocol (sync committees + BLS aggregate signatures).
 ///
-/// ## Trust anchor (flat packed, 228 bytes)
-/// `gvr32 ‖ forkVersion4 ‖ channelId32 ‖ aggregatePubkey128 ‖ committeeMerkleRoot32`.
-/// The 512 committee keys are NOT stored — the anchor commits to them with a keccak Merkle root
-/// ({ClprCommitteeMerkle}); per bundle the relay supplies only the NON-signers' keys (item 9),
-/// each authenticated against that root. Only a rotation bundle carries the *next* committee,
-/// whose root becomes the successor anchor. `channelId` (seeded in `verifyConfig`, carried
-/// through every rotation) binds the storage proof to a single CLPR channel so proven slots
-/// cannot be substituted positionally.
+/// ## Trust anchor (flat packed, 428 bytes) — WINDOW ENCODING
+/// `gvr32 ‖ forkVersion4 ‖ channelId32 ‖ codeHash32 ‖ period8 ‖ [aggregate128 ‖ committeeRoot32] × 2`.
 ///
-/// ## Bundle proof (top-level RLP list, 10 items)
+/// The anchor encodes a SET of currently valid authorities — `{ current committee, next committee }`
+/// — and accepts a bundle signed by either. `period` is
+/// the sync-committee period of the *current* member, so the window covers `[period, period + 1]`.
+///
+/// ## Bundle proof (top-level RLP list, 11 items)
 /// ```
 /// [ 0: attestedHeader        [slot, proposerIndex, parentRoot, stateRoot, bodyRoot]
-///   1: syncAggregate         [bits(64), signature(256, uncompressed EIP-2537 G2)]
-///   2: executionStateRoot32  the execution-layer state root (leaf proven into bodyRoot)
-///   3: executionBranch       9 SSZ siblings (execution_payload.state_root, gindex 802)
-///   4: nextCommittee         rotation committee `[uncompressed pubkeys512, aggregate]` (128-byte
+///   1: signatureSlot         the slot the sync committee SIGNED at (strictly after the attested
+///                            header's slot, at most one period beyond it). Window selection keys off
+///                            this slot's period, mirroring Altair `update_signature_period`; it is
+///                            not derivable from attestedHeader.slot, which sits in a different
+///                            period for one slot per period.
+///   2: syncAggregate         [bits(64), signature(256, uncompressed EIP-2537 G2)]
+///   3: executionStateRoot32  the execution-layer state root (leaf proven into bodyRoot)
+///   4: executionBranch       9 SSZ siblings (execution_payload.state_root, gindex 802)
+///   5: nextCommittee         window-advance committee `[uncompressed pubkeys512, aggregate]` (128-byte
 ///                            EIP-2537 keys), or empty (RLP string) if absent. The contract re-derives
 ///                            the beacon-native compressed form on-chain (`compressG1`, the cheap
 ///                            direction) to reconstruct the SSZ root the `nextCommitteeBranch` proof
-///                            commits to; the successor anchor stores the keccak Merkle root over
+///                            commits to; the advanced anchor stores the keccak Merkle root over
 ///                            the uncompressed keys.
-///   5: nextCommitteeBranch   6 SSZ siblings (gindex 87), or empty (RLP list) if absent
-///   6: accountProof          MPT account proof against executionStateRoot32
-///   7: storageProof          5 or 6 × [slotNumber, proofNodes] for the channelId-derived slots
-///   8: bundleContent         protobuf ClprBundleContent
-///   9: nonSignerProofs       one `key128 ‖ proof288` entry per clear participation bit, ascending
+///   6: nextCommitteeBranch   6 SSZ siblings (gindex 87), or empty (RLP list) if absent
+///   7: accountProof          MPT account proof against executionStateRoot32
+///   8: storageProof          5 or 6 × [slotNumber, proofNodes] for the channelId-derived slots
+///   9: bundleContent         protobuf ClprBundleContent
+///  10: nonSignerProofs       one `key128 ‖ proof288` entry per clear participation bit, ascending
 ///                            index order (empty list at full participation) ]
 /// ```
 ///
-/// @dev Verification chain: sync-committee BLS over the attested header's signing root → SSZ branch
-///      proving the execution state root sits in the header bodyRoot → MPT account proof (codeHash
-///      pinned by config) → MPT storage proof of the queue-metadata slots → optional SSZ
-///      next-sync-committee rotation against the header stateRoot.
+/// @dev Verification chain: window member selected by the signature slot's period → sync-committee BLS
+///      over the attested header's signing root → SSZ branch proving the execution state root sits in
+///      the header bodyRoot → MPT account proof (codeHash pinned by config) → MPT storage proof of the
+///      queue-metadata slots → optional SSZ next-sync-committee window advance against the header
+///      stateRoot.
 /// @dev BLS: the 2/3 supermajority + real on-chain BLS12-381 aggregate verification (EIP-2537 G1MSM
 ///      complement aggregation + RFC-9380 hash-to-G2 + pairing) is `ClprBeaconBls.aggregateVerifyComplement`.
 /// @dev Account proof, queue-metadata decode and the `ClprBundleContent` decode are inherited from
 ///      {ClprEvmBundleVerifier}.
 contract EthMainnetVerifier is ClprEvmBundleVerifier {
-    // ── Bundle payload RLP layout (10 items) ─────────────────────────────────
-    uint256 internal constant PAYLOAD_FIELDS = 10;
+    // ── Bundle payload RLP layout (11 items) ─────────────────────────────────
+    uint256 internal constant PAYLOAD_FIELDS = 11;
     uint256 internal constant IDX_ATTESTED_HEADER = 0;
-    uint256 internal constant IDX_SYNC_AGGREGATE = 1;
-    uint256 internal constant IDX_EXECUTION_STATE_ROOT = 2;
-    uint256 internal constant IDX_EXECUTION_BRANCH = 3;
-    uint256 internal constant IDX_NEXT_COMMITTEE = 4;
-    uint256 internal constant IDX_NEXT_COMMITTEE_BRANCH = 5;
-    uint256 internal constant IDX_ACCOUNT_PROOF = 6;
-    uint256 internal constant IDX_STORAGE_PROOF = 7;
-    uint256 internal constant IDX_BUNDLE_CONTENT = 8;
+    uint256 internal constant IDX_SIGNATURE_SLOT = 1;
+    uint256 internal constant IDX_SYNC_AGGREGATE = 2;
+    uint256 internal constant IDX_EXECUTION_STATE_ROOT = 3;
+    uint256 internal constant IDX_EXECUTION_BRANCH = 4;
+    uint256 internal constant IDX_NEXT_COMMITTEE = 5;
+    uint256 internal constant IDX_NEXT_COMMITTEE_BRANCH = 6;
+    uint256 internal constant IDX_ACCOUNT_PROOF = 7;
+    uint256 internal constant IDX_STORAGE_PROOF = 8;
+    uint256 internal constant IDX_BUNDLE_CONTENT = 9;
     /// @dev RLP list with ONE entry per clear bit in the participation bitvector, ascending index
     ///      order; each entry is `uncompressedKey(128) ‖ 9 Merkle siblings (288)` = 416 bytes,
     ///      authenticated against the anchor's committee Merkle root. Empty list at 512/512.
-    uint256 internal constant IDX_NON_SIGNER_PROOFS = 9;
-    /// @dev Optional endpoint-manifest update: storage proof of the commitment slot (index 10) plus the
-    ///      manifest protobuf preimage (index 11). Present only in the 12-field shape.
-    uint256 internal constant IDX_MANIFEST_STORAGE_PROOF = 10;
-    uint256 internal constant IDX_MANIFEST_PREIMAGE = 11;
-    uint256 internal constant PAYLOAD_FIELDS_WITH_MANIFEST = 12;
+    uint256 internal constant IDX_NON_SIGNER_PROOFS = 10;
+    /// @dev Optional endpoint-manifest update: storage proof of the commitment slot (index 11) plus the
+    ///      manifest protobuf preimage (index 12). Present only in the 13-field shape.
+    uint256 internal constant IDX_MANIFEST_STORAGE_PROOF = 11;
+    uint256 internal constant IDX_MANIFEST_PREIMAGE = 12;
+    uint256 internal constant PAYLOAD_FIELDS_WITH_MANIFEST = 13;
 
     // ── Sub-field shapes / sizes ─────────────────────────────────────────────
     uint256 internal constant HEADER_FIELDS = 5;
     uint256 internal constant SYNC_AGGREGATE_FIELDS = 2;
     // Trust anchor: FLAT packed layout (fixed offsets — no RLP). channelId binds the storage proof
-    // to a single CLPR channel (seeded in verifyConfig, carried through rotation).
+    // to a single CLPR channel (seeded in verifyConfig, carried through every window advance).
+    //
     //   [0..32)     gvr (genesis validators root)
     //   [32..36)    forkVersion (4 bytes)
     //   [36..68)    channelId
-    //   [68..196)   aggregate pubkey (128-byte uncompressed EIP-2537 G1)
-    //   [196..228)  committee Merkle root (keccak, see ClprCommitteeMerkle)
+    //   [68..100)   expected CLPR service code hash
+    //   [100..108)  period — sync-committee period of the CURRENT committee (big-endian uint64)
+    //   [108..268)  committee 0 = CURRENT  ┐ aggregate pubkey (128-byte uncompressed EIP-2537 G1)
+    //   [268..428)  committee 1 = NEXT     ┘ followed by committee Merkle root (32, keccak)
+    //
     // The 512 keys themselves are NOT stored: the anchor commits to them via the Merkle root, and
-    // the relay supplies only the NON-signers' keys per bundle (payload item 9), each authenticated
-    // against the root. 228 bytes ⇒ the service's per-bundle anchor SLOAD and per-rotation SSTORE
-    // shrink from ~2,055 slots to 8.
+    // the relay supplies only the NON-signers' keys per bundle (payload item 10), each authenticated
+    // against the root. 428 bytes ⇒ 15 storage words for the service's per-bundle anchor SLOAD and
+    // per-rotation SSTORE, against ~4,110 for two committees stored as keys.
     uint256 internal constant ANCHOR_OFF_GVR = 0;
     uint256 internal constant ANCHOR_OFF_FORK_VERSION = 32;
     uint256 internal constant ANCHOR_OFF_CHANNEL_ID = 36;
-    uint256 internal constant ANCHOR_OFF_AGGREGATE = 68;
-    uint256 internal constant ANCHOR_OFF_COMMITTEE_ROOT = 196;
-    uint256 internal constant ANCHOR_OFF_CODE_HASH = 228;
-    uint256 internal constant CONFIG_FIELDS = 6;
+    uint256 internal constant ANCHOR_OFF_CODE_HASH = 68;
+    uint256 internal constant ANCHOR_OFF_PERIOD = 100;
+    uint256 internal constant ANCHOR_OFF_COMMITTEES = 108;
+    uint256 internal constant COMMITTEE_STRIDE = 160;
+    uint256 internal constant COMMITTEE_OFF_ROOT = 128;
+    uint256 internal constant COMMITTEE_CURRENT = 0;
+    uint256 internal constant COMMITTEE_NEXT = 1;
+    uint256 internal constant WINDOW_WIDTH = 2;
+    uint256 internal constant PERIOD_BYTE_LENGTH = 8;
+    uint256 internal constant CONFIG_FIELDS = 7;
     uint256 internal constant COMMITTEE_FIELDS = 2;
 
     // Single source of truth lives in the SSZ library (the beacon-protocol constant).
@@ -103,7 +118,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     uint256 internal constant BLS_SIGNATURE_LENGTH = 256; // uncompressed G2
     uint256 internal constant SYNC_BITS_LENGTH = 64; // Bitvector[512] / 8
     uint256 internal constant FORK_VERSION_LENGTH = 4;
-    uint256 internal constant TRUST_ANCHOR_LENGTH = ANCHOR_OFF_CODE_HASH + 32; // 260
+    uint256 internal constant TRUST_ANCHOR_LENGTH = ANCHOR_OFF_COMMITTEES + WINDOW_WIDTH * COMMITTEE_STRIDE; // 428
 
     uint256 internal constant EXECUTION_BRANCH_DEPTH = 9;
     uint256 internal constant NEXT_COMMITTEE_BRANCH_DEPTH = 6;
@@ -112,13 +127,15 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     // valid for one such period; `slot / this` is the period the trust-anchor id names.
     uint64 internal constant SLOTS_PER_SYNC_COMMITTEE_PERIOD = 8192;
 
-    // Config payload RLP: [slot, syncCommittee, gvr, forkVersion, ledgerConfiguration].
+    // Config payload RLP:
+    //   [slot, currentCommittee, nextCommittee, gvr, forkVersion, ledgerConfiguration, codeHash].
     uint256 internal constant CONFIG_IDX_SLOT = 0;
     uint256 internal constant CONFIG_IDX_COMMITTEE = 1;
-    uint256 internal constant CONFIG_IDX_GVR = 2;
-    uint256 internal constant CONFIG_IDX_FORK_VERSION = 3;
-    uint256 internal constant CONFIG_IDX_LEDGER = 4;
-    uint256 internal constant CONFIG_IDX_CODE_HASH = 5;
+    uint256 internal constant CONFIG_IDX_NEXT_COMMITTEE = 2;
+    uint256 internal constant CONFIG_IDX_GVR = 3;
+    uint256 internal constant CONFIG_IDX_FORK_VERSION = 4;
+    uint256 internal constant CONFIG_IDX_LEDGER = 5;
+    uint256 internal constant CONFIG_IDX_CODE_HASH = 6;
 
     // Config-time endpoint-manifest proof RLP (verifyConfig's 3rd arg, when non-empty). A beacon
     // light-client proof signed by the CONFIG committee that authenticates the CLPR service's
@@ -157,9 +174,15 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     error ExecutionBranchInvalid();
     error NextCommitteeBranchInvalid();
     error RotationPairMismatch();
+    error SignaturePeriodOutOfWindow(uint64 signaturePeriod, uint64 anchorPeriod);
+    error WindowNextCommitteeMismatch();
+    error InvalidSignatureSlot(uint64 signatureSlot, uint64 attestedSlot);
+    error RotationPeriodStraddle(uint64 signaturePeriod, uint64 attestedPeriod);
+    error ConfigManifestPeriodMismatch(uint64 headerPeriod, uint64 configPeriod);
+    error ConfigWindowNotDistinct();
     /// @dev Participation is below the 2/3 supermajority required to trust the attested header.
     error InsufficientParticipation(uint256 participants, uint256 committeeSize);
-    /// @dev Payload item 9 must carry exactly one entry per clear participation bit.
+    /// @dev Payload item 10 must carry exactly one entry per clear participation bit.
     error NonSignerProofCountMismatch(uint256 expected, uint256 got);
     /// @dev A non-signer entry failed Merkle authentication against the anchor's committee root.
     ///      MANDATORY security check: without it a relay could pass a forged point as a
@@ -189,10 +212,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     {
         // Step 1 — trust anchor (flat packed layout; scalar fields at fixed calldata offsets, the
         // committee is a 32-byte Merkle commitment — the keys themselves never touch storage).
-        if (trustAnchor.length != TRUST_ANCHOR_LENGTH) revert InvalidTrustAnchor();
-        bytes32 gvr = bytes32(trustAnchor[ANCHOR_OFF_GVR:ANCHOR_OFF_GVR + 32]);
-        bytes memory forkVersion = trustAnchor[ANCHOR_OFF_FORK_VERSION:ANCHOR_OFF_FORK_VERSION + FORK_VERSION_LENGTH];
-        bytes32 channelId = bytes32(trustAnchor[ANCHOR_OFF_CHANNEL_ID:ANCHOR_OFF_CHANNEL_ID + 32]);
+        AnchorScalars memory anchor = _decodeAnchorScalars(trustAnchor);
 
         bytes memory proofMem = proofBytes;
         Memory.Slice[] memory payload = RLP.decodeList(proofMem);
@@ -206,13 +226,40 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             header.slot, header.proposerIndex, header.parentRoot, header.stateRoot, header.bodyRoot
         );
 
+        // Step 2b — window selection.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 signatureSlot = uint64(RLP.readUint256(payload[IDX_SIGNATURE_SLOT]));
+        uint64 signaturePeriod = signatureSlot / SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        uint64 attestedPeriod = header.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        if (signatureSlot <= header.slot || signaturePeriod > attestedPeriod + 1) {
+            revert InvalidSignatureSlot(signatureSlot, header.slot);
+        }
+
+        uint256 committeeIndex;
+        if (signaturePeriod == anchor.period) {
+            committeeIndex = COMMITTEE_CURRENT;
+        } else if (signaturePeriod == anchor.period + 1) {
+            committeeIndex = COMMITTEE_NEXT;
+        } else {
+            revert SignaturePeriodOutOfWindow(signaturePeriod, anchor.period);
+        }
+
         // Step 3 — supermajority + BLS aggregate signature (staged behind an overridable hook).
         Memory.Slice[] memory agg = RLP.readList(payload[IDX_SYNC_AGGREGATE]);
         if (agg.length != SYNC_AGGREGATE_FIELDS) revert InvalidSyncAggregate();
         bytes memory bits = RLP.readBytes(agg[0]);
         bytes memory signature = RLP.readBytes(agg[1]);
         if (bits.length != SYNC_BITS_LENGTH || signature.length != BLS_SIGNATURE_LENGTH) revert InvalidSyncAggregate();
-        _verifyBls(trustAnchor, payload[IDX_NON_SIGNER_PROOFS], signature, bits, beaconBlockRoot, forkVersion, gvr);
+        _verifyBls(
+            trustAnchor,
+            committeeIndex,
+            payload[IDX_NON_SIGNER_PROOFS],
+            signature,
+            bits,
+            beaconBlockRoot,
+            anchor.forkVersion,
+            anchor.gvr
+        );
 
         // Step 4 — execution state root SSZ branch against the attested bodyRoot.
         bytes32 executionStateRoot = RLP.readBytes32(payload[IDX_EXECUTION_STATE_ROOT]);
@@ -226,13 +273,12 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         // Step 5 — MPT account proof against the proven execution state root.
         ClprTypes.ChannelContext memory ctx = ClprTypes.decodeChannelContext(channelContext);
         address clprService = _toAddress(ctx.remoteServiceAddress);
-        bytes32 expectedCodeHash = bytes32(trustAnchor[ANCHOR_OFF_CODE_HASH:ANCHOR_OFF_CODE_HASH + 32]);
         bytes32 storageRoot =
-            _verifyServiceStorageRoot(payload[IDX_ACCOUNT_PROOF], executionStateRoot, clprService, expectedCodeHash);
+            _verifyServiceStorageRoot(payload[IDX_ACCOUNT_PROOF], executionStateRoot, clprService, anchor.codeHash);
 
         // Step 6 — MPT storage proof of the queue-metadata slots, bound to channelId (the proven
         // values are tied to this channel's Channel struct, never taken positionally).
-        metadata = _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, channelId);
+        metadata = _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, anchor.channelId);
 
         // Bundle content → message payloads.
         messagePayloads = _decodeBundleContent(RLP.readBytes(payload[IDX_BUNDLE_CONTENT]));
@@ -250,27 +296,24 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             newEndpointManifest = _absentEndpointManifest();
         }
 
-        // Step 7 — optional next-sync-committee rotation against the attested header stateRoot.
+        // Step 7 — optional window advance against the attested header stateRoot.
         newTrustAnchor = _verifyRotation(
             payload[IDX_NEXT_COMMITTEE],
             payload[IDX_NEXT_COMMITTEE_BRANCH],
             header.stateRoot,
-            gvr,
-            forkVersion,
-            channelId,
-            expectedCodeHash
+            trustAnchor,
+            signaturePeriod,
+            attestedPeriod,
+            committeeIndex
         );
-        // Identifier for the successor anchor: the sync-committee period the next committee is valid
-        // for, i.e. period(attested slot) + 1 (the next committee always belongs to the next period).
-        // Empty when no rotation occurred.
-        newTrustAnchorId =
-            newTrustAnchor.length == 0 ? newTrustAnchor : _periodId(header.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1);
+        // Identifier for the successor anchor: the sync-committee period the new window STARTS at,
+        // which the source chain has already reached.
+        newTrustAnchorId = newTrustAnchor.length == 0 ? newTrustAnchor : _periodId(signaturePeriod);
     }
 
     /// @inheritdoc IClprVerifier
-    /// @dev configProofBytes is RLP `[slot, syncCommittee, gvr, forkVersion, ledgerConfiguration]`.
-    ///      The full committee can only be carried in the payload (it cannot be a constructor
-    ///      immutable), so the empty-input bootstrap returns defaults with no genesis anchor.
+    /// @dev configProofBytes is RLP
+    ///      `[slot, currentCommittee, nextCommittee, gvr, forkVersion, ledgerConfiguration, codeHash]`
     function verifyConfig(bytes calldata configProofBytes, bytes32 channelId, bytes calldata endpointManifestProofBytes)
         external
         view
@@ -297,6 +340,9 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         uint64 slot = uint64(RLP.readUint256(cfg[CONFIG_IDX_SLOT]));
         (bytes[] memory pubkeys, bytes memory aggregatePubkey) = _decodeCommittee(cfg[CONFIG_IDX_COMMITTEE]);
         ClprBeaconBls.requireOnCurveG1(pubkeys, aggregatePubkey);
+        (bytes[] memory nextPubkeys, bytes memory nextAggregatePubkey) =
+            _decodeCommittee(cfg[CONFIG_IDX_NEXT_COMMITTEE]);
+        ClprBeaconBls.requireOnCurveG1(nextPubkeys, nextAggregatePubkey);
         bytes32 gvr = RLP.readBytes32(cfg[CONFIG_IDX_GVR]);
         bytes memory forkVersion = RLP.readBytes(cfg[CONFIG_IDX_FORK_VERSION]);
         if (forkVersion.length != FORK_VERSION_LENGTH) revert InvalidConfigPayload();
@@ -305,7 +351,19 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         ClprProtobuf.decodeControlMessage(RLP.readBytes(cfg[CONFIG_IDX_LEDGER])).config;
 
         bytes32 codeHash = RLP.readBytes32(cfg[CONFIG_IDX_CODE_HASH]);
-        initialTrustAnchor = _encodeTrustAnchor(pubkeys, aggregatePubkey, gvr, forkVersion, channelId, codeHash);
+
+        bytes32 currentRoot = ClprCommitteeMerkle.root(pubkeys);
+        bytes32 nextRoot = ClprCommitteeMerkle.root(nextPubkeys);
+        if (currentRoot == nextRoot) revert ConfigWindowNotDistinct();
+
+        AnchorScalars memory scalars = AnchorScalars({
+            gvr: gvr,
+            forkVersion: forkVersion,
+            channelId: channelId,
+            codeHash: codeHash,
+            period: slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD
+        });
+        initialTrustAnchor = _encodeTrustAnchor(scalars, aggregatePubkey, currentRoot, nextAggregatePubkey, nextRoot);
         serviceAddress = lc.serviceAddress;
         channelContext = ClprTypes.encodeChannelContext(
             ClprTypes.ChannelContext({channelId: channelId, remoteServiceAddress: serviceAddress})
@@ -317,13 +375,11 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             lc.nanosSinceEpoch,
             lc.throttles,
             initialTrustAnchor,
-            // The genesis committee is the current committee for the config slot's period.
-            _periodId(slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD),
+            // The window starts at the config slot's period; the genesis committee is its current member.
+            _periodId(scalars.period),
             // Verify the endpoint-manifest storage proof (when supplied) against a beacon proof signed
-            // by this config committee; empty proof → empty manifest (bring-up).
-            _verifyConfigEndpointManifest(
-                endpointManifestProofBytes, pubkeys, aggregatePubkey, forkVersion, gvr, serviceAddress, codeHash
-            )
+            // by the CURRENT config committee; empty proof → empty manifest (bring-up).
+            _verifyConfigEndpointManifest(endpointManifestProofBytes, scalars, pubkeys, aggregatePubkey, serviceAddress)
         );
     }
 
@@ -336,12 +392,10 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     ///      populates the Channel via Step 1b (same as the other EVM verifiers).
     function _verifyConfigEndpointManifest(
         bytes calldata proofBytes,
+        AnchorScalars memory scalars,
         bytes[] memory pubkeys,
         bytes memory aggregatePubkey,
-        bytes memory forkVersion,
-        bytes32 gvr,
-        bytes memory serviceAddress,
-        bytes32 codeHash
+        bytes memory serviceAddress
     ) private view returns (ClprTypes.ClprEndpointManifest memory) {
         if (proofBytes.length == 0) return _uninitializedEndpointManifest(serviceAddress);
 
@@ -353,6 +407,10 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
 
         // Attested beacon header → SSZ root, then BLS supermajority against the config committee.
         BeaconHeader memory header = _decodeBeaconHeader(p[CM_IDX_ATTESTED_HEADER]);
+        // The proof is verified against `current`, so it must attest inside the current period —
+        // otherwise the committee that signed it is not the committee being checked against.
+        uint64 headerPeriod = header.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        if (headerPeriod != scalars.period) revert ConfigManifestPeriodMismatch(headerPeriod, scalars.period);
         bytes32 beaconBlockRoot = ClprBeaconSsz.beaconBlockHeaderRoot(
             header.slot, header.proposerIndex, header.parentRoot, header.stateRoot, header.bodyRoot
         );
@@ -368,8 +426,8 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             signature,
             bits,
             beaconBlockRoot,
-            forkVersion,
-            gvr
+            scalars.forkVersion,
+            scalars.gvr
         );
 
         // Execution state root SSZ branch against the attested bodyRoot.
@@ -385,7 +443,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         // the config's code hash), then the manifest-commitment slot proof + preimage bound to
         // that same service address.
         bytes32 storageRoot = _verifyServiceStorageRoot(
-            p[CM_IDX_ACCOUNT_PROOF], executionStateRoot, _toAddress(serviceAddress), codeHash
+            p[CM_IDX_ACCOUNT_PROOF], executionStateRoot, _toAddress(serviceAddress), scalars.codeHash
         );
         return _verifyEndpointManifest(
             p[CM_IDX_MANIFEST_STORAGE_PROOF], storageRoot, RLP.readBytes(p[CM_IDX_MANIFEST_PREIMAGE]), serviceAddress
@@ -418,15 +476,17 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         Memory.Slice nextCommitteeItem,
         Memory.Slice nextBranchItem,
         bytes32 stateRoot,
-        bytes32 gvr,
-        bytes memory forkVersion,
-        bytes32 channelId,
-        bytes32 codeHash
+        bytes calldata trustAnchor,
+        uint64 signaturePeriod,
+        uint64 attestedPeriod,
+        uint256 committeeIndex
     ) internal view returns (bytes memory newTrustAnchor) {
         bool committeeAbsent = _firstByte(nextCommitteeItem) == RLP_EMPTY_STRING;
         bool branchAbsent = _firstByte(nextBranchItem) == RLP_EMPTY_LIST;
         if (committeeAbsent != branchAbsent) revert RotationPairMismatch();
         if (committeeAbsent) return new bytes(0);
+
+        if (signaturePeriod != attestedPeriod) revert RotationPeriodStraddle(signaturePeriod, attestedPeriod);
 
         (bytes[] memory nextPubkeys, bytes memory nextAggregate) = _decodeCommittee(nextCommitteeItem);
 
@@ -441,9 +501,22 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             )) {
             revert NextCommitteeBranchInvalid();
         }
-        // Successor anchor commits to the uncompressed keys via the keccak Merkle root (the keys
-        // themselves are re-supplied per bundle for non-signers only, authenticated against it).
-        newTrustAnchor = _encodeTrustAnchor(nextPubkeys, nextAggregate, gvr, forkVersion, channelId, codeHash);
+
+        bytes32 provenRoot = ClprCommitteeMerkle.root(nextPubkeys);
+
+        if (committeeIndex == COMMITTEE_CURRENT) {
+            uint256 nextOff = ANCHOR_OFF_COMMITTEES + COMMITTEE_NEXT * COMMITTEE_STRIDE;
+            if (
+                provenRoot != bytes32(trustAnchor[nextOff + COMMITTEE_OFF_ROOT:nextOff + COMMITTEE_OFF_ROOT + 32])
+                    || keccak256(nextAggregate) != keccak256(trustAnchor[nextOff:nextOff + BLS_PUBKEY_LENGTH])
+            ) {
+                revert WindowNextCommitteeMismatch();
+            }
+            return new bytes(0);
+        }
+
+        // Signed one period ahead: the window shifts. `current` takes the stored `next`
+        newTrustAnchor = _shiftWindow(trustAnchor, nextAggregate, provenRoot, signaturePeriod);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -451,14 +524,17 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev Enforces the 2/3 supermajority (from the bitvector alone — cheap failures stay cheap),
-    ///      collects the NON-signers' keys from payload item 9 authenticating each against the
+    ///      collects the NON-signers' keys from payload item 10 authenticating each against the
     ///      anchor's committee Merkle root, derives the sync-committee signing root, and runs the
     ///      real on-chain BLS12-381 verification (`ClprBeaconBls.aggregateVerifyComplement`:
     ///      EIP-2537 G1MSM complement aggregation + RFC-9380 hash-to-G2 + pairing).
     ///      All points are EIP-2537 uncompressed.
-    /// @param trustAnchor the flat packed trust anchor (length pre-checked): committee aggregate at
-    ///        `ANCHOR_OFF_AGGREGATE`, committee Merkle root at `ANCHOR_OFF_COMMITTEE_ROOT`.
-    /// @param nonSignerItem payload item 9: one `key ‖ proof` entry per clear bit, ascending order.
+    /// @param trustAnchor the flat packed trust anchor (length pre-checked): committee `i`'s aggregate
+    ///        at `ANCHOR_OFF_COMMITTEES + i * COMMITTEE_STRIDE`, its Merkle root `COMMITTEE_OFF_ROOT`
+    ///        further on.
+    /// @param committeeIndex which window member verifies this bundle — `COMMITTEE_CURRENT` or
+    ///        `COMMITTEE_NEXT`, decided by the signature period in {verifyBundle}.
+    /// @param nonSignerItem payload item 10: one `key ‖ proof` entry per clear bit, ascending order.
     ///        With full participation the item is an empty RLP list and no key material is needed —
     ///        the stored aggregate alone feeds the pairing.
     /// @param signature the 256-byte uncompressed EIP-2537 G2 aggregate signature.
@@ -468,6 +544,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     /// @param genesisValidatorsRoot the 32-byte genesis validators root (for the signing domain).
     function _verifyBls(
         bytes calldata trustAnchor,
+        uint256 committeeIndex,
         Memory.Slice nonSignerItem,
         bytes memory signature,
         bytes memory bits,
@@ -475,11 +552,10 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes memory forkVersion,
         bytes32 genesisValidatorsRoot
     ) internal view {
-        // Thin calldata wrapper over the memory-based core: extract committeeRoot + aggregate from the
-        // flat trust anchor. The core is shared with verifyConfig's in-memory config committee.
+        uint256 off = ANCHOR_OFF_COMMITTEES + committeeIndex * COMMITTEE_STRIDE;
         _verifyBlsCore(
-            bytes32(trustAnchor[ANCHOR_OFF_COMMITTEE_ROOT:ANCHOR_OFF_COMMITTEE_ROOT + 32]),
-            trustAnchor[ANCHOR_OFF_AGGREGATE:ANCHOR_OFF_AGGREGATE + BLS_PUBKEY_LENGTH],
+            bytes32(trustAnchor[off + COMMITTEE_OFF_ROOT:off + COMMITTEE_OFF_ROOT + 32]),
+            trustAnchor[off:off + BLS_PUBKEY_LENGTH],
             nonSignerItem,
             signature,
             bits,
@@ -502,7 +578,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes32 beaconBlockRoot,
         bytes memory forkVersion,
         bytes32 genesisValidatorsRoot
-    ) internal view {
+    ) private view {
         // 2/3 supermajority on the participant count, decided by the bitvector before touching any
         // key material (the bits are covered by the signature check that follows: flipping a bit
         // changes the participant set and the pairing fails).
@@ -528,7 +604,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         ClprBeaconBls.aggregateVerifyComplement(aggregatePubkey, nonParticipants, signature, signingRoot);
     }
 
-    /// @dev Collect the NON-signers' uncompressed keys from payload item 9. The i-th entry is bound
+    /// @dev Collect the NON-signers' uncompressed keys from payload item 10. The i-th entry is bound
     ///      to the i-th CLEAR bit of the `Bitvector[512]` (bit `i` is bit `i % 8` of byte `i / 8`,
     ///      LSB-first): its Merkle fold runs along that committee index, so only the key the beacon
     ///      committed at that exact position can reproduce `committeeRoot`. This authentication is
@@ -640,32 +716,110 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     //   Internal: trust-anchor encoding + small helpers
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @dev Build the flat packed trust anchor (see the layout constants):
-    ///      `gvr ‖ forkVersion ‖ channelId ‖ aggregate ‖ committeeMerkleRoot ‖ codeHash` — 260 bytes.
-    ///      The keys are committed via `ClprCommitteeMerkle.root` (1,023 keccaks, once per
-    ///      rotation/genesis), never stored. The Java implementation mirrors this byte-for-byte.
+    /// @dev The scalar (non-committee) half of the trust anchor.
+    struct AnchorScalars {
+        bytes32 gvr;
+        bytes forkVersion;
+        bytes32 channelId;
+        bytes32 codeHash;
+        uint64 period;
+    }
+
+    /// @dev Build the flat packed window trust anchor
     function _encodeTrustAnchor(
-        bytes[] memory pubkeys,
-        bytes memory aggregatePubkey,
-        bytes32 gvr,
-        bytes memory forkVersion,
-        bytes32 channelId,
-        bytes32 codeHash
+        AnchorScalars memory scalars,
+        bytes memory currentAggregate,
+        bytes32 currentRoot,
+        bytes memory nextAggregate,
+        bytes32 nextRoot
     ) internal pure returns (bytes memory anchor) {
-        // Lengths are enforced upstream (_decodeCommittee / verifyConfig): 512 keys × 128 bytes,
-        // 128-byte aggregate, 4-byte forkVersion.
-        bytes32 committeeRoot = ClprCommitteeMerkle.root(pubkeys);
+        // Lengths are enforced upstream (_decodeCommittee / verifyConfig): 128-byte aggregates,
+        // 4-byte forkVersion.
         anchor = new bytes(TRUST_ANCHOR_LENGTH);
-        uint256 keyLen = BLS_PUBKEY_LENGTH; // inline assembly only accepts direct number constants
+        _writeScalars(anchor, scalars);
+        _writeCommittee(anchor, COMMITTEE_CURRENT, currentAggregate, currentRoot);
+        _writeCommittee(anchor, COMMITTEE_NEXT, nextAggregate, nextRoot);
+    }
+
+    /// @dev Write `gvr ‖ forkVersion ‖ channelId ‖ codeHash ‖ period` into `anchor` at their fixed
+    ///      offsets.
+    function _writeScalars(bytes memory anchor, AnchorScalars memory scalars) private pure {
+        bytes32 gvr = scalars.gvr;
+        bytes memory forkVersion = scalars.forkVersion;
+        bytes32 channelId = scalars.channelId;
+        bytes32 codeHash = scalars.codeHash;
+        (uint256 periodWord, uint256 tailMask) = _periodWord(scalars.period);
         assembly ("memory-safe") {
             let dst := add(anchor, 32)
             mstore(add(dst, ANCHOR_OFF_GVR), gvr)
             mcopy(add(dst, ANCHOR_OFF_FORK_VERSION), add(forkVersion, 32), FORK_VERSION_LENGTH)
             mstore(add(dst, ANCHOR_OFF_CHANNEL_ID), channelId)
-            mcopy(add(dst, ANCHOR_OFF_AGGREGATE), add(aggregatePubkey, 32), keyLen)
-            mstore(add(dst, ANCHOR_OFF_COMMITTEE_ROOT), committeeRoot)
             mstore(add(dst, ANCHOR_OFF_CODE_HASH), codeHash)
+            let slot := add(dst, ANCHOR_OFF_PERIOD)
+            mstore(slot, or(periodWord, and(mload(slot), tailMask)))
         }
+    }
+
+    /// @dev Write one `aggregate128 ‖ committeeRoot32` member into window slot `index`
+    ///      ({COMMITTEE_CURRENT} or {COMMITTEE_NEXT}).
+    function _writeCommittee(bytes memory anchor, uint256 index, bytes memory aggregate, bytes32 root) private pure {
+        // Inline assembly only accepts direct number constants, so the derived offsets are bound first.
+        uint256 off = ANCHOR_OFF_COMMITTEES + index * COMMITTEE_STRIDE;
+        uint256 rootOff = off + COMMITTEE_OFF_ROOT;
+        uint256 keyLen = BLS_PUBKEY_LENGTH;
+        assembly ("memory-safe") {
+            let dst := add(anchor, 32)
+            mcopy(add(dst, off), add(aggregate, 32), keyLen)
+            mstore(add(dst, rootOff), root)
+        }
+    }
+
+    /// @dev Advance the window by one period: `current` takes the stored `next` verbatim, `next` takes
+    ///      the freshly proven committee, and the start period becomes `newPeriod`.
+    function _shiftWindow(
+        bytes calldata trustAnchor,
+        bytes memory provenAggregate,
+        bytes32 provenRoot,
+        uint64 newPeriod
+    ) internal pure returns (bytes memory anchor) {
+        anchor = trustAnchor; // calldata → memory copy; scalars carry over untouched
+        uint256 keyLen = BLS_PUBKEY_LENGTH;
+        uint256 stride = COMMITTEE_STRIDE;
+        uint256 curOff = ANCHOR_OFF_COMMITTEES;
+        uint256 nextOff = ANCHOR_OFF_COMMITTEES + COMMITTEE_STRIDE;
+        uint256 nextRootOff = nextOff + COMMITTEE_OFF_ROOT;
+        uint256 periodOff = ANCHOR_OFF_PERIOD;
+        (uint256 periodWord, uint256 tailMask) = _periodWord(newPeriod);
+        assembly ("memory-safe") {
+            let dst := add(anchor, 32)
+            // current <- next (one contiguous aggregate ‖ root copy)
+            mcopy(add(dst, curOff), add(dst, nextOff), stride)
+            // next <- proven
+            mcopy(add(dst, nextOff), add(provenAggregate, 32), keyLen)
+            mstore(add(dst, nextRootOff), provenRoot)
+            // Read-modify-write, as in {_encodeTrustAnchor} — order-independent of the copies above.
+            let slot := add(dst, periodOff)
+            mstore(slot, or(periodWord, and(mload(slot), tailMask)))
+        }
+    }
+
+    /// @dev The `period` field as a full word plus the mask that preserves everything after it.
+    function _periodWord(uint64 period) private pure returns (uint256 periodWord, uint256 tailMask) {
+        uint256 periodBits = PERIOD_BYTE_LENGTH * 8;
+        periodWord = uint256(period) << (256 - periodBits);
+        tailMask = type(uint256).max >> periodBits;
+    }
+
+    /// @dev Length-check the anchor and read its scalar half.
+    function _decodeAnchorScalars(bytes calldata trustAnchor) internal pure returns (AnchorScalars memory) {
+        if (trustAnchor.length != TRUST_ANCHOR_LENGTH) revert InvalidTrustAnchor();
+        return AnchorScalars({
+            gvr: bytes32(trustAnchor[ANCHOR_OFF_GVR:ANCHOR_OFF_GVR + 32]),
+            forkVersion: trustAnchor[ANCHOR_OFF_FORK_VERSION:ANCHOR_OFF_FORK_VERSION + FORK_VERSION_LENGTH],
+            channelId: bytes32(trustAnchor[ANCHOR_OFF_CHANNEL_ID:ANCHOR_OFF_CHANNEL_ID + 32]),
+            codeHash: bytes32(trustAnchor[ANCHOR_OFF_CODE_HASH:ANCHOR_OFF_CODE_HASH + 32]),
+            period: uint64(bytes8(trustAnchor[ANCHOR_OFF_PERIOD:ANCHOR_OFF_PERIOD + PERIOD_BYTE_LENGTH]))
+        });
     }
 
     /// @dev First RLP prefix byte of an item — used to distinguish an empty string (0x80) from an

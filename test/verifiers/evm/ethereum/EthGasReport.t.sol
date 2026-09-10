@@ -39,6 +39,15 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
     uint256 internal constant S_ROTATION = 12;
     uint256 internal constant S_PERIOD_ID = 13;
 
+    /// @dev Everything `_verifyTailSteps` needs from the committee-selection step, bundled so the
+    ///      tail frame stays clear of the stack limit.
+    struct Selection {
+        uint64 signaturePeriod;
+        uint64 attestedPeriod;
+        uint256 committeeIndex;
+        bytes32 channelId;
+    }
+
     function verifyBundleSteps(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
         external
         view
@@ -48,10 +57,12 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         uint256 t = gasleft();
 
         // ── Step 1: trust anchor (flat packed reads) ─────────────────────────
-        if (trustAnchor.length != TRUST_ANCHOR_LENGTH) revert InvalidTrustAnchor();
-        bytes32 gvr = bytes32(trustAnchor[ANCHOR_OFF_GVR:ANCHOR_OFF_GVR + 32]);
-        bytes memory forkVersion = trustAnchor[ANCHOR_OFF_FORK_VERSION:ANCHOR_OFF_FORK_VERSION + FORK_VERSION_LENGTH];
-        bytes32 channelId = bytes32(trustAnchor[ANCHOR_OFF_CHANNEL_ID:ANCHOR_OFF_CHANNEL_ID + 32]);
+        AnchorScalars memory anchor = _decodeAnchorScalars(trustAnchor);
+        bytes32 gvr = anchor.gvr;
+        bytes memory forkVersion = anchor.forkVersion;
+        Selection memory sel;
+        sel.channelId = anchor.channelId;
+        uint64 anchorPeriod = anchor.period;
         t = _mark(g, S_ANCHOR, t);
 
         bytes memory proofMem = proofBytes;
@@ -70,7 +81,21 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         );
         t = _mark(g, S_HEADER_ROOT, t);
 
-        // ── Step 3: supermajority + BLS aggregate signature ──────────────────
+        // ── Step 3: signature slot → window member, then supermajority + BLS ─
+        uint64 signatureSlot = uint64(RLP.readUint256(payload[IDX_SIGNATURE_SLOT]));
+        sel.signaturePeriod = signatureSlot / SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        sel.attestedPeriod = header.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        if (signatureSlot <= header.slot || sel.signaturePeriod > sel.attestedPeriod + 1) {
+            revert InvalidSignatureSlot(signatureSlot, header.slot);
+        }
+        if (sel.signaturePeriod == anchorPeriod) {
+            sel.committeeIndex = COMMITTEE_CURRENT;
+        } else if (sel.signaturePeriod == anchorPeriod + 1) {
+            sel.committeeIndex = COMMITTEE_NEXT;
+        } else {
+            revert SignaturePeriodOutOfWindow(sel.signaturePeriod, anchorPeriod);
+        }
+
         Memory.Slice[] memory agg = RLP.readList(payload[IDX_SYNC_AGGREGATE]);
         if (agg.length != SYNC_AGGREGATE_FIELDS) revert InvalidSyncAggregate();
         bytes memory bits = RLP.readBytes(agg[0]);
@@ -78,7 +103,16 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         if (bits.length != SYNC_BITS_LENGTH || signature.length != BLS_SIGNATURE_LENGTH) revert InvalidSyncAggregate();
         t = _mark(g, S_SYNC_AGG_READ, t);
 
-        _verifyBls(trustAnchor, payload[IDX_NON_SIGNER_PROOFS], signature, bits, beaconBlockRoot, forkVersion, gvr);
+        _verifyBls(
+            trustAnchor,
+            sel.committeeIndex,
+            payload[IDX_NON_SIGNER_PROOFS],
+            signature,
+            bits,
+            beaconBlockRoot,
+            forkVersion,
+            gvr
+        );
         t = _mark(g, S_BLS, t);
 
         // ── Step 4: execution state root SSZ branch ──────────────────────────
@@ -91,9 +125,7 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         }
         t = _mark(g, S_EXEC_BRANCH, t);
 
-        newTrustAnchorId = _verifyTailSteps(
-            g, t, payload, trustAnchor, channelContext, executionStateRoot, header, gvr, forkVersion, channelId
-        );
+        newTrustAnchorId = _verifyTailSteps(g, t, payload, trustAnchor, channelContext, executionStateRoot, header, sel);
     }
 
     // Steps 5-7 run in their own stack frame to avoid stack too deep
@@ -105,9 +137,7 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         bytes calldata channelContext,
         bytes32 executionStateRoot,
         BeaconHeader memory header,
-        bytes32 gvr,
-        bytes memory forkVersion,
-        bytes32 channelId
+        Selection memory sel
     ) private view returns (bytes memory newTrustAnchorId) {
         // ── Step 5: MPT account proof ────────────────────────────────────────
         ClprTypes.ChannelContext memory ctx = ClprTypes.decodeChannelContext(channelContext);
@@ -121,7 +151,7 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
 
         // ── Step 6: MPT storage proof of the queue-metadata slots ────────────
         ClprTypes.QueueMetadata memory metadata =
-            _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, channelId);
+            _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, sel.channelId);
         t = _mark(g, S_STORAGE_PROOF, t);
 
         bytes[] memory messagePayloads = _decodeBundleContent(RLP.readBytes(payload[IDX_BUNDLE_CONTENT]));
@@ -140,21 +170,19 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         }
         t = _mark(g, S_MANIFEST, t);
 
-        // ── Step 7: optional next-sync-committee rotation ────────────────────
+        // ── Step 7: optional next-sync-committee rotation (widen or shift) ───
         bytes memory newTrustAnchor = _verifyRotation(
             payload[IDX_NEXT_COMMITTEE],
             payload[IDX_NEXT_COMMITTEE_BRANCH],
             header.stateRoot,
-            gvr,
-            forkVersion,
-            channelId,
-            expectedCodeHash
+            trustAnchor,
+            sel.signaturePeriod,
+            sel.attestedPeriod,
+            sel.committeeIndex
         );
         t = _mark(g, S_ROTATION, t);
 
-        newTrustAnchorId = newTrustAnchor.length == 0
-            ? newTrustAnchor
-            : abi.encodePacked(header.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1);
+        newTrustAnchorId = newTrustAnchor.length == 0 ? newTrustAnchor : abi.encodePacked(sel.signaturePeriod);
         _mark(g, S_PERIOD_ID, t);
 
         // Keep the decoded results live so the optimiser cannot elide the work being measured.
@@ -227,7 +255,11 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
 ///
 /// @dev Each N is measured in its **own test function**. Each test runs against cold storage so warming it up would
 ///      shave ~2.5k gas off whichever ran second.
-contract EthGasReportTest is EthBundleProofFactory {
+///
+///      {EthGasReportBase} holds the service, channel and spec plumbing; {EthGasReportTest} the
+///      measurements against a channel opened on the attested-period window; {EthGasReportShiftTest} the
+///      one measurement that needs the channel opened a period behind.
+abstract contract EthGasReportBase is EthBundleProofFactory {
     uint256 internal constant ACCOUNT_DEPTH = 7; // 7 branches + leaf = 8 nodes
     uint256 internal constant STORAGE_DEPTH = 3; // 3 branches + leaf = 4 nodes
 
@@ -339,7 +371,7 @@ contract EthGasReportTest is EthBundleProofFactory {
             abi.encodePacked(r, s, v),
             bytes32(0),
             address(ethVerifier),
-            _configProof(_spec(0), PEER_CHAIN),
+            _configProof(_configSpec(), PEER_CHAIN),
             ""
         );
     }
@@ -359,6 +391,11 @@ contract EthGasReportTest is EthBundleProofFactory {
         require(ok, "fund service");
     }
 
+    /// @dev The window the channel is opened with.
+    function _configSpec() internal view virtual returns (BundleSpec memory) {
+        return _spec(0);
+    }
+
     function _spec(uint256 n) internal view returns (BundleSpec memory) {
         return BundleSpec({
             messageCount: n,
@@ -366,7 +403,7 @@ contract EthGasReportTest is EthBundleProofFactory {
             accountDepth: ACCOUNT_DEPTH,
             storageDepth: STORAGE_DEPTH,
             denseBranches: true,
-            rotation: false,
+            rotation: Rotation.None,
             manifest: false,
             ackedByPeer: 0,
             channelId: channelId,
@@ -377,6 +414,19 @@ contract EthGasReportTest is EthBundleProofFactory {
         });
     }
 
+    /// @dev EIP-2028 intrinsic calldata cost: 4 gas per zero byte, 16 per non-zero. Charged before
+    ///      execution begins, so it is invisible to `gasleft()` deltas
+    function _calldataGas(bytes memory data) internal pure returns (uint256 g) {
+        for (uint256 i = 0; i < data.length; i++) {
+            g += data[i] == 0 ? 4 : 16;
+        }
+    }
+}
+
+/// @title EthGasReportTest
+/// @notice The headline and breakdown measurements, against a channel whose stored window is
+///         `{ signer, peer }` at the attested period.
+contract EthGasReportTest is EthGasReportBase {
     // ═════════════════════════════════════════════════════════════════════════
     //   Smoke: the proof is genuinely accepted end to end
     // ═════════════════════════════════════════════════════════════════════════
@@ -490,14 +540,6 @@ contract EthGasReportTest is EthBundleProofFactory {
         console.log("verifyBundle, N =", n, ":", used);
     }
 
-    /// @dev EIP-2028 intrinsic calldata cost: 4 gas per zero byte, 16 per non-zero. Charged before
-    ///      execution begins, so it is invisible to `gasleft()` deltas
-    function _calldataGas(bytes memory data) internal pure returns (uint256 g) {
-        for (uint256 i = 0; i < data.length; i++) {
-            g += data[i] == 0 ? 4 : 16;
-        }
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
     //   Inside verifyBundle
     // ═════════════════════════════════════════════════════════════════════════
@@ -516,7 +558,7 @@ contract EthGasReportTest is EthBundleProofFactory {
             "   top-level RLP decode    ",
             "2  beacon header decode    ",
             "   beacon header SSZ root  ",
-            "3  sync-aggregate read     ",
+            "3  sig slot + sync-agg read",
             "   BLS verify (total)      ",
             "4  execution SSZ branch    ",
             "5  channel context decode  ",
@@ -626,33 +668,110 @@ contract EthGasReportTest is EthBundleProofFactory {
         }
     }
 
-    function test_report_optionalItems() public {
-        BuiltBundle memory base = _buildBundle(_spec(1));
+    // ═════════════════════════════════════════════════════════════════════════
+    //   Optional payload items — one test each, so no measurement inherits the caller-side memory
+    //   expansion of an earlier bundle build in the same frame
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// @dev Widen: the bundle re-proves the window's stored `next` from the attested state.
+    function test_report_rotationWiden() public {
+        BundleSpec memory spec = _spec(1);
+        spec.rotation = Rotation.Widen;
+        BuiltBundle memory bundle = _buildBundle(spec);
+
         uint256 g0 = gasleft();
-        ethVerifier.verifyBundle(base.proof, base.trustAnchor, base.channelContext);
-        uint256 baseGas = g0 - gasleft();
+        (,, bytes memory newAnchor,,) =
+            ethVerifier.verifyBundle(bundle.proof, bundle.trustAnchor, bundle.channelContext);
+        uint256 used = g0 - gasleft();
+        assertEq(newAnchor.length, 0, "widen must not move the window");
 
-        BundleSpec memory rotSpec = _spec(1);
-        rotSpec.rotation = true;
-        BuiltBundle memory rot = _buildBundle(rotSpec);
-        g0 = gasleft();
-        ethVerifier.verifyBundle(rot.proof, rot.trustAnchor, rot.channelContext);
-        uint256 rotGas = g0 - gasleft();
+        _reportOptional("rotation: widen (window unchanged)", bundle, used);
+    }
 
-        BundleSpec memory manSpec = _spec(1);
-        manSpec.manifest = true;
-        BuiltBundle memory man = _buildBundle(manSpec);
-        g0 = gasleft();
-        ethVerifier.verifyBundle(man.proof, man.trustAnchor, man.channelContext);
-        uint256 manGas = g0 - gasleft();
+    /// @dev Shift: the anchor is one period behind, the bundle is verified by its `next` member and
+    ///      proves the committee after it.
+    function test_report_rotationShift() public {
+        BundleSpec memory spec = _spec(1);
+        spec.rotation = Rotation.Shift;
+        BuiltBundle memory bundle = _buildBundle(spec);
 
-        console.log("=== optional payload items (N=1, 512/512) ===");
-        console.log("baseline verifyBundle   :", baseGas);
-        console.log("with committee rotation :", rotGas);
-        console.log("  rotation delta        :", rotGas - baseGas);
-        console.log("  rotation proof bytes  :", rot.proof.length);
-        console.log("  rotation calldata gas :", _calldataGas(rot.proof));
-        console.log("with endpoint manifest  :", manGas);
-        console.log("  manifest delta        :", manGas - baseGas);
+        uint256 g0 = gasleft();
+        (,, bytes memory newAnchor, bytes memory newId,) =
+            ethVerifier.verifyBundle(bundle.proof, bundle.trustAnchor, bundle.channelContext);
+        uint256 used = g0 - gasleft();
+        assertEq(newAnchor.length, bundle.trustAnchor.length, "shift must return the successor anchor");
+        assertEq(newId, abi.encodePacked(ATTESTED_PERIOD), "shift id is the new window start");
+
+        _reportOptional("rotation: shift (window advances)", bundle, used);
+    }
+
+    function test_report_endpointManifest() public {
+        BundleSpec memory spec = _spec(1);
+        spec.manifest = true;
+        BuiltBundle memory bundle = _buildBundle(spec);
+
+        uint256 g0 = gasleft();
+        ethVerifier.verifyBundle(bundle.proof, bundle.trustAnchor, bundle.channelContext);
+        uint256 used = g0 - gasleft();
+
+        _reportOptional("endpoint manifest", bundle, used);
+    }
+
+    /// @dev A Widen through the service: the stored window `{ signer, peer }` is unchanged afterwards.
+    function test_gas_submitBundle_widen() public {
+        BundleSpec memory spec = _spec(1);
+        spec.rotation = Rotation.Widen;
+        BuiltBundle memory bundle = _buildBundle(spec);
+        bytes memory before = service.getChannel(channelId).trustAnchor;
+
+        uint256 g0 = gasleft();
+        service.submitBundle(channelId, bundle.proof);
+        uint256 total = g0 - gasleft();
+        assertEq(service.getChannel(channelId).trustAnchor, before, "widen leaves the stored anchor alone");
+
+        console.log("submitBundle TOTAL, N = 1, rotation: widen :", total);
+        console.log("  proof calldata bytes         :", bundle.proof.length);
+        console.log("  proof calldata intrinsic gas :", _calldataGas(bundle.proof));
+    }
+
+    /// @dev Print one optional-item measurement next to the probe's own reading of the item's step.
+    function _reportOptional(string memory label, BuiltBundle memory bundle, uint256 verifyGas) internal view {
+        (uint256[] memory steps,) = probe.verifyBundleSteps(bundle.proof, bundle.trustAnchor, bundle.channelContext);
+        console.log("=== optional payload item (N=1, 512/512):", label, "===");
+        console.log("verifyBundle total          :", verifyGas);
+        console.log("  step 7 rotation (probe)   :", steps[12]);
+        console.log("  endpoint manifest (probe) :", steps[11]);
+        console.log("  proof calldata bytes      :", bundle.proof.length);
+        console.log("  proof calldata gas        :", _calldataGas(bundle.proof));
+    }
+}
+
+/// @title EthGasReportShiftTest
+/// @notice The same service and channel, opened one period behind — window `{ peer, signer }` — so a
+///         Shift bundle can go through `submitBundle` and the cost of storing the 428-byte successor
+///         anchor is measured alongside the verification.
+contract EthGasReportShiftTest is EthGasReportBase {
+    function _configSpec() internal view override returns (BundleSpec memory spec) {
+        spec = _spec(0);
+        spec.rotation = Rotation.Shift;
+    }
+
+    function test_gas_submitBundle_shift() public {
+        BundleSpec memory spec = _spec(1);
+        spec.rotation = Rotation.Shift;
+        BuiltBundle memory bundle = _buildBundle(spec);
+        assertEq(service.getChannel(channelId).trustAnchor, bundle.trustAnchor, "channel opened on the shift window");
+
+        uint256 g0 = gasleft();
+        service.submitBundle(channelId, bundle.proof);
+        uint256 total = g0 - gasleft();
+
+        ClprTypes.Channel memory updated = service.getChannel(channelId);
+        assertEq(updated.trustAnchorId, abi.encodePacked(ATTESTED_PERIOD), "window advanced to the attested period");
+        assertEq(updated.receivedMessageId, 1, "message delivered in the same bundle");
+
+        console.log("submitBundle TOTAL, N = 1, rotation: shift :", total);
+        console.log("  proof calldata bytes         :", bundle.proof.length);
+        console.log("  proof calldata intrinsic gas :", _calldataGas(bundle.proof));
     }
 }

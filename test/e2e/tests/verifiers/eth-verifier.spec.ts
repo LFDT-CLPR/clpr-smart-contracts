@@ -4,7 +4,11 @@ import {keccak256, type Hex} from "viem";
 import type {ChainClients} from "../../lib/clients.js";
 import {deployE2EPair, type DeployedAddresses} from "../../deploy/deploy.js";
 import {createBackend, parseBackendSpec, type Backend} from "../../backend/index.js";
-import {buildEthMainnetProof, encodeEthTrustAnchor} from "../../relay/buildEthMainnetProof.js";
+import {
+    buildEthMainnetProof,
+    encodeEthTrustAnchor,
+    SLOTS_PER_SYNC_COMMITTEE_PERIOD
+} from "../../relay/buildEthMainnetProof.js";
 import {deriveCommittee, firstNParticipants, type BlsCommittee} from "../../relay/bls.js";
 import {provisionE2ESuite} from "../../lib/provisionSuite.js";
 import {wireConfig, registerEndpoint} from "../../deploy/wire.js";
@@ -28,6 +32,11 @@ const ARTIFACT = "EthMainnetVerifier";
 const SYNC_COMMITTEE_SIZE = 512;
 const SUPERMAJORITY = 342; // ceil(2/3 · 512): 3·342 = 1026 ≥ 1024
 
+
+/// `Channel.trustAnchorId` for a sync-committee period: 8-byte big-endian, lower-case hex.
+function periodId(period: bigint): Hex {
+    return ("0x" + period.toString(16).padStart(16, "0")) as Hex;
+}
 
 export function ethVerifierShouldSkip(): boolean {
     const {kindA, kindB} = parseBackendSpec();
@@ -167,8 +176,12 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
     let channelContext: Hex; // ClprTypes.encodeChannelContext: channelId(32) ‖ serviceAddr(20)
     let ethVerifier: Hex; // EthMainnetVerifier pinned to chain A's ClprService
     let serviceCodeHash: Hex;
+    let prevCommittee: BlsCommittee; // the window's `current` while `committee` is its `next`
     let committee: BlsCommittee;
     let nextCommittee: BlsCommittee; // a distinct committee to rotate into
+    /// C[1]…C[6] for the multi-period catch-up: index == the sync-committee period the committee is
+    /// current for, so the window at period p is { C[p], C[p+1] }.
+    let C: BlsCommittee[];
 
     const TEST_PAYLOAD = "0xdeadbeefcafe" as Hex;
 
@@ -177,9 +190,13 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
         channelContext = (channelId + addrsA.clprService.slice(2)) as Hex;
         ethVerifier = await deployEthVerifier(A, ARTIFACT);
 
-        // Real 512-member sync committees (deterministic test keys): the active one and a successor.
+        prevCommittee = deriveCommittee(SYNC_COMMITTEE_SIZE, "eth-verifier-bls-e2e-prev");
         committee = deriveCommittee(SYNC_COMMITTEE_SIZE, "eth-verifier-bls-e2e");
         nextCommittee = deriveCommittee(SYNC_COMMITTEE_SIZE, "eth-verifier-bls-e2e-next");
+        C = [];
+        for (let p = 0; p <= 6; p++) {
+            C[p] = deriveCommittee(SYNC_COMMITTEE_SIZE, `eth-verifier-catchup-${p}`);
+        }
     }, 300_000);
 
     afterAll(async () => {
@@ -257,12 +274,37 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
 
     // ── Rotation (dual-encoding next committee) ──────────────────────────────────
 
-    it("verifyBundle rotates: proves the compressed committee and stores the uncompressed anchor", async () => {
+    /// The window's whole point: the source chain has crossed into period 1 while the anchor still
+    /// starts at period 0, and the bundle verifies with no advance submitted at the boundary.
+    it("verifyBundle accepts a bundle signed by the window's next member, with no advance", async () => {
         const {proofBytes, trustAnchor} = await buildEthMainnetProof({
             rpcUrl: backend.rpcA(),
             serviceAddr: addrsA.clprService,
             channelId,
             payloads: [TEST_PAYLOAD],
+            headerSlot: SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1n, // period 1
+            window: {current: prevCommittee, next: committee, period: 0n},
+            bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)}
+        });
+
+        const [metadata, messagePayloads, newTrustAnchor, newTrustAnchorId] = await readVerifyBundle(
+            A, ARTIFACT, ethVerifier, proofBytes, trustAnchor, channelContext
+        );
+        expect(metadata.state).toBe(1);
+        expect(messagePayloads).toHaveLength(1);
+        // No rotation data ⇒ the window does not move.
+        expect(newTrustAnchor).toBe("0x");
+        expect(newTrustAnchorId).toBe("0x");
+    });
+
+    it("verifyBundle shifts the window: proves the compressed committee and stores it as the new next", async () => {
+        const {proofBytes, trustAnchor} = await buildEthMainnetProof({
+            rpcUrl: backend.rpcA(),
+            serviceAddr: addrsA.clprService,
+            channelId,
+            payloads: [TEST_PAYLOAD],
+            headerSlot: SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1n, // period 1 = anchorPeriod + 1
+            window: {current: prevCommittee, next: committee, period: 0n},
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)},
             rotation: {committee: nextCommittee}
         });
@@ -271,19 +313,21 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             A, ARTIFACT, ethVerifier, proofBytes, trustAnchor, channelContext
         );
         expect(metadata.state).toBe(1);
-        // The successor anchor stores the UNCOMPRESSED next committee, re-encoded with the same
-        // gvr/forkVersion/channelId — exactly what encodeEthTrustAnchor produces for that committee.
-        const expectedAnchor = encodeEthTrustAnchor(channelId, serviceCodeHash, {
-            pubkeys: nextCommittee.pubkeys,
-            aggregate: nextCommittee.aggregate
-        });
+
+        const expectedAnchor = encodeEthTrustAnchor(
+            channelId,
+            serviceCodeHash,
+            {pubkeys: committee.pubkeys, aggregate: committee.aggregate},
+            {pubkeys: nextCommittee.pubkeys, aggregate: nextCommittee.aggregate},
+            1n
+        );
         expect(newTrustAnchor.toLowerCase()).toBe(expectedAnchor.toLowerCase());
-        // The anchor id is the next committee's sync-committee period (period(attestedSlot)+1) as an
-        // 8-byte big-endian value, not the full anchor. The synthetic header slot is 1 → period 0 → 1.
+        // The id is the window's START period as an 8-byte big-endian value — the period the chain has
+        // actually reached, not the period + 1 the point-encoded anchor used to report.
         expect(newTrustAnchorId.toLowerCase()).toBe("0x0000000000000001");
 
         const gas = await estimateVerifyBundleGas(A, ARTIFACT, ethVerifier, proofBytes, trustAnchor, channelContext);
-        console.log(`[gas] verifyBundle @ 342/512 + ROTATION: ${gas}`);
+        console.log(`[gas] verifyBundle @ 342/512 + WINDOW SHIFT: ${gas}`);
     });
 
     it("verifyBundle reverts when an uncompressed next key does not match its compressed form", async () => {
@@ -292,8 +336,99 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
             serviceAddr: addrsA.clprService,
             channelId,
             payloads: [TEST_PAYLOAD],
+            headerSlot: SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1n,
+            window: {current: prevCommittee, next: committee, period: 0n},
             bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)},
             rotation: {committee: nextCommittee, mismatchUncompressed: true}
+        });
+
+        await expect(readVerifyBundle(A, ARTIFACT, ethVerifier, proofBytes, trustAnchor, channelContext)).rejects.toThrow();
+    });
+
+    // ── Multi-period catch-up ───────────────────────
+
+    it(
+        "verifyBundle walks the window from period 1 to period 5, then accepts a period-5 bundle",
+        async () => {
+            const participants = firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY);
+            // Anchor installed at period 1: the window is { C1, C2 }.
+            let anchor = encodeEthTrustAnchor(channelId, serviceCodeHash, C[1], C[2], 1n);
+
+            for (let step = 0; step < 4; step++) {
+                const p = BigInt(2 + step); // signature periods 2, 3, 4, 5
+                const i = 2 + step;
+                const {proofBytes, trustAnchor: built} = await buildEthMainnetProof({
+                    rpcUrl: backend.rpcA(),
+                    serviceAddr: addrsA.clprService,
+                    channelId,
+                    payloads: [],
+                    headerSlot: p * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1n,
+                    // The anchor is one period behind the bundle, so `next` is the member that verifies it.
+                    window: {current: C[i - 1], next: C[i], period: p - 1n},
+                    bls: {committee: C[i], participants},
+                    rotation: {committee: C[i + 1]}
+                });
+
+                expect(built.toLowerCase()).toBe(anchor.toLowerCase());
+
+                const [metadata, , newTrustAnchor, newTrustAnchorId] = await readVerifyBundle(
+                    A, ARTIFACT, ethVerifier, proofBytes, anchor, channelContext
+                );
+                expect(metadata.state).toBe(1);
+                expect(newTrustAnchorId.toLowerCase()).toBe(periodId(p));
+                anchor = newTrustAnchor; // feed the RETURNED anchor into the next step
+            }
+
+            // Four advances land the window on { C5, C6 }.
+            expect(anchor.toLowerCase()).toBe(
+                encodeEthTrustAnchor(channelId, serviceCodeHash, C[5], C[6], 5n).toLowerCase()
+            );
+
+            const {proofBytes} = await buildEthMainnetProof({
+                rpcUrl: backend.rpcA(),
+                serviceAddr: addrsA.clprService,
+                channelId,
+                payloads: [TEST_PAYLOAD],
+                headerSlot: 5n * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1n,
+                window: {current: C[5], next: C[6], period: 5n},
+                bls: {committee: C[5], participants}
+            });
+            const [metadata, messagePayloads, newTrustAnchor, newTrustAnchorId] = await readVerifyBundle(
+                A, ARTIFACT, ethVerifier, proofBytes, anchor, channelContext
+            );
+            expect(metadata.state).toBe(1);
+            expect(messagePayloads).toHaveLength(1);
+            expect(messagePayloads[0].toLowerCase()).toBe(TEST_PAYLOAD.toLowerCase());
+            expect(newTrustAnchor).toBe("0x"); // no rotation data ⇒ the window does not move
+            expect(newTrustAnchorId).toBe("0x");
+
+            const later = await buildEthMainnetProof({
+                rpcUrl: backend.rpcA(),
+                serviceAddr: addrsA.clprService,
+                channelId,
+                payloads: [],
+                headerSlot: 6n * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1n,
+                window: {current: C[5], next: C[6], period: 5n},
+                bls: {committee: C[6], participants}
+            });
+            const [laterMetadata] = await readVerifyBundle(
+                A, ARTIFACT, ethVerifier, later.proofBytes, anchor, channelContext
+            );
+            expect(laterMetadata.state).toBe(1);
+        },
+        180_000
+    );
+
+    it("verifyBundle reverts when the signature period is outside the window", async () => {
+        // Anchor starts at period 0, so the window covers periods 0 and 1.
+        const {proofBytes, trustAnchor} = await buildEthMainnetProof({
+            rpcUrl: backend.rpcA(),
+            serviceAddr: addrsA.clprService,
+            channelId,
+            payloads: [],
+            headerSlot: SLOTS_PER_SYNC_COMMITTEE_PERIOD * 3n + 1n,
+            window: {current: prevCommittee, next: committee, period: 0n},
+            bls: {committee, participants: firstNParticipants(SYNC_COMMITTEE_SIZE, SUPERMAJORITY)}
         });
 
         await expect(readVerifyBundle(A, ARTIFACT, ethVerifier, proofBytes, trustAnchor, channelContext)).rejects.toThrow();
@@ -302,8 +437,7 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
     // ── Downstream (post-BLS) guards: codeHash pinning, anchor decode, channel binding ──────────
 
     it("verifyBundle reverts when the pinned code hash does not match", async () => {
-        // Build a proof with real BLS + account proof, but supply a trust anchor carrying a wrong
-        // code hash — BLS and account proof authenticate, but the codeHash check in the anchor fails.
+        // Build a proof with real BLS + account proof, but supply a trust anchor carrying a wrong code hash.
         const wrongCodeHash = `0x${"ba".repeat(32)}` as Hex;
 
         const {proofBytes} = await buildEthMainnetProof({
@@ -334,9 +468,6 @@ describe.skipIf(ethVerifierShouldSkip())("EthMainnetVerifier — Anvil (verifyBu
     });
 
     it("verifyBundle reverts when the storage proof is bound to the wrong channelId", async () => {
-        // Proof's storage slots are derived for a DIFFERENT channelId; the anchor (real channelId,
-        // real committee) verifies BLS but derives different slots → the storage proof cannot satisfy
-        // them. (channelId is not part of the signing root, so the signature stays valid.)
         const wrongChannelId = keccak256("0xcafe") as Hex;
         const {proofBytes} = await buildEthMainnetProof({
             rpcUrl: backend.rpcA(),

@@ -13,12 +13,23 @@ import {
 
 /// Relay-side builder for `EthMainnetVerifier.verifyBundle` proofs.
 ///
-/// Mirrors the Solidity verifier's 10-item RLP layout (see EthMainnetVerifier.sol):
-///   [ attestedHeader, syncAggregate, executionStateRoot, executionBranch,
-///     nextCommittee, nextCommitteeBranch, accountProof, storageProof, bundleContent,
-///     nonSignerProofs ]
-/// and the FLAT packed trust anchor (260 B)
-///   gvr(32) ‖ forkVersion(4) ‖ channelId(32) ‖ aggregate(128) ‖ committeeMerkleRoot(32) ‖ codeHash(32).
+/// Mirrors the Solidity verifier's 11-item RLP layout byte-for-byte — `EthMainnetVerifier`'s
+/// `_encodeTrustAnchor` names this file as the reference, so the two must not drift:
+///   [ 0: attestedHeader        [slot, proposerIndex, parentRoot, stateRoot, bodyRoot]
+///     1: signatureSlot         the slot the committee SIGNED at (strictly after the attested
+///                              header's slot); its period selects the window member
+///     2: syncAggregate         [bits(64), signature(256)]
+///     3: executionStateRoot
+///     4: executionBranch       9 SSZ siblings (gindex 802)
+///     5: nextCommittee         [uncompressedPubkeys[512], aggregate] or absent (empty RLP string)
+///     6: nextCommitteeBranch   6 SSZ siblings (gindex 87) or absent (empty RLP list)
+///     7: accountProof
+///     8: storageProof
+///     9: bundleContent
+///    10: nonSignerProofs       one entry per clear participation bit (empty list at 512/512) ]
+/// and the FLAT packed WINDOW trust anchor (428 B), holding `{ current, next }`:
+///   gvr(32) ‖ forkVersion(4) ‖ channelId(32) ‖ codeHash(32) ‖ period(8)
+///     ‖ [aggregate(128) ‖ committeeMerkleRoot(32)] × 2.
 ///
 /// Pass `bls` to attach a real sync-committee signature (a committee + aggregate signature generated
 /// with @noble/curves over the exact SSZ signing root); omit it to synthesize a placeholder committee
@@ -160,7 +171,7 @@ export function committeeMerkleProof(levels: Buffer[][], index: number): Buffer 
     return Buffer.concat(sibs);
 }
 
-/// Payload item 9: one `key(128) ‖ proof(288)` entry per clear participation bit, ascending order.
+/// Payload item 10: one `key(128) ‖ proof(288)` entry per clear participation bit, ascending order.
 function nonSignerProofEntries(keys: Buffer[], participants: boolean[]): Buffer[] {
     const levels = committeeMerkleLevels(keys);
     const entries: Buffer[] = [];
@@ -170,32 +181,52 @@ function nonSignerProofEntries(keys: Buffer[], participants: boolean[]): Buffer[
     return entries;
 }
 
-/// Encode the FLAT packed trust anchor (mirrors EthMainnetVerifier's fixed-offset layout — no RLP):
-/// gvr(32) ‖ forkVersion(4) ‖ channelId(32) ‖ aggregate(128) ‖ committeeMerkleRoot(32) ‖ codeHash(32) = 260 B.
-/// The 512 keys are committed via the Merkle root, never carried in the anchor.
-/// Pass a real `committee` to anchor against actual BLS pubkeys; otherwise a synthetic 512-committee
-/// is used (only the lengths matter when BLS is bypassed by the harness).
+/// Encode the FLAT packed trust anchor
+///
+/// Pass real committees to anchor against actual BLS pubkeys; otherwise a synthetic 512-committee is
+/// used (only the lengths matter when BLS is bypassed by the harness).
 export function encodeEthTrustAnchor(
     channelId: Hex,
     codeHash: Hex,
-    committee?: {pubkeys: Buffer[]; aggregate: Buffer}
+    committee?: {pubkeys: Buffer[]; aggregate: Buffer},
+    nextCommittee?: {pubkeys: Buffer[]; aggregate: Buffer},
+    period: bigint = 0n
 ): Hex {
-    const c = committee ?? syntheticCommittee();
-    if (c.pubkeys.length !== SYNC_COMMITTEE_SIZE) throw new Error("trust anchor: expected 512 pubkeys");
+    const current = committee ?? syntheticCommittee();
+    const next = nextCommittee ?? syntheticCommittee();
+    for (const c of [current, next]) {
+        if (c.pubkeys.length !== SYNC_COMMITTEE_SIZE) throw new Error("trust anchor: expected 512 pubkeys");
+    }
+    const periodBytes = Buffer.alloc(8);
+    periodBytes.writeBigUInt64BE(period);
     const anchor = Buffer.concat([
         hexToBuf(GVR),
         hexToBuf(FORK_VERSION),
         hexToBuf(channelId),
-        c.aggregate,
-        committeeMerkleRoot(c.pubkeys),
-        hexToBuf(codeHash)
+        hexToBuf(codeHash),
+        periodBytes,
+        current.aggregate,
+        committeeMerkleRoot(current.pubkeys),
+        next.aggregate,
+        committeeMerkleRoot(next.pubkeys)
     ]);
     return ("0x" + anchor.toString("hex")) as Hex;
 }
 
+/// Beacon slots per sync-committee period — mirrors EthMainnetVerifier's mainnet preset.
+export const SLOTS_PER_SYNC_COMMITTEE_PERIOD = 8192n;
+
+/// Minimal big-endian RLP integer encoding: zero is the empty string, otherwise no leading zero byte.
+function bigintToMinimalBuf(v: bigint): Buffer {
+    if (v === 0n) return Buffer.alloc(0);
+    let hex = v.toString(16);
+    if (hex.length % 2 === 1) hex = "0" + hex;
+    return Buffer.from(hex, "hex");
+}
+
 // Attested-header fields the verifier checks (bodyRoot) and that feed the BLS signing root. The
 // slot/proposer here MUST equal the RLP-encoded values below so the signing root matches on-chain.
-const HEADER_SLOT = 1n;
+const DEFAULT_HEADER_SLOT = 1n;
 const HEADER_PROPOSER_INDEX = 1n;
 
 function bundleContentProto(payloads: Hex[]): Buffer {
@@ -241,8 +272,16 @@ export async function buildEthMainnetProof(opts: {
     /// `mismatchUncompressed: true` corrupts one uncompressed key so the on-chain compress-and-compare
     /// fails (for negative tests).
     rotation?: {committee: BlsCommittee; mismatchUncompressed?: boolean};
+    /// Slot of the attested beacon header. `signatureSlot` is always this + 1, so both sit in the same
+    /// sync-committee period. Defaults to slot 1 (period 0).
+    headerSlot?: bigint;
+    /// The anchor's window. When omitted, `current` is the BLS committee (or a synthetic one), `next`
+    /// is synthetic, and the window starts at the header slot's period.
+    window?: {current: BlsCommittee; next: BlsCommittee; period: bigint};
 }): Promise<EthBundleProof> {
     const {rpcUrl, serviceAddr, channelId, payloads} = opts;
+    const headerSlot = opts.headerSlot ?? DEFAULT_HEADER_SLOT;
+    const signatureSlot = headerSlot + 1n;
 
     const blockTag = await rpcCall<string>(rpcUrl, "eth_blockNumber", []);
     const block = await rpcCall<{stateRoot: string}>(rpcUrl, "eth_getBlockByNumber", [blockTag, false]);
@@ -311,14 +350,14 @@ export async function buildEthMainnetProof(opts: {
     // attestedHeader [slot, proposerIndex, parentRoot, stateRoot, bodyRoot] — bodyRoot is checked by
     // the execution branch; slot/proposer/parentRoot/stateRoot feed the BLS signing root.
     const attestedHeader = [
-        Buffer.from([Number(HEADER_SLOT)]), // slot (must match HEADER_SLOT)
+        bigintToMinimalBuf(headerSlot), // slot (must match the value fed to the signing root)
         Buffer.from([Number(HEADER_PROPOSER_INDEX)]), // proposerIndex (must match HEADER_PROPOSER_INDEX)
         parentRoot,
         beaconStateRoot,
         bodyRoot
     ];
 
-    // syncAggregate [bits(64), signature(256)] + item 9 (non-signer keys, Merkle-authenticated
+    // syncAggregate [bits(64), signature(256)] + item 10 (non-signer keys, Merkle-authenticated
     // against the anchor's committee root — ALWAYS the anchor committee, even when signWith differs).
     let syncAggregate: Buffer[];
     let nonSignerProofsItem: Buffer[] = []; // empty RLP list at full participation
@@ -326,7 +365,7 @@ export async function buildEthMainnetProof(opts: {
     if (opts.bls) {
         // Real path: derive the exact signing root the committee signs, then aggregate-sign it.
         const headerRoot = beaconBlockHeaderRoot(
-            HEADER_SLOT, HEADER_PROPOSER_INDEX, parentRoot, beaconStateRoot, bodyRoot
+            headerSlot, HEADER_PROPOSER_INDEX, parentRoot, beaconStateRoot, bodyRoot
         );
         const domain = computeSyncCommitteeDomain(hexToBuf(FORK_VERSION), hexToBuf(GVR));
         const signingRoot = computeSigningRoot(headerRoot, domain);
@@ -337,27 +376,34 @@ export async function buildEthMainnetProof(opts: {
         nonSignerProofsItem = nonSignerProofEntries(opts.bls.committee.pubkeys, opts.bls.participants);
         trustAnchorCommittee = {pubkeys: opts.bls.committee.pubkeys, aggregate: opts.bls.committee.aggregate};
     } else {
-        // Harness path: all bits set → zero non-signers → item 9 stays an empty list.
+        // Harness path: all bits set → zero non-signers → item 10 stays an empty list.
         syncAggregate = [Buffer.alloc(SYNC_BITS_LENGTH, 0xff), Buffer.alloc(BLS_SIGNATURE_LENGTH, 0)];
     }
     const executionBranch = branch; // 9 × 32-byte siblings
 
     const topLevel = rlpEncode([
         attestedHeader, // 0
-        syncAggregate, // 1
-        executionStateRoot, // 2
-        executionBranch, // 3
-        nextCommitteeItem, // 4 nextCommittee (dual-encoding) or absent (empty RLP string)
-        nextCommitteeBranchItem, // 5 nextCommitteeBranch or absent (empty RLP list)
-        accountProof, // 6
-        storageProof, // 7
-        bundleContentProto(payloads), // 8
-        nonSignerProofsItem // 9 non-signer key+proof entries (empty list at 512/512)
+        bigintToMinimalBuf(signatureSlot), // 1 signatureSlot — selects the window member
+        syncAggregate, // 2
+        executionStateRoot, // 3
+        executionBranch, // 4
+        nextCommitteeItem, // 5 nextCommittee (dual-encoding) or absent (empty RLP string)
+        nextCommitteeBranchItem, // 6 nextCommitteeBranch or absent (empty RLP list)
+        accountProof, // 7
+        storageProof, // 8
+        bundleContentProto(payloads), // 9
+        nonSignerProofsItem // 10 non-signer key+proof entries (empty list at 512/512)
     ]);
 
     return {
         proofBytes: ("0x" + topLevel.toString("hex")) as Hex,
-        trustAnchor: encodeEthTrustAnchor(channelId, proof.codeHash as Hex, trustAnchorCommittee),
+        trustAnchor: encodeEthTrustAnchor(
+            channelId,
+            proof.codeHash as Hex,
+            opts.window?.current ?? trustAnchorCommittee,
+            opts.window?.next,
+            opts.window?.period ?? headerSlot / SLOTS_PER_SYNC_COMMITTEE_PERIOD
+        ),
         channelId,
         codeHash: proof.codeHash as Hex
     };

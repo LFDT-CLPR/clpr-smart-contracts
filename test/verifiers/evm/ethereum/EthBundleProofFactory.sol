@@ -8,6 +8,7 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {ClprCommitteeMerkle} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprCommitteeMerkle.sol";
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 
 /// @title EthBundleProofFactory
@@ -32,20 +33,30 @@ import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 ///      test would produce a 1-node proof and understate MPT gas several-fold.
 abstract contract EthBundleProofFactory is EthCommitteeFixtures {
     // ── Beacon / chain constants for the synthetic chain ─────────────────────
-    bytes4 internal constant FORK_VERSION = 0x04000000;
-    bytes32 internal constant GVR = bytes32(uint256(0x9999));
-    uint64 internal constant ATTESTED_SLOT = 8192 * 5 + 17; // period 5
+    // FORK_VERSION, GVR and SLOTS_PER_SYNC_COMMITTEE_PERIOD come from {EthCommitteeFixtures}.
+    uint64 internal constant ATTESTED_PERIOD = 5;
+    uint64 internal constant ATTESTED_SLOT = ATTESTED_PERIOD * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 17;
+    uint64 internal constant SIGNATURE_SLOT = ATTESTED_SLOT + 1;
     uint64 internal constant PROPOSER_INDEX = 7;
+    uint256 internal constant SIGNER_SK = 1;
+    uint256 internal constant PEER_SK = 2;
+    uint256 internal constant PROVEN_SK = 3;
 
     uint256 internal constant GINDEX_EXEC = ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY; // 802
     uint256 internal constant GINDEX_NEXT_COMMITTEE = ClprBeaconSsz.GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE; // 87
     uint256 internal constant EXEC_BRANCH_DEPTH = 9;
-    uint256 internal constant NEXT_COMMITTEE_BRANCH_DEPTH = 6;
 
     /// @dev CLPR service storage layout
     uint256 internal constant CHANNELS_BASE_SLOT = 15;
     uint256 internal constant MESSAGE_QUEUES_BASE_SLOT = 1;
     uint256 internal constant MANIFEST_COMMITMENT_SLOT = 18;
+
+    /// @dev Which of the verifier's rotation paths the bundle exercises (README §"Rotation").
+    enum Rotation {
+        None,
+        Widen,
+        Shift
+    }
 
     /// @dev What the relay is asked to prove for one bundle.
     struct BundleSpec {
@@ -57,8 +68,8 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         ///      minimum 2 (~81 bytes). Mainnet's upper trie levels are dense, and the walker keccaks
         ///      and copies every node it visits, so this is the realistic setting.
         bool denseBranches;
-        bool rotation; // carry a next-sync-committee rotation
-        bool manifest; // carry an endpoint-manifest update (12-field shape)
+        Rotation rotation; // which next-sync-committee rotation path to carry, if any
+        bool manifest; // carry an endpoint-manifest update (13-field shape)
         /// @dev The peer's `receivedMessageId` — how far it has acked *our* outbound queue. Non-zero
         ///      makes the bundle carry an acknowledgement, which is what lets a zero-message
         ///      (ACK-only) bundle make protocol progress at all; `BundleLib` rejects a bundle that
@@ -120,14 +131,19 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         bytes32 stateRoot;
         bytes memory nextCommitteeRlp = hex"80"; // absent: empty RLP string
         bytes memory nextBranchRlp = hex"c0"; // absent: empty RLP list
-        bytes32[] memory rotBranch = _syntheticBranch("next-committee-branch", NEXT_COMMITTEE_BRANCH_DEPTH);
-        if (s.rotation) {
-            bytes32 nextRoot = _committeeRootFromCompressed(_compressedKeys(SYNC_COMMITTEE_SIZE), G1_GEN_COMPRESSED);
-            stateRoot = _fold(nextRoot, rotBranch, GINDEX_NEXT_COMMITTEE);
-            nextCommitteeRlp = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE), genUncompressed);
-            nextBranchRlp = _encodeBranch(rotBranch);
-        } else {
+        if (s.rotation == Rotation.None) {
             stateRoot = keccak256("unused-state-root");
+        } else {
+            // Widen re-proves the window's stored `next`; Shift proves a fresh committee.
+            uint256 provenSk = s.rotation == Rotation.Widen ? PEER_SK : PROVEN_SK;
+            bytes32[] memory rotBranch = _syntheticBranch("next-committee-branch", NEXT_COMMITTEE_BRANCH_DEPTH);
+            bytes memory provenAggregate = _committeeAggregate(provenSk);
+            bytes32 sszRoot = _committeeRootFromCompressed(
+                _compressedKeys(SYNC_COMMITTEE_SIZE, provenSk), ClprBls12381.compressG1(provenAggregate)
+            );
+            stateRoot = _fold(sszRoot, rotBranch, GINDEX_NEXT_COMMITTEE);
+            nextCommitteeRlp = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, provenSk), provenAggregate);
+            nextBranchRlp = _encodeBranch(rotBranch);
         }
 
         // 5 ── attested header → its SSZ root → the signing root the committee signs.
@@ -140,17 +156,18 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
 
         // 6 ── real BLS: participation bitvector, aggregate signature, committee aggregate pubkey.
         b.bits = _bits(s.signers);
-        b.signature = _aggSig(b.signingRoot, s.signers);
-        b.aggregatePubkey = _committeeAggregate();
-        b.committeeRoot = ClprCommitteeMerkle.root(_uncompressedKeys(SYNC_COMMITTEE_SIZE));
+        b.signature = _aggSig(b.signingRoot, s.signers, SIGNER_SK);
+        b.aggregatePubkey = _committeeAggregate(SIGNER_SK);
+        b.committeeRoot = ClprCommitteeMerkle.root(_uncompressedKeys(SYNC_COMMITTEE_SIZE, SIGNER_SK));
 
-        // 7 ── trust anchor (flat 260-byte layout) and channel context.
-        b.trustAnchor = _encodeAnchor(b.committeeRoot, b.aggregatePubkey, s.channelId, s.codeHash);
+        // 7 ── window trust anchor (flat 428-byte layout) and channel context.
+        b.trustAnchor = _anchorFor(s.rotation, s.channelId, s.codeHash);
         b.channelContext = abi.encodePacked(s.channelId, abi.encodePacked(s.peerService));
 
         // 8 ── assemble the payload.
         b.proof = _assemble(
             _headerRlp(stateRoot, bodyRoot),
+            SIGNATURE_SLOT,
             _syncAggregateRlp(b.bits, b.signature),
             executionStateRoot,
             _encodeBranch(execBranch),
@@ -333,6 +350,7 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
 
     function _assemble(
         bytes memory headerRlp,
+        uint64 signatureSlot,
         bytes memory aggRlp,
         bytes32 executionStateRoot,
         bytes memory execBranchRlp,
@@ -346,20 +364,21 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         bytes memory manifestPreimage
     ) private pure returns (bytes memory) {
         bool withManifest = manifestPreimage.length > 0;
-        bytes[] memory top = new bytes[](withManifest ? 12 : 10);
+        bytes[] memory top = new bytes[](withManifest ? 13 : 11);
         top[0] = headerRlp;
-        top[1] = aggRlp;
-        top[2] = RLP.encode(executionStateRoot);
-        top[3] = execBranchRlp;
-        top[4] = nextCommitteeRlp;
-        top[5] = nextBranchRlp;
-        top[6] = accountProofRlp;
-        top[7] = storageProofRlp;
-        top[8] = RLP.encode(bundleContent);
-        top[9] = nonSignerRlp;
+        top[1] = RLP.encode(uint256(signatureSlot));
+        top[2] = aggRlp;
+        top[3] = RLP.encode(executionStateRoot);
+        top[4] = execBranchRlp;
+        top[5] = nextCommitteeRlp;
+        top[6] = nextBranchRlp;
+        top[7] = accountProofRlp;
+        top[8] = storageProofRlp;
+        top[9] = RLP.encode(bundleContent);
+        top[10] = nonSignerRlp;
         if (withManifest) {
-            top[10] = manifestProofRlp;
-            top[11] = RLP.encode(manifestPreimage);
+            top[11] = manifestProofRlp;
+            top[12] = RLP.encode(manifestPreimage);
         }
         return RLP.encode(top);
     }
@@ -379,14 +398,6 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         agg[0] = RLP.encode(bits);
         agg[1] = RLP.encode(signature);
         return RLP.encode(agg);
-    }
-
-    function _encodeBranch(bytes32[] memory branch) internal pure returns (bytes memory) {
-        bytes[] memory enc = new bytes[](branch.length);
-        for (uint256 i = 0; i < branch.length; i++) {
-            enc[i] = RLP.encode(branch[i]);
-        }
-        return RLP.encode(enc);
     }
 
     /// @dev `ClprBundleContent`: field 2 (LEN, repeated) per message payload. Field 1 (queue
@@ -439,13 +450,31 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         }
     }
 
-    /// @dev Flat 260-byte anchor: `gvr ‖ forkVersion ‖ channelId ‖ aggregate ‖ committeeRoot ‖ codeHash`.
-    function _encodeAnchor(bytes32 committeeRoot, bytes memory aggregate, bytes32 channelId, bytes32 codeHash)
+    /// @dev The window anchor a bundle built for `rotation` verifies against.
+    function _anchorFor(Rotation rotation, bytes32 channelId, bytes32 codeHash) internal view returns (bytes memory) {
+        return rotation == Rotation.Shift
+            ? _encodeWindowAnchor(ATTESTED_PERIOD - 1, PEER_SK, SIGNER_SK, channelId, codeHash)
+            : _encodeWindowAnchor(ATTESTED_PERIOD, SIGNER_SK, PEER_SK, channelId, codeHash);
+    }
+
+    /// @dev Flat 428-byte window anchor:
+    ///      `gvr ‖ forkVersion ‖ channelId ‖ codeHash ‖ period8 ‖ [aggregate128 ‖ committeeRoot32] × 2`.
+    function _encodeWindowAnchor(uint64 period, uint256 currentSk, uint256 nextSk, bytes32 channelId, bytes32 codeHash)
         internal
-        pure
+        view
         returns (bytes memory)
     {
-        return abi.encodePacked(GVR, FORK_VERSION, channelId, aggregate, committeeRoot, codeHash);
+        return abi.encodePacked(
+            GVR,
+            FORK_VERSION,
+            channelId,
+            codeHash,
+            period,
+            _committeeAggregate(currentSk),
+            ClprCommitteeMerkle.root(_uncompressedKeys(SYNC_COMMITTEE_SIZE, currentSk)),
+            _committeeAggregate(nextSk),
+            ClprCommitteeMerkle.root(_uncompressedKeys(SYNC_COMMITTEE_SIZE, nextSk))
+        );
     }
 
     /// @dev `Bitvector[512]`, LSB-first within each byte: the first `n` committee indices signed.
@@ -490,8 +519,9 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         return ClprProtobuf.encodeEndpointManifest(m);
     }
 
-    /// @dev The 6-field `verifyConfig` payload that seeds the channel's genesis anchor from the same
-    ///      generator committee the bundle proof signs with.
+    /// @dev The 7-field `verifyConfig` payload that seeds the channel's genesis window: the same anchor
+    ///      {_anchorFor} builds for `s.rotation`, so a bundle accepted by `verifyBundle` against that
+    ///      anchor is also accepted by `submitBundle`.
     function _configProof(BundleSpec memory s, string memory chainId) internal view returns (bytes memory) {
         ClprTypes.LedgerConfiguration memory lc;
         lc.protocolVersion = 1;
@@ -508,17 +538,22 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
             maxPeerEndpoints: 0
         });
 
-        bytes[] memory cfg = new bytes[](6);
-        cfg[0] = RLP.encode(uint256(ATTESTED_SLOT));
-        // The aggregate must be the real committee aggregate (512·G1), not a single generator: it
-        // becomes the anchor's `aggregate_pubkey`, and every bundle's BLS check subtracts
-        // non-participants from it. Seeding 1·G1 here yields an anchor that no honest bundle can
-        // satisfy.
-        cfg[1] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE), _committeeAggregate());
-        cfg[2] = RLP.encode(GVR);
-        cfg[3] = RLP.encode(abi.encodePacked(FORK_VERSION));
-        cfg[4] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
-        cfg[5] = RLP.encode(s.codeHash);
+        bool shift = s.rotation == Rotation.Shift;
+        (uint256 currentSk, uint256 nextSk) = shift ? (PEER_SK, SIGNER_SK) : (SIGNER_SK, PEER_SK);
+        uint64 configSlot = shift ? ATTESTED_SLOT - SLOTS_PER_SYNC_COMMITTEE_PERIOD : ATTESTED_SLOT;
+
+        bytes[] memory cfg = new bytes[](7);
+        cfg[0] = RLP.encode(uint256(configSlot));
+        // The aggregates must be the real committee aggregates (512·sk·G1), not a single generator:
+        // they become the anchor's `aggregate_pubkey`s, and every bundle's BLS check subtracts
+        // non-participants from the selected one. Seeding 1·G1 here yields an anchor that no honest
+        // bundle can satisfy.
+        cfg[1] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, currentSk), _committeeAggregate(currentSk));
+        cfg[2] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, nextSk), _committeeAggregate(nextSk));
+        cfg[3] = RLP.encode(GVR);
+        cfg[4] = RLP.encode(abi.encodePacked(FORK_VERSION));
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(s.codeHash);
         return RLP.encode(cfg);
     }
 }
