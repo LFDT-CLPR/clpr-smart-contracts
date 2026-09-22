@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import {QbftVerifierBase} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftVerifierBase.sol";
-import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
 import {QbftContractModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftContractModeVerifier.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {ClprQbftQuorum} from "@hiero-ledger/clpr/libraries/proof/qbft/ClprQbftQuorum.sol";
@@ -14,7 +13,7 @@ import {QbftContractProofs} from "@test/helpers/QbftContractProofs.sol";
 import {ContractSourceHarness, OpenCommitmentHarness} from "@test/helpers/QbftContractHarness.sol";
 
 contract QbftContractModeVerifierTest is QbftContractProofs {
-    QBFTVerifier internal verifier;
+    QbftContractModeVerifier internal verifier;
 
     uint256 internal constant VALIDATOR_PK = uint256(keccak256("qbft-validator"));
     address internal validatorAddr;
@@ -46,8 +45,8 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         verifier = _qbftVerifier();
     }
 
-    function _qbftVerifier() private returns (QBFTVerifier) {
-        return QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier"));
+    function _qbftVerifier() private returns (QbftContractModeVerifier) {
+        return QbftContractModeVerifier(deployCode("QbftContractModeVerifier.sol:QbftContractModeVerifier"));
     }
 
     function _decodeAnchor(bytes memory anchor) internal pure returns (DecodedAnchor memory a) {
@@ -205,30 +204,22 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     }
 
     function test_revertWhen_TrustAnchorWrongLength() public {
-        vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidTrustAnchor.selector);
         verifier.verifyBundle(hex"c0", hex"deadbeef", "");
     }
 
-    /// @dev A mode-0 anchor is forwarded to the header-mode verifier, which owns its checks: here
-    ///      the empty proof fails its payload shape check.
-    function test_headerModeAnchor_routesToHeaderMode() public {
-        bytes memory anchor = abi.encode(uint8(0), bytes32(0), SERVICE_CODE_HASH, uint64(0));
-        vm.expectRevert(QbftVerifierBase.InvalidPayloadShape.selector);
-        verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
-    }
-
-    /// @dev A 6-word anchor (the pre-pin contract shape) is not forwarded. The legacy path rejects it.
-    function test_revertWhen_SixWordContractAnchor_staysOnLegacyPath() public {
+    /// @dev A 6-word anchor (the pre-pin contract shape) is the wrong length for this verifier.
+    function test_revertWhen_SixWordContractAnchor() public {
         bytes memory anchor = abi.encode(uint8(1), bytes32(0), SERVICE_CODE_HASH, address(0), bytes32(0), uint64(0));
-        vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidTrustAnchor.selector);
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
 
-    /// @dev A 7-word anchor whose mode word is neither 0 nor 1 is rejected by the router.
+    /// @dev A 7-word anchor whose mode word is not Contract is rejected.
     function test_revertWhen_UnknownModeAnchor() public {
         bytes memory anchor =
             abi.encode(uint8(2), bytes32(0), SERVICE_CODE_HASH, address(0), bytes32(0), uint64(0), VALIDATOR_CODE_HASH);
-        vm.expectRevert(abi.encodeWithSelector(QBFTVerifier.UnknownValidatorMode.selector, 2));
+        vm.expectRevert(abi.encodeWithSelector(QbftVerifierBase.UnknownValidatorMode.selector, 2));
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
 
@@ -477,9 +468,9 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         assertEq(initialTrustAnchorId, abi.encodePacked(uint64(500)), "anchor id is the block number");
     }
 
-    /// @dev A mode-0 descriptor is routed to the header-mode verifier, which rejects the 4-item
-    ///      contract-mode descriptor layout (it expects [mode, codeHash]).
-    function test_verifyConfig_headerModeDescriptor_routesToHeaderMode() public {
+    /// @dev A header-mode config proof (6 fields, mode-0 descriptor) is not this verifier's shape:
+    ///      contract mode expects the validator-contract proof and rejects the shorter layout.
+    function test_verifyConfig_rejectsHeaderModeLayout() public {
         bytes memory header = _buildMultiSealedHeaderAtBlock(500, bytes32(0), 0, VALIDATOR_PK, 0);
 
         bytes[] memory throttleItems = new bytes[](5);
@@ -501,7 +492,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         items[4] = RLP.encode(RLP.encode(taItems));
         items[5] = header;
 
-        vm.expectRevert(QbftVerifierBase.InvalidTrustAnchorFields.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidProofPayloadShape.selector);
         verifier.verifyConfig(RLP.encode(items), SYNTHETIC_CHANNEL_ID, "");
     }
 
@@ -557,7 +548,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     /// @dev A hop at a change block advances the walk as well. Old set A seals the hop at block 300
     ///      whose state holds mid set B; the current block 301 is sealed by B and its state holds B.
     function test_hopWalk_crossesRotation() public {
-        QBFTVerifier v = _qbftVerifier(); // quorum(3) = 2
+        QbftContractModeVerifier v = _qbftVerifier(); // quorum(3) = 2
         address[] memory oldSet = _set3("hop-o1", "hop-o2", "hop-o3");
         address[] memory midSet = _set3("hop-m1", "hop-m2", "hop-m3");
 
@@ -580,7 +571,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     ///      B's change block stays replayable in a later bundle. Also asserts the replay is then
     ///      rejected against the advanced anchor.
     function test_verifyBundle_roundTripAdvancesFloorAndBlocksReplay() public {
-        QBFTVerifier v = _qbftVerifier(); // quorum(3) = 2
+        QbftContractModeVerifier v = _qbftVerifier(); // quorum(3) = 2
         address[] memory setA = _set3("rt-a1", "rt-a2", "rt-a3");
         address[] memory setB = _set3("rt-b1", "rt-b2", "rt-b3");
 

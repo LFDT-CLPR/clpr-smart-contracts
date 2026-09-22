@@ -239,9 +239,9 @@ export async function deployE2EWithQbftVerifier(
     console.error(`[Deploy] ========================================`);
     const core = await deployClprAll(clients, params);
     console.error("[Deploy] ========================================");
-    console.error("[Deploy] Deploying QBFTVerifier...");
+    console.error("[Deploy] Deploying QbftHeaderModeVerifier...");
     console.error("[Deploy] ========================================");
-    const qbftVerifier = await deployArtifact(clients, "QBFTVerifier", []);
+    const qbftVerifier = await deployArtifact(clients, "QbftHeaderModeVerifier", []);
     const helpers = await deployE2EHelpers(clients);
     await assertServiceCode(clients, core.clprService, tag);
     console.error(`[Deploy] ✓ E2E+QBFT deployment completed`);
@@ -348,8 +348,11 @@ export async function deployQbftVerifier(clients: DeployClients): Promise<QbftVe
     console.error("[Deploy] Deploying QBFT Verifier");
     console.error("[Deploy] =========================================");
 
-    const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QBFTVerifier"), await deployArtifact(clients, "QBFTVerifier", []));
-
+    // TODO: remove the legacy QBFTVerifier (incorrect implementation)
+    //      remove the line below and deploy QbftHeaderModeVerifier with [] instead
+    const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QBFTVerifier"), await deployArtifact(clients, "QBFTVerifier", [1]));
+    // uncomment this:
+    // const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QbftHeaderModeVerifier"), await deployArtifact(clients, "QbftHeaderModeVerifier", []));
     console.error("[Deploy] ✓ QBFT Verifier deployed successfully");
     return {qbftVerifier};
 }

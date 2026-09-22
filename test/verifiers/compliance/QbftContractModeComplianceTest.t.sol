@@ -19,10 +19,9 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
     bytes32 internal constant SYNTHETIC_CHANNEL_ID = bytes32(uint256(0xC0FFEE));
     address internal constant VALIDATOR_CONTRACT = address(0xC04511AC);
 
-    /// @dev Deploys the Header-mode {QBFTVerifier}: every vector here is Contract mode, so each
-    ///      call forwards to the embedded QbftContractModeVerifier.
+    /// @dev Every vector here is Contract mode, so the suite runs against that verifier directly.
     function _deployVerifier() internal override returns (IClprVerifier) {
-        return IClprVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier"));
+        return IClprVerifier(deployCode("QbftContractModeVerifier.sol:QbftContractModeVerifier"));
     }
 
     /// @dev The single-member trusted set the fixtures anchor on.

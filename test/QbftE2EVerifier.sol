@@ -3,28 +3,27 @@ pragma solidity ^0.8.28;
 
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
-import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
 import {EndpointValidation} from "@hiero-ledger/clpr/libraries/service/EndpointValidation.sol";
 
 /// @title QbftE2EVerifier
-/// @notice Test-only thin wrapper around the production {@link QBFTVerifier} for the two-chain
+/// @notice Test-only thin wrapper around a production QBFT {@link IClprVerifier} for the two-chain
 ///         (QBFT ↔ QBFT) E2E suite driven by the real clpr-evm-endpoint relay.
 ///
-/// @dev NOT a stub: both `verifyBundle` and `verifyConfig` delegate verbatim to the real
-///      QBFTVerifier, so the full cryptographic verification (QBFT committed seals + Merkle
+/// @dev NOT a stub: both `verifyBundle` and `verifyConfig` delegate verbatim to the wrapped
+///      verifier, so the full cryptographic verification (QBFT committed seals + Merkle
 ///      account/storage proofs + codeHash check) and the trust-anchor / chainId / serviceAddress
 ///      derivation from the config proof all run unchanged.
 ///
-///      The only thing the wrapper adds is the peer-endpoint seed: the production QBFTVerifier's
+///      The only thing the wrapper adds is the peer-endpoint seed: the production verifier's
 ///      `verifyConfig` returns an empty `seedEndpoints` list, so on its own a freshly-completed
 ///      channel has an empty on-chain peer roster and the relay (which discovers its peer via
 ///      `getPeerEndpointRoster`) would never find anyone to sync with. We inject the peer relay's
 ///      gRPC endpoint here via `setSeedEndpoints`, so `completeChannel` bootstraps the roster.
 contract QbftE2EVerifier is IClprVerifier {
-    QBFTVerifier public immutable inner;
+    IClprVerifier public immutable inner;
     ClprTypes.Endpoint[] private _seedEndpoints;
 
-    constructor(QBFTVerifier inner_) {
+    constructor(IClprVerifier inner_) {
         inner = inner_;
     }
 
@@ -40,7 +39,7 @@ contract QbftE2EVerifier is IClprVerifier {
     }
 
     /// @inheritdoc IClprVerifier
-    /// @dev Real verification — delegated verbatim to the wrapped QBFTVerifier.
+    /// @dev Real verification — delegated verbatim to the wrapped verifier.
     function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
         external
         view
@@ -57,7 +56,7 @@ contract QbftE2EVerifier is IClprVerifier {
     }
 
     /// @inheritdoc IClprVerifier
-    /// @dev Delegates to the wrapped QBFTVerifier for everything (chainId / serviceAddress /
+    /// @dev Delegates to the wrapped verifier for everything (chainId / serviceAddress /
     ///      throttles / trust anchor are all derived from the config proof + channelId), then
     ///      substitutes the configured seed endpoints as the initial peer manifest so
     ///      `completeChannel` bootstraps a usable manifest for e2e sync.

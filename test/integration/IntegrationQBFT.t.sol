@@ -6,7 +6,7 @@ import {ClprService} from "@hiero-ledger/clpr/ClprService.sol";
 import {IClprService} from "@hiero-ledger/clpr/interfaces/IClprService.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprEvmStateProof} from "@hiero-ledger/clpr/libraries/proof/evm/ClprEvmStateProof.sol";
-import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
+import {QbftHeaderModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftHeaderModeVerifier.sol";
 import {IntegrationTestBase} from "@test/integration/IntegrationTestBase.sol";
 import {QbftContractProofs} from "@test/helpers/QbftContractProofs.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
@@ -39,7 +39,7 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftContractProofs {
     ///      arithmetic, i.e. a missing guard rather than a deliberate rejection.
     bytes4 internal constant PANIC_SELECTOR = 0x4e487b71;
 
-    QBFTVerifier internal qbftVerifier;
+    QbftHeaderModeVerifier internal qbftVerifier;
 
     string internal constant BUNDLE_PATH = "test/verifiers/evm/qbft/fixtures/bundlePayload.hex";
     string internal constant ROTATION_BUNDLE_PATH = "test/verifiers/evm/qbft/fixtures/bundlePayload.rotation.hex";
@@ -47,7 +47,7 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftContractProofs {
     bytes internal bundlePayload;
 
     function setUp() public override {
-        qbftVerifier = QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier"));
+        qbftVerifier = QbftHeaderModeVerifier(deployCode("QbftHeaderModeVerifier.sol:QbftHeaderModeVerifier"));
         bundlePayload = _readHexFile(BUNDLE_PATH);
         _deployServiceAndConnect(address(qbftVerifier));
     }
