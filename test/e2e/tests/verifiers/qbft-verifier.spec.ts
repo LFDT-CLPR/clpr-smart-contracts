@@ -13,7 +13,7 @@ import {type Backend, createBackend, withOverrideEnvs, parseBackendSpec} from ".
 ///
 /// Architecture:
 ///   - Single-node Besu QBFT cluster (1 validator = 1 committed seal per block).
-///   - QBFTVerifier(MIN_COMMITTED_SEALS=1) deployed via `deployAll({ mode: "qbft" })`.
+///   - QBFTVerifier deployed via `deployAll({ mode: "qbft" })`.
 ///   - Channel established via QBFTVerifier.verifyConfig (ABI-encoded configProof),
 ///     so ClprService stores the real trust anchor from the start.
 ///   - verifyBundle called directly as a view (eth_call) to validate the proof
@@ -24,12 +24,12 @@ import {type Backend, createBackend, withOverrideEnvs, parseBackendSpec} from ".
 ///     and returns the peerChainId / throttles / trust anchor used by completeChannel.
 ///   ✓ QBFTVerifier.verifyBundle — happy path with real on-chain QBFT proof:
 ///       - debug_getRawHeader → raw header bytes (with committed seal in extraData)
-///       - ClprQbftSeal.verify accepts the single committed seal
+///       - the header's own validator list seals it (quorum) and links to the trusted set
 ///       - eth_getProof → account proof verifies against stateRoot
-///       - storage proof verifies all 4 channel struct slots against storageRoot
+///       - storage proof verifies the channel struct slots against storageRoot
 ///       - codeHash in trust anchor matches ClprService's on-chain bytecode
 ///       - bundle content protobuf decoded; message payloads returned correctly
-///   ✓ Negative cases: wrong validator, bad anchor length, wrong code hash
+///   ✓ Negative cases: wrong trusted set, bad anchor length
 ///
 /// Run:
 ///   npm run test:e2e:qbft-verifier
@@ -47,7 +47,6 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
     let addrs: QbftDeployedAddresses;
     let channel: QbftWiredChannel;
 
-    const VALIDATOR_ADDRESS = "0xf39Fd6e51aad88F6f4ce6aB8827279cffFb92266" as `0x${string}`;
     const TEST_PAYLOAD = "0xdeadbeefcafe" as `0x${string}`;
 
     beforeAll(async () => {
@@ -60,7 +59,7 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
 
         const rpcUrl = backend.rpcA();
 
-        // ── 2. Deploy ClprService + QBFTVerifier(minSeals=1) + helpers ─────
+        // ── 2. Deploy ClprService + QBFTVerifier + helpers ─────────────────
         addrs = await deployAll({
             clients,
             privateKey: suite.privateKey,
@@ -76,8 +75,7 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
         channel = await wireChannel({
             chainA: clients,
             caipA: backend.caipA(),
-            addrsA: addrs,
-            validatorAddr: VALIDATOR_ADDRESS
+            addrsA: addrs
         });
 
         // ── 4. Wait for a fresh block after completeChannel ─────────────
@@ -101,7 +99,6 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
             rpcUrl,
             serviceAddr: addrs.clprService,
             channelId: channel.channelId,
-            validatorAddr: VALIDATOR_ADDRESS,
             payloads: [TEST_PAYLOAD]
         });
 
@@ -140,7 +137,6 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
             rpcUrl,
             serviceAddr: addrs.clprService,
             channelId: channel.channelId,
-            validatorAddr: VALIDATOR_ADDRESS,
             payloads: []
         });
 
@@ -176,26 +172,25 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
 
     // ── Failure cases ───────────────────────────────────────────────────────
 
-    it("verifyBundle reverts with a wrong validator address in the trust anchor", async () => {
+    it("verifyBundle reverts when the trust anchor commits to a different validator set", async () => {
         const rpcUrl = backend.rpcA();
 
         const {proofBytes, trustAnchor} = await buildQbftProof({
             rpcUrl,
             serviceAddr: addrs.clprService,
             channelId: channel.channelId,
-            validatorAddr: VALIDATOR_ADDRESS,
             payloads: []
         });
 
-        // Keep the anchor well-formed (128 bytes, correct codeHash/epoch) but swap in a
-        // validator that did not sign the block, so verifyBundle fails at seal
-        // verification — not at the trust-anchor length guard.
-        const [, codeHash, epochLength, epochNumber] = decodeAbiParameters(
-            [{type: "address"}, {type: "bytes32"}, {type: "uint64"}, {type: "uint64"}],
+        // Keep the anchor well-formed (128 bytes, correct codeHash / block) but commit to a set that
+        // does not match the submitted list, so verifyBundle fails at the commitment check — not at
+        // the trust-anchor length guard.
+        const [, , codeHash, anchorBlock] = decodeAbiParameters(
+            [{type: "uint8"}, {type: "bytes32"}, {type: "bytes32"}, {type: "uint64"}],
             trustAnchor
         );
         const wrongValidator = "0xDeaDbeefdEAdbeefdEadbEEFdeadbeEFdEaDbeeF" as `0x${string}`;
-        const wrongAnchor = encodeTrustAnchor(wrongValidator, codeHash, epochLength, epochNumber);
+        const wrongAnchor = encodeTrustAnchor([wrongValidator], codeHash, anchorBlock);
 
         const channelContext = (channel.channelId + addrs.clprService.slice(2)) as `0x${string}`;
         const qbftVerifier = loadArtifact("QBFTVerifier");
@@ -216,7 +211,6 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
             rpcUrl,
             serviceAddr: addrs.clprService,
             channelId: channel.channelId,
-            validatorAddr: VALIDATOR_ADDRESS,
             payloads: []
         });
 

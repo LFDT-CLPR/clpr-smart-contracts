@@ -13,6 +13,8 @@ library ClprQbftQuorum {
     error EmptySeals();
     /// @notice Distinct in-set signers are fewer than the quorum.
     error QuorumNotReached(uint256 got, uint256 required);
+    error TrustLinkNotReached(uint256 got, uint256 required);
+    error TooManySetChanges(uint256 added, uint256 removed);
 
     /// @notice Hard upper bound on the validator-set size. {_markSigner} marks each distinct
     ///         signer as one bit of a single uint256 bitmask (bit i = member index i), so the
@@ -24,16 +26,34 @@ library ClprQbftQuorum {
     ///         `qbft-contract-mode.md` §8 and `GAS_REPORT.md`).
     uint256 internal constant MAX_VALIDATORS = 256;
 
-    /// @param set               A sorted, deduped validator set to check the seals against.
-    /// @param header            The RLP-decoded block header (extraData at index 12).
-    function verifyQuorum(ValidatorSet memory set, Memory.Slice[] memory header) internal pure {
-        uint256 n = set.members.length;
-        if (n == 0) revert EmptyValidatorSet();
-        if (n > MAX_VALIDATORS) revert ValidatorSetTooLarge(n);
+    struct SealerCounts {
+        uint256 listed;
+        uint256 trusted;
+        bool addedSigned;
+    }
 
+    /// @param set     A sorted, deduped validator set to check the seals against.
+    /// @param header  The RLP-decoded block header (extraData at index 12).
+    function verifyQuorum(ValidatorSet memory set, Memory.Slice[] memory header) internal pure {
+        uint256 n = _checkedSize(set);
         (bytes32 sealHash, Memory.Slice[] memory seals) = ClprQbftSeal.decodeSealsContextFromHeader(header);
+        _requireQuorum(set, QbftValidators.quorum(n), sealHash, seals);
+    }
+
+    /// @param set    A sorted, deduped validator set to check the seals against.
+    /// @param extra  The header's `extraData` already decoded.
+    function verifyQuorum(ValidatorSet memory set, ClprQbftSeal.HeaderExtra memory extra) internal pure {
+        uint256 n = _checkedSize(set);
+        _requireQuorum(set, QbftValidators.quorum(n), extra.sealHash, extra.seals);
+    }
+
+    /// @dev Recover seals until required distinct members of set have signed; stop early once
+    ///      they have. Reverts `EmptySeals` on no seals and `QuorumNotReached` when short.
+    function _requireQuorum(ValidatorSet memory set, uint256 required, bytes32 sealHash, Memory.Slice[] memory seals)
+        private
+        pure
+    {
         if (seals.length == 0) revert EmptySeals();
-        uint256 required = QbftValidators.quorum(n);
         uint256 counted;
         uint256 distinct;
         for (uint256 i = 0; i < seals.length && distinct < required;) {
@@ -49,6 +69,129 @@ library ClprQbftQuorum {
             }
         }
         if (distinct < required) revert QuorumNotReached(distinct, required);
+    }
+
+    /// @notice What we check:
+    ///         1. Is the change legal? The header's set may differ from the trusted set by one
+    ///            validator at most (Besu applies one change per block).
+    ///         2. Can we trust it? Enough of the trusted set must have sealed the block: a 2/3
+    ///            quorum when the sets are equal, quorum - 1 when one validator changed. If the
+    ///            new validator did not seal, the full quorum is required again.
+    ///         3. Is the block self-consistent? It must be sealed by a 2/3 quorum of the
+    ///            validators from its own header.
+    /// @param listed  Validator set from the block header.
+    /// @param trusted Validator set from the trust anchor.
+    /// @param extra   The block header's `extraData`, decoded.
+    function verifyRotationStep(
+        ValidatorSet memory listed,
+        ValidatorSet memory trusted,
+        ClprQbftSeal.HeaderExtra memory extra
+    ) internal pure {
+        uint256 nListed = _checkedSize(listed);
+        uint256 nTrusted = _checkedSize(trusted);
+        (uint256 added, uint256 removed, address addedMember) = _diff(listed, trusted);
+        if (added + removed == 0) {
+            verifyQuorum(listed, extra);
+            return;
+        }
+        if (added + removed > 1) revert TooManySetChanges(added, removed);
+
+        SealerCounts memory counts = _countSealers(listed, trusted, extra, addedMember);
+        uint256 requiredTrusted = trustLinkRequired(nTrusted, added == 1 && !counts.addedSigned);
+        if (counts.trusted < requiredTrusted) revert TrustLinkNotReached(counts.trusted, requiredTrusted);
+        uint256 requiredListed = QbftValidators.quorum(nListed);
+        if (counts.listed < requiredListed) revert QuorumNotReached(counts.listed, requiredListed);
+    }
+
+    /// @notice If a newly added member did not seal the block, the full quorum of trusted
+    ///         validators is required. Otherwise one signer fewer is accepted. The result never
+    ///         drops below 1: a single trusted validator (quorum 1) must still sign.
+    function trustLinkRequired(uint256 n, bool fullQuorum) internal pure returns (uint256) {
+        uint256 q = QbftValidators.quorum(n);
+        if (fullQuorum) return q;
+        return q > 1 ? q - 1 : 1;
+    }
+
+    /// @dev Who was added and who was removed, compared with the trusted set. `addedMember` is
+    ///      set when exactly one validator was added.
+    function _diff(ValidatorSet memory listed, ValidatorSet memory trusted)
+        private
+        pure
+        returns (uint256 added, uint256 removed, address addedMember)
+    {
+        address[] memory l = listed.members;
+        address[] memory t = trusted.members;
+        uint256 i;
+        uint256 j;
+        while (i < l.length && j < t.length) {
+            address la = l[i];
+            address ta = t[j];
+            if (la == ta) {
+                unchecked {
+                    ++i;
+                    ++j;
+                }
+            } else if (uint160(la) < uint160(ta)) {
+                addedMember = la;
+                unchecked {
+                    ++added;
+                    ++i;
+                }
+            } else {
+                unchecked {
+                    ++removed;
+                    ++j;
+                }
+            }
+        }
+        if (i < l.length) {
+            addedMember = l[i];
+            added += l.length - i;
+        }
+        removed += t.length - j;
+    }
+
+    /// @dev Recover each seal once; count distinct signers in `listed` and in `trusted`, and note
+    ///      whether `addedMember` sealed. Stops once both sets have a full quorum of signers.
+    function _countSealers(
+        ValidatorSet memory listed,
+        ValidatorSet memory trusted,
+        ClprQbftSeal.HeaderExtra memory extra,
+        address addedMember
+    ) private pure returns (SealerCounts memory counts) {
+        if (extra.seals.length == 0) revert EmptySeals();
+        uint256 enoughListed = QbftValidators.quorum(listed.members.length);
+        uint256 enoughTrusted = QbftValidators.quorum(trusted.members.length);
+        uint256 listedMask;
+        uint256 trustedMask;
+        for (
+            uint256 i = 0; i < extra.seals.length && (counts.listed < enoughListed || counts.trusted < enoughTrusted);) {
+            address signer = ClprQbftSeal.recoverSeal(extra.sealHash, extra.seals[i]);
+            if (signer == addedMember) counts.addedSigned = true;
+            uint256 updated = _markSigner(listed, listedMask, signer);
+            if (updated != listedMask) {
+                listedMask = updated;
+                unchecked {
+                    counts.listed++;
+                }
+            }
+            updated = _markSigner(trusted, trustedMask, signer);
+            if (updated != trustedMask) {
+                trustedMask = updated;
+                unchecked {
+                    counts.trusted++;
+                }
+            }
+            unchecked {
+                i++;
+            }
+        }
+    }
+
+    function _checkedSize(ValidatorSet memory set) private pure returns (uint256 n) {
+        n = set.members.length;
+        if (n == 0) revert EmptyValidatorSet();
+        if (n > MAX_VALIDATORS) revert ValidatorSetTooLarge(n);
     }
 
     /// @notice set has to be sorted and deduped for binary search to work correctly

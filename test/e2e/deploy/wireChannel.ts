@@ -11,7 +11,7 @@ import {
 } from "../lib/ids.js";
 import {pbInt, pbLen, pbStr} from "../lib/proto.js";
 import {rlpList, rlpBytes, hexToBuf, bigintToTrimmedBuf} from "../lib/rlp.js";
-import {rpcCall, QBFT_EPOCH_LENGTH, encodeTrustAnchor} from "../lib/qbft.js";
+import {rpcCall, encodeTrustAnchor, headerValidators} from "../lib/qbft.js";
 import type {DeployedAddresses, QbftDeployedAddresses} from "./deploy.js";
 import {wireConfig, registerEndpoint} from "./wire.js";
 import {DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES, ZERO_BYTES32} from "./constants.js";
@@ -49,7 +49,6 @@ type StubWireOpts = {
 type CrossWireOpts = StubWireOpts & {
     peerKindA: BackendKind;
     peerKindB: BackendKind;
-    validatorAddr: Hex;
 };
 
 /// QBFT mode opts. When chainB/addrsB/caipB are omitted the channel is
@@ -58,7 +57,6 @@ type QbftWireOpts = {
     chainA: ChainClients;
     caipA: string;
     addrsA: QbftDeployedAddresses;
-    validatorAddr: Hex;
     chainB?: ChainClients;
     caipB?: string;
     addrsB?: QbftDeployedAddresses;
@@ -76,8 +74,8 @@ export async function wireChannel(
     opts: StubWireOpts | CrossWireOpts | QbftWireOpts
 ): Promise<WiredChannel | QbftWiredChannel> {
     if ("peerKindA" in opts) return wireCrossVerifier(opts);
-    if ("validatorAddr" in opts) return wireChannelQbft(opts);
-    return wireChannelStub(opts);
+    if ("qbftVerifier" in opts.addrsA) return wireChannelQbft(opts as QbftWireOpts);
+    return wireChannelStub(opts as StubWireOpts);
 }
 
 function encodePeerThrottlesPb(t: {
@@ -133,7 +131,6 @@ async function wireCrossVerifier(opts: CrossWireOpts): Promise<WiredChannel> {
             clients: chainB,
             peerChainId: caipB,
             serviceAddr: addrsB.clprService,
-            validatorAddr: opts.validatorAddr
         });
         configProofA = configProof;
     }
@@ -156,7 +153,6 @@ async function wireCrossVerifier(opts: CrossWireOpts): Promise<WiredChannel> {
             clients: chainA,
             peerChainId: caipA,
             serviceAddr: addrsA.clprService,
-            validatorAddr: opts.validatorAddr
         });
         configProofB = configProof;
     }
@@ -211,7 +207,7 @@ async function wireChannelStub(opts: StubWireOpts): Promise<WiredChannel> {
 // ── QBFT implementation ───────────────────────────────────────────────────
 
 async function wireChannelQbft(opts: QbftWireOpts): Promise<QbftWiredChannel> {
-    const {chainA, caipA, addrsA, validatorAddr} = opts;
+    const {chainA, caipA, addrsA} = opts;
     const salt = opts.salt ?? ZERO_BYTES32;
 
     const operatorKey = opts.operatorKey ?? generatePrivateKey();
@@ -235,7 +231,6 @@ async function wireChannelQbft(opts: QbftWireOpts): Promise<QbftWiredChannel> {
         addrs: addrsA,
         caipChainId: caipA,
         peerChainId: caipB,
-        validatorAddr,
         proofClients: opts.peerClients ?? (isTwoSided ? opts.chainB! : chainA),
         proofServiceAddr: opts.peerServiceAddr ?? (isTwoSided ? opts.addrsB!.clprService : addrsA.clprService),
         channelId,
@@ -250,7 +245,6 @@ async function wireChannelQbft(opts: QbftWireOpts): Promise<QbftWiredChannel> {
             addrs: opts.addrsB!,
             caipChainId: caipB,
             peerChainId: caipA,
-            validatorAddr,
             proofClients: chainA,
             proofServiceAddr: addrsA.clprService,
             channelId,
@@ -268,7 +262,6 @@ async function wireQbftOneSide(opts: {
     addrs: QbftDeployedAddresses;
     caipChainId: string;
     peerChainId: string;
-    validatorAddr: Hex;
     proofClients: ChainClients;
     proofServiceAddr: Hex;
     channelId: Hex;
@@ -276,7 +269,7 @@ async function wireQbftOneSide(opts: {
     operatorAccount: ReturnType<typeof privateKeyToAccount>;
     salt: Hex;
 }): Promise<{configProof: Hex; trustAnchor: Hex}> {
-    const {clients, addrs, validatorAddr, channelId, operatorPubKey, operatorAccount, salt} = opts;
+    const {clients, addrs, channelId, operatorPubKey, operatorAccount, salt} = opts;
 
     await wireConfig({clients, addrs: {...addrs, verifier: addrs.qbftVerifier}});
 
@@ -287,7 +280,6 @@ async function wireQbftOneSide(opts: {
         clients: opts.proofClients,
         peerChainId: opts.peerChainId,
         serviceAddr: opts.proofServiceAddr,
-        validatorAddr
     });
 
     const service = loadArtifact("ClprService");
@@ -316,9 +308,8 @@ async function buildQbftConfigProof(opts: {
     clients: ChainClients;
     peerChainId: string;
     serviceAddr: Hex;
-    validatorAddr: Hex;
 }): Promise<{configProof: Hex; trustAnchor: Hex}> {
-    const {clients, peerChainId, serviceAddr, validatorAddr} = opts;
+    const {clients, peerChainId, serviceAddr} = opts;
 
     const bytecode = await clients.publicClient.getCode({address: serviceAddr});
     if (!bytecode || bytecode === "0x") throw new Error(`ClprService at ${serviceAddr} has no code`);
@@ -330,22 +321,21 @@ async function buildQbftConfigProof(opts: {
     const blockTag = await rpcCall<string>(rpcUrl, "eth_blockNumber");
     const rawHeaderHex = await rpcCall<string>(rpcUrl, "debug_getRawHeader", [blockTag]);
     const headerRlp = hexToBuf(rawHeaderHex);
-
     const blockNumber = BigInt(parseInt(blockTag, 16));
-    const epochNumber = blockNumber / QBFT_EPOCH_LENGTH;
 
-    const trustAnchor = encodeTrustAnchor(validatorAddr, codeHash, QBFT_EPOCH_LENGTH, epochNumber);
+    // The initial set is the header's own validator list (extraData.validators).
+    const validators = headerValidators(headerRlp);
+    const trustAnchor = encodeTrustAnchor(validators, codeHash, blockNumber);
 
-    const trustAnchorInnerRlp = rlpList([
-        rlpBytes(hexToBuf(validatorAddr)),
-        rlpBytes(hexToBuf(serviceAddr)),
+    // Descriptor: RLP([mode = 0, codeHash]).
+    const descriptorRlp = rlpList([
+        rlpBytes(Buffer.alloc(0)), // mode 0 as an RLP scalar
         rlpBytes(hexToBuf(codeHash))
     ]);
 
+    // RLP([serviceAddr, chainId, peerConfigNanos, throttles, descriptor, blockHeader])
     const configProofBuf = rlpList([
-        rlpBytes(hexToBuf(validatorAddr)),
         rlpBytes(hexToBuf(serviceAddr)),
-        rlpBytes(Buffer.alloc(32, 0)),
         rlpBytes(Buffer.from(peerChainId)),
         rlpBytes(Buffer.alloc(0)),
         rlpList([
@@ -355,10 +345,8 @@ async function buildQbftConfigProof(opts: {
             rlpBytes(bigintToTrimmedBuf(DEFAULT_PEER_THROTTLES.maxQueueDepth)),
             rlpBytes(bigintToTrimmedBuf(DEFAULT_PEER_THROTTLES.maxSyncBytes))
         ]),
-        rlpBytes(trustAnchorInnerRlp),
-        rlpBytes(Buffer.alloc(0)),
-        headerRlp,
-        rlpBytes(bigintToTrimmedBuf(QBFT_EPOCH_LENGTH))
+        rlpBytes(descriptorRlp),
+        headerRlp
     ]);
 
     return {configProof: ("0x" + configProofBuf.toString("hex")) as Hex, trustAnchor};

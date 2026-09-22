@@ -1,7 +1,7 @@
 import {type Hex, keccak256, encodeAbiParameters} from "viem";
 import {pbInt, pbBytes, pbLen} from "../lib/proto";
 import {rlpEncode, rlpDecode, hexToBuf} from "../lib/rlp.js";
-import {rpcCall, QBFT_EPOCH_LENGTH, encodeTrustAnchor} from "../lib/qbft.js";
+import {rpcCall, encodeTrustAnchor, headerValidators} from "../lib/qbft.js";
 
 export {waitForBlock} from "../lib/qbft.js";
 
@@ -104,12 +104,11 @@ export async function buildQbftProof(opts: {
     rpcUrl: string;
     serviceAddr: Hex;
     channelId: Hex;
-    validatorAddr: Hex;
     payloads: Hex[];
     lastMessageId?: bigint;
     metadata?: NativeBundleMetadata;
 }): Promise<QbftProofPayload> {
-    const {rpcUrl, serviceAddr, channelId, validatorAddr, payloads} = opts;
+    const {rpcUrl, serviceAddr, channelId, payloads} = opts;
 
     const blockTag = await rpcCall<string>(rpcUrl, "eth_blockNumber");
 
@@ -164,12 +163,13 @@ export async function buildQbftProof(opts: {
     const bundleContent = bundleContentProto(payloads, opts.metadata);
 
     const header = rlpDecode(headerRlp);
-    const topLevel = rlpEncode([header, [], accountProof, storageProof, bundleContent]);
+    const validators = headerValidators(headerRlp);
+    const validatorSource = [validators.map((v) => hexToBuf(v)), []];
+    const topLevel = rlpEncode([header, validatorSource, accountProof, storageProof, bundleContent]);
     const proofBytes = ("0x" + topLevel.toString("hex")) as Hex;
 
     const blockNum = BigInt(parseInt(blockTag, 16));
-    const epochNumber = blockNum / QBFT_EPOCH_LENGTH;
-    const trustAnchor = encodeTrustAnchor(validatorAddr, proof.codeHash as Hex, QBFT_EPOCH_LENGTH, epochNumber);
+    const trustAnchor = encodeTrustAnchor(validators, proof.codeHash as Hex, blockNum - 1n);
 
     return {proofBytes, trustAnchor, codeHash: proof.codeHash as Hex};
 }

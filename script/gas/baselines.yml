@@ -52,34 +52,52 @@ gas_report_benchmarks:
     function: verifyBundle
     column: min
     baseline: 6108407
-  - name: QBFTVerifier.verifyBundle (success-only path)
+  - name: QbftHeaderModeVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
-    contract: QBFTVerifier
+    contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: min
-    baseline: 111841
+    baseline: 122915
+  - name: QbftHeaderModeVerifier.verifyBundle (rotation 10 to 11)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyBundle
+    column: median
+    baseline: 364757
+  - name: QbftHeaderModeVerifier.verifyBundle (rotation 51 to 52)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyBundle
+    column: max
+    baseline: 1232862
+  - name: QbftHeaderModeVerifier.verifyConfig (success-only path)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyConfig
+    column: min
+    baseline: 107457
   # QBFT Contract mode, calling verifier directly
   - name: QbftContractModeVerifier.verifyBundle (steady state)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: min
-    baseline: 217635
+    baseline: 217931
   - name: QbftContractModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: median
-    baseline: 689907
+    baseline: 689645
   - name: QbftContractModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: max
-    baseline: 3203981
+    baseline: 3201507
   - name: QbftContractModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyConfig
     column: min
-    baseline: 184270
+    baseline: 182930

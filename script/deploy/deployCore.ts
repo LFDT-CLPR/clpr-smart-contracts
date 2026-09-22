@@ -231,7 +231,7 @@ export interface E2EWithQbftVerifierDeployed extends ClprDeployed {
 export async function deployE2EWithQbftVerifier(
     clients: DeployClients,
     params: DeployParams,
-    opts?: {minCommittedSeals?: number; label?: string}
+    opts?: {label?: string}
 ): Promise<E2EWithQbftVerifierDeployed> {
     const tag = opts?.label ?? String(clients.chain.id);
     console.error(`[Deploy] ========================================`);
@@ -240,9 +240,8 @@ export async function deployE2EWithQbftVerifier(
     const core = await deployClprAll(clients, params);
     console.error("[Deploy] ========================================");
     console.error("[Deploy] Deploying QBFTVerifier...");
-    console.error(`[Deploy] minCommittedSeals: ${opts?.minCommittedSeals ?? 1}`);
     console.error("[Deploy] ========================================");
-    const qbftVerifier = await deployArtifact(clients, "QBFTVerifier", [opts?.minCommittedSeals ?? 1]);
+    const qbftVerifier = await deployArtifact(clients, "QBFTVerifier", []);
     const helpers = await deployE2EHelpers(clients);
     await assertServiceCode(clients, core.clprService, tag);
     console.error(`[Deploy] ✓ E2E+QBFT deployment completed`);
@@ -344,20 +343,12 @@ export interface QbftVerifierDeployed {
     qbftVerifier: `0x${string}`;
 }
 
-export async function deployQbftVerifier(
-    clients: DeployClients,
-    options?: {minCommittedSeals?: number}
-): Promise<QbftVerifierDeployed> {
+export async function deployQbftVerifier(clients: DeployClients): Promise<QbftVerifierDeployed> {
     console.error("[Deploy] =========================================");
     console.error("[Deploy] Deploying QBFT Verifier");
     console.error("[Deploy] =========================================");
 
-    const minCommittedSeals = options?.minCommittedSeals ?? 1;
-    if (minCommittedSeals <= 0) {
-        throw new Error("minCommittedSeals must be > 0");
-    }
-
-    const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QBFTVerifier"), await deployArtifact(clients, "QBFTVerifier", [minCommittedSeals]));
+    const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QBFTVerifier"), await deployArtifact(clients, "QBFTVerifier", []));
 
     console.error("[Deploy] ✓ QBFT Verifier deployed successfully");
     return {qbftVerifier};

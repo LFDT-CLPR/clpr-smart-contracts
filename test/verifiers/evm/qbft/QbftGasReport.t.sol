@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {console2} from "forge-std/console2.sol";
-import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
+import {QbftHeaderModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftHeaderModeVerifier.sol";
 import {QbftContractModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftContractModeVerifier.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {ClprQbftQuorum} from "@hiero-ledger/clpr/libraries/proof/qbft/ClprQbftQuorum.sol";
@@ -11,6 +11,7 @@ import {QbftValidators, ValidatorSet} from "@hiero-ledger/clpr/libraries/proof/q
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 import {QbftContractModeProofBuilders} from "@test/verifiers/evm/qbft/QbftContractModeProofBuilders.sol";
+import {QbftHeaderModeProofBuilders} from "@test/verifiers/evm/qbft/QbftHeaderModeProofBuilders.sol";
 import {CalldataGas} from "@test/helpers/CalldataGas.sol";
 
 contract QbftGasReportTest is QbftContractModeProofBuilders {
@@ -18,28 +19,35 @@ contract QbftGasReportTest is QbftContractModeProofBuilders {
 
     uint256 internal constant HEADER_MODE_PK = uint256(keccak256("gas-report-hm"));
 
-    QBFTVerifier internal headerMode;
+    QbftHeaderModeVerifier internal headerMode;
     QbftContractModeVerifier internal contractMode;
 
     function setUp() public {
-        headerMode = QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier", abi.encode(uint8(1))));
+        headerMode = new QbftHeaderModeVerifier();
         contractMode = new QbftContractModeVerifier();
     }
 
+    /// @dev Header mode, one validator: the set is the header's own list, no storage proof of any
+    ///      validator contract. Built exactly as {QbftHeaderModeGasBenchmarkTest} builds it.
     function test_report_headerMode_steadyState() public view {
+        address[] memory set = new address[](1);
+        set[0] = vm.addr(HEADER_MODE_PK);
         (bytes32 storageRoot, bytes memory storageProofRlp) = _buildChannelStorageProof(SYNTHETIC_CHANNEL_ID);
         (bytes32 stateRoot, bytes memory accountProofRlp) =
             _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
         bytes memory header = _buildSealedCurrentHeader(1, stateRoot, HEADER_MODE_PK);
 
+        bytes[] memory source = new bytes[](2);
+        source[0] = _memberListRlp(set);
+        source[1] = RLP.encode(new bytes[](0));
         bytes[] memory top = new bytes[](5);
         top[0] = header;
-        top[1] = hex"c0"; // no epoch headers
+        top[1] = RLP.encode(source);
         top[2] = accountProofRlp;
         top[3] = storageProofRlp;
         top[4] = RLP.encode(new bytes(0));
 
-        bytes memory anchor = abi.encode(vm.addr(HEADER_MODE_PK), SERVICE_CODE_HASH, uint64(30000), uint64(0));
+        bytes memory anchor = abi.encode(uint8(0), _commit(set), SERVICE_CODE_HASH, uint64(0));
         _measureBundle("header mode, steady state (1 validator, 1 seal)", address(headerMode), RLP.encode(top), anchor);
     }
 
@@ -173,6 +181,45 @@ contract QbftGasReportTest is QbftContractModeProofBuilders {
 
     function _calldataGas(bytes memory b) private pure returns (uint256) {
         return CalldataGas.eip2028(b);
+    }
+}
+
+/// @dev Header mode by validator-set size.
+contract QbftHeaderModeGasReportTest is QbftHeaderModeProofBuilders {
+    QbftHeaderModeVerifier internal headerMode;
+
+    function setUp() public {
+        headerMode = new QbftHeaderModeVerifier();
+    }
+
+    function test_report_headerMode_steadyStateBySetSize() public view {
+        _steady(3);
+        _steady(10);
+        _steady(25);
+        _steady(52);
+    }
+
+    function _steady(uint256 n) private view {
+        (bytes memory proof, bytes memory anchor) = _steadyScenario("gas-hs", n);
+        console2.log("header mode, steady state, trusted set listed, validators:", n);
+        _measureBundle(address(headerMode), proof, anchor);
+
+        address[] memory set = _setN("gas-hs", n);
+        HeaderBlock memory b = _currentBlock(set, _pksN("gas-hs", QbftValidators.quorum(n)), 100);
+        bytes memory omitted = _topProof(b, new address[](0), new bytes[](0));
+        console2.log("header mode, steady state, trusted set omitted, validators:", n);
+        _measureBundle(address(headerMode), omitted, anchor);
+    }
+
+    function _measureBundle(address verifier, bytes memory proof, bytes memory anchor) private view {
+        bytes memory ctx = _syntheticChannelContext();
+        IClprVerifier(verifier).verifyBundle(proof, anchor, ctx);
+        uint256 used = vm.lastCallGas().gasTotalUsed;
+        console2.log("  execution   :", used);
+        console2.log("  proof bytes :", proof.length + anchor.length + ctx.length);
+        console2.log(
+            "  calldata gas:", CalldataGas.eip2028(proof) + CalldataGas.eip2028(anchor) + CalldataGas.eip2028(ctx)
+        );
     }
 }
 

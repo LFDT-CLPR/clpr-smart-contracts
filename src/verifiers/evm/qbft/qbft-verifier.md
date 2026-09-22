@@ -1,270 +1,245 @@
-# QBFT Proof Verifier — Specification
+# QBFT verifiers — overview
 
-**Status:** Implemented, revision 2026-06-16
-**Scope:** Reference implementation of `IClprVerifier` for bundles originating from a Besu QBFT chain, using RLP-encoded block headers with QBFT committed seals plus Merkle-Patricia state and storage proofs.
-**Anchors to:** `IClprVerifier` interface, CLPR §3.1, `hiero-verifier.md` (sibling implementation).
+**Scope:** `IClprVerifier` implementations for bundles that come from a Besu QBFT chain. A QBFT
+block header carries committed seals; Merkle-Patricia proofs under the header's state root prove
+the peer CLPR service's storage.
+**Anchors to:** `IClprVerifier`, CLPR §3.1, `hiero-verifier.md` (sibling implementation).
 
-> **Header mode vs. contract mode.** This document specifies **header mode**, where the validator
-> set lives in each block header's `extraData`. Besu QBFT can instead keep the set in an on-chain
-> validator contract — **contract mode** — specified in [`qbft-contract-mode.md`](qbft-contract-mode.md).
-> One channel keeps one mode for its whole life. `QBFTVerifier` inspects the stored trust anchor and
-> config proof and routes contract-mode inputs to the embedded `QbftContractModeVerifier`; the two
-> anchor encodings are currently distinguished by shape (length and first word). Keep any change to
-> the header-mode anchor layout below disjoint from the contract-mode anchor
-> (`abi.encode(uint8 mode=1, …)`, 192 bytes) so the router stays unambiguous.
+There are two verifiers. They differ in **where the validator set comes from**.
 
-## Overview
+| Verifier | Validator set comes from | Mode byte | Spec |
+|---|---|---|---|
+| `QbftHeaderModeVerifier` | `extraData.validators[]` of each block header | `0` | [`qbft-header-mode.md`](qbft-header-mode.md) |
+| `QbftContractModeVerifier` | the storage of an on-chain validator contract | `1` | [`qbft-contract-mode.md`](qbft-contract-mode.md) |
 
-QBFTVerifier implements `IClprVerifier` for bundles whose source ledger is a Besu QBFT chain. Each call to `verifyBundle` authenticates:
+Both extend `QbftVerifierBase`, which holds everything this page describes: the payload shape, the
+header decode, the service account and channel storage proofs, the config-proof shape and the
+endpoint manifest proof. Read the mode spec for the part that differs: bundle field 1, the trust
+anchor and config field 4.
 
-- Zero or more **epoch block headers**, each advancing the trust-anchor validator to the next committee.
-- The **current block header**, sealed by the (possibly updated) validator and carrying the state root.
-- The **peer service account** in the state trie, by walking the Merkle-Patricia proof for the configured service contract against `header.stateRoot`.
-- **Five fixed storage slots** of that account (plus an optional sixth for outbound message integrity), derived from the `channelId` stored in the trust anchor.
-
-On success it returns queue metadata extracted from the proven slots, the message payloads decoded from the protobuf bundle content, and — when epoch headers were processed — an updated `newTrustAnchor` advancing the trust anchor to the latest epoch.
-
-The verifier is **view** (reads no contract storage). All persistent trust is carried in the per-call `trustAnchor` bytes, which CLPRService stores per channel.
-
-**Trust assumption: validator keys identify the chain.** A QBFT header is authenticated by its committed seals alone; the sealed hash carries no chain id, so nothing in a header ties it to one network. The verifier therefore trusts the validator keys, not a chain identity. If the same validator keys seal blocks on more than one network — a fork, or a test network cloned from production with the same contract addresses — a relay can present a header from the other network and the verifier cannot tell them apart. The anchor's `codeHash` and service address narrow this, but a clone shares both. Operators must not reuse validator keys across networks a channel could be pointed at. This applies to both header and contract mode.
-
-## Construction
-
-```solidity
-constructor(uint8 _sealSignatures)
+```mermaid
+flowchart LR
+  B["Besu QBFT chain"] -->|"validators in every header"| H["QbftHeaderModeVerifier<br/>mode 0"]
+  B -->|"validators in a contract"| C["QbftContractModeVerifier<br/>mode 1"]
+  H --> S["QbftVerifierBase<br/>headers, account proof, channel slots, config proof"]
+  C --> S
+  S --> E["ClprEvmBundleVerifier<br/>shared EVM storage tail"]
 ```
 
-`_sealSignatures` is stored as the immutable `MIN_COMMITTED_SEALS`. It specifies how many distinct committed seals must appear in a block header's QBFT extraData. The value must be ≥ 1; the constructor reverts otherwise.
+One channel keeps one mode for its full life. Pick the verifier that matches the source chain when
+the channel is created. `QBFTVerifier` is a thin router that deploys both and forwards each call by
+the mode byte (word 0 of the trust anchor, item 0 of the config descriptor); it adds no checks of
+its own and is planned to be removed.
 
-Deploy one instance per quorum configuration; share it across channels that have the same minimum-seal requirement.
+## Trust assumption: validator keys identify the chain
 
-## Trust anchor
-
-```
-abi.encode(
-  address  validator,      // 32 bytes (padded)
-  address  clprService,    // 32 bytes (padded)
-  bytes32  codeHash,       // 32 bytes
-  uint64   epochLength,    // 32 bytes (padded)
-  uint64   epochNumber,    // 32 bytes (padded)
-  bytes32  channelId    // 32 bytes
-)                          // total: 192 bytes
-```
-
-| Field | Purpose |
-| --- | --- |
-| `validator` | The QBFT validator whose seal authenticates the current block. Updated on every epoch rotation. |
-| `clprService` | The peer-side CLPR service contract. Used as the account-proof target. |
-| `codeHash` | The peer service's `keccak256(code)`. Pinning this defends against a proof targeting a different contract at the same address. |
-| `epochLength` | Number of blocks per QBFT epoch (fixed at channel establishment). |
-| `epochNumber` | The epoch the trust anchor currently covers. Incremented on each rotation. |
-| `channelId` | The local channel ID, seeded at `verifyConfig` time. Used to derive storage slot keys on the peer's chain and carried unchanged through every rotation. |
-
-Reverts:
-- `InvalidTrustAnchor()` — `trustAnchor.length != 192`.
-
-## Payload shape
-
-`proofBytes` is a single RLP list of **5** items (or **7** when the bundle carries an endpoint-manifest update — items 5 and 6 below):
-
-| Index | Item | Notes |
-| --- | --- | --- |
-| 0 | Current block header | RLP list of 15–22 fields; field 3 = `stateRoot`, field 8 = `blockNumber`, field 12 = `extraData` (byte-string wrapping the inner QBFT extraData RLP). |
-| 1 | Epoch block headers | RLP list of zero or more block headers. Each must fall on an epoch boundary (`blockNumber == (trustAnchorEpoch + i + 1) * epochLength`). May be empty (no rotation). |
-| 2 | Account proof | RLP-encoded MPT proof for `clprService` against `header.stateRoot`. |
-| 3 | Storage proof | RLP list of **5 or 6** entries, each a 2-tuple `[slotKey32, proofNodes]` (no value field: the proven value is read from the Merkle leaf) (five Channel slots +1/+2/+4/+5/+16; sixth = last-message running hash when the bundle carries messages). |
-| 4 | Bundle content | Byte-string containing a protobuf-encoded `ClprBundleContent`. |
-| 5 | Manifest storage proof | *(7-item shape only)* Single-entry storage proof of the peer service's endpoint-manifest commitment slot (18). |
-| 6 | Manifest preimage | *(7-item shape only)* `ClprEndpointManifest` protobuf bytes; `keccak256` must equal the proven commitment. |
-
-Reverts:
-- `InvalidPayloadShape()` — top-level list ∉ {5, 7} items.
-- `InvalidStorageProofShape()` — storage proof entries ∉ {5, 6} *(from ClprEvmBundleVerifier)*. Entry shape is validated while the list is indexed, so a malformed entry reverts `InvalidStorageEntry()` before the count is checked.
-- `InvalidHeader()` — a header's field count is outside [15, 22], or an epoch header's block number does not equal the expected epoch boundary.
+A QBFT header is authenticated by its committed seals alone. The sealed hash carries no chain id,
+so nothing in a header ties it to one network. The verifier trusts the validator **keys**, not a
+chain identity. If the same keys seal blocks on more than one network — a fork, or a test network
+cloned from production with the same contract addresses — a relay can present a header from the
+other network and the verifier cannot tell them apart. The anchor's `codeHash` and the service
+address narrow this, but a clone shares both. **Operators must not reuse validator keys across
+networks a channel could be pointed at.** This applies to both modes.
 
 ## verifyBundle
 
-Signature:
 ```solidity
-function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor)
+function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
   external view
   returns (
     ClprTypes.QueueMetadata memory metadata,
     bytes[] memory messagePayloads,
     bytes memory newTrustAnchor,
-    bytes memory newTrustAnchorId
+    bytes memory newTrustAnchorId,
+    ClprTypes.ClprEndpointManifest memory manifest
   )
 ```
 
-Processing steps:
+The verifier is **view**: it reads no contract storage. All trust is in the per-call
+`trustAnchor`, which `ClprService` stores per channel. `channelContext` is
+`abi.encode(channelId, remoteServiceAddress)` (`ClprTypes.encodeChannelContext`).
 
-1. **Decode trust anchor** — `(validator, clprService, codeHash, epochLength, trustAnchorEpoch, channelId)` via `abi.decode`. Reverts `InvalidTrustAnchor()` if length ≠ 192.
+### Payload shape
 
-2. **Decode top-level payload** — `RLP.decodeList(proofBytes)`, enforce exactly 5 items.
+`proofBytes` is one RLP list of **5** items, or **7** when the bundle carries an endpoint-manifest
+update.
 
-3. **Process epoch block headers** (payload[1]) — for each header in the list:
-   - Require field count ≥ 15.
-   - Require `blockNumber == (trustAnchorEpoch + i + 1) * epochLength`.
-   - Verify the QBFT seal via `ClprQbftSeal.verify(MIN_COMMITTED_SEALS, header, validator)`.
-   - Extract the next validator from the epoch header's `extraData` (field 12): decode as 5-item list `[vanity, validators[], vote, round, seals[]]`; require `validators.length == 1`; update `validator = validators[0]`.
+| Index | Item | Notes |
+|---|---|---|
+| 0 | Current block header | RLP list of 15–22 fields; field 3 = `stateRoot`, field 8 = `number`, field 12 = `extraData`. |
+| 1 | Validator source | **Mode-specific.** Header mode: `[trustedSet, hops[]]`, where `trustedSet` may be an empty list when no rotation is crossed. Contract mode: `[trustedSet, hops[], contractProof]`. See the mode spec. |
+| 2 | Account proof | MPT proof for the peer CLPR service under `header.stateRoot`. |
+| 3 | Storage proof | RLP list of **5 or 6** entries `[slotKey32, proofNodes]` (see [Storage layout](#storage-layout)). No value field: the value is read from the leaf. |
+| 4 | Bundle content | Byte string: protobuf `ClprBundleContent`. |
+| 5 | Manifest storage proof | *(7-item only)* one entry: the manifest commitment slot. |
+| 6 | Manifest preimage | *(7-item only)* `ClprEndpointManifest` protobuf; its `keccak256` must equal the proven slot. |
 
-4. **Verify the current block header** (payload[0]):
-   - Require field count ∈ [15, 22].
-   - Extract `stateRoot = header[3]`.
-   - Verify the QBFT seal via `ClprQbftSeal.verify(MIN_COMMITTED_SEALS, header, validator)`.
-   - Compute `currentEpoch = blockNumber / epochLength`; require `currentEpoch == trustAnchorEpoch + epochHeaders.length`. Reverts `EpochMismatch()`.
-
-5. **Verify the account proof** (payload[2]):
-   - `ClprEvmStateProof.verifyAccountFields(payload[2], stateRoot, clprService)` walks the MPT to the account leaf and decodes `(storageRoot, accountCodeHash)` in place.
-   - Require `accountCodeHash == codeHash`. Reverts `CodeHashMismatch()`.
-
-6. **Verify the storage proof** (payload[3]) — see [Storage layout](#storage-layout).
-
-7. **Decode bundle content** (payload[4]):
-   - `RLP.readBytes(payload[4])` yields the protobuf bytes.
-   - Two-pass scan over field 2 (repeated LEN `ClprMessagePayload`): pass 1 counts, pass 2 collects. All other fields are skipped.
-
-8. **Trust-anchor rotation** — if `epochHeaders.length > 0`:
-   - `newTrustAnchor = abi.encode(validator, clprService, codeHash, epochLength, currentEpoch, channelId)`
-   - `newTrustAnchorId = abi.encodePacked(currentEpoch)` (big-endian uint64)
-   - Otherwise both are empty (no rotation).
-
-9. Return `(metadata, messagePayloads, newTrustAnchor, newTrustAnchorId, abi.encodePacked(clprService))`.
-
-Reverts and failure modes:
-
-| Selector | Cause |
-| --- | --- |
-| `InvalidTrustAnchor()` | Trust anchor length ≠ 192. |
-| `InvalidPayloadShape()` | Top-level list ∉ {5, 7} items. |
-| `InvalidStorageProofShape()` | Storage proof entry count ∉ {5, 6}, checked after the entries are indexed (a malformed entry reverts `InvalidStorageEntry()` first). *(from ClprEvmBundleVerifier)* |
-| `InvalidHeader()` | Header field count outside [15, 22], or epoch header block number wrong. |
-| `EpochMismatch()` | Current block's epoch ≠ `trustAnchorEpoch + epochHeaders.length`. |
-| `EmptyValidator()` | An epoch header's `validators[]` list is empty. |
-| `MultiValidatorNotSupported()` | An epoch header's `validators[]` list has more than one entry. |
-| `CodeHashMismatch()` | Proven account `codeHash` ≠ trust-anchor `codeHash`. |
-| `InvalidExtraData()` | QBFT extraData inner list ≠ 5 items. *(from ClprQbftSeal)* |
-| `WrongSealCount(got)` | Committed seals count < `MIN_COMMITTED_SEALS`. *(from ClprQbftSeal)* |
-| `SealLengthMismatch(got)` | A committed seal is not 65 bytes. *(from ClprQbftSeal)* |
-| `SealRecoverFailed()` | `ecrecover` returned `address(0)`. *(from ClprQbftSeal)* |
-| `ValidatorSealNotFound(expected)` | None of the recovered sealers matches the expected validator. *(from ClprQbftSeal)* |
-| `InvalidStorageProof()` | The storage proof item is not an RLP list filling its range. *(from ClprEvmStateProof)* |
-| `InvalidStorageEntry()` | A storage entry is malformed: not a non-empty 2-item list `[slotKey, proofNodes]`, slot field not a scalar of at most 32 bytes, proof field not a list ending at the entry's end, or a leaf value that is not a byte-string envelope around a scalar filling it. Every entry is validated up front, so this fires regardless of entry order. *(from ClprEvmStateProof)* |
-| `InvalidAccount()` | The account leaf is not a byte-string envelope around a 4-item list `[nonce, balance, storageRoot, codeHash]` of byte-string fields that fills it. *(from ClprEvmStateProof)* |
-| `SlotNotProven(slot)` | No storage entry carries the expected slot key. *(from ClprEvmStateProof)* |
-| `MPTEmptyProof()` | The proof list carries no nodes. *(from MerklePatriciaProof)* |
-| `MPTInvalidNode()` | The proof container or a node has the wrong shape: not a list filling its range, a node envelope that is a list, a node that is neither a 2- nor a 17-item list, or a path item that is a list. (A hash-valid node that is an empty list reverts `RlpCursorOutOfBounds()` from the first item read instead.) *(from MerklePatriciaProof)* |
-| `MPTInvalidHashRef()` | A node's `keccak256` differs from the hash its parent — or the root — committed to. *(from MerklePatriciaProof)* |
-| `MPTInvalidPathPrefix()` | A leaf/extension path is empty, has a prefix nibble above 3, or an even-length path with a non-zero padding nibble. *(from MerklePatriciaProof)* |
-| `MPTInlineNodeUnsupported()` | A child reference is not a 32-byte hash (an inline node, or a list). *(from MerklePatriciaProof)* |
-| `MPTKeyMismatch()` / `MPTKeyAbsent()` | The account proof (strict walk) leaves the key's path / reaches an empty child: the service account is not in the trie under `stateRoot`. Storage walks are lenient — an absent slot reads as zero. *(from MerklePatriciaProof)* |
-| `MPTProofEndedEarly()` | The proof ran out of nodes before the key was resolved. *(from MerklePatriciaProof)* |
-| `RlpCursorOutOfBounds()` / `RlpCursorUnexpectedList()` / `RlpCursorScalarTooLong()` | An RLP item inside a proof or entry overruns its range; a list where a byte string was expected (the contract-mode validator-source item, see `qbft-contract-mode.md` §4); a scalar longer than 32 bytes where a `bytes32`/uint is expected (a storage leaf scalar, an account `storageRoot`/`codeHash`). *(from RlpCursor)* |
-| `RLPInvalidEncoding()` | Malformed RLP in the payload/config/header decodes that still use the OZ library. *(from OZ RLP library)* |
-
-## Storage layout
-
-The storage proof proves five mandatory slots derived from the `channelId` stored in the trust anchor, plus an optional sixth for outbound message integrity.
-
-**Slot derivation:**
-```
-cBase = keccak256(abi.encode(channelId, CHANNELS_BASE_SLOT))
-// where CHANNELS_BASE_SLOT = 17 (_channels mapping on the peer chain)
+```mermaid
+flowchart TB
+  P["proofBytes<br/>RLP list of 5 (or 7)"] --> H["0: current header"]
+  P --> V["1: validator source<br/>(mode-specific)"]
+  P --> A["2: account proof"]
+  P --> S["3: storage proof (5 or 6 entries)"]
+  P --> B["4: bundle content"]
+  P -.-> M5["5: manifest storage proof"]
+  P -.-> M6["6: manifest preimage"]
 ```
 
-| Entry # | Slot key | Struct field | Extracted values |
-| --- | --- | --- | --- |
-| 0 (mandatory) | `cBase + 1` | `Channel` slot+1 | `state = uint8(value >> 160)`, `nextMessageId = uint64(value >> 168)` |
-| 1 (mandatory) | `cBase + 2` | `Channel` slot+2 | `receivedMessageId = uint64(value >> 64)` |
-| 2 (mandatory) | `cBase + 4` | `Channel.sentRunningHash` | `sentRunningHash = value` |
-| 3 (mandatory) | `cBase + 5` | `Channel.receivedRunningHash` | `receivedRunningHash = value` |
-| 4 (mandatory) | `cBase + 16` | `Channel.endpointManifestVersion` | `endpointManifestVersion = uint64(value)` |
-| 5 (optional)  | derived from `nextMessageId` | `MessageValue.runningHashAfterProcessing` | verified but not surfaced |
+### Steps every mode shares
 
-The optional 6th entry (present when the bundle carries outbound messages) binds the last message's running hash:
+1. Decode the anchor. Its length and mode byte must match the verifier.
+2. Decode the payload; check the item count.
+3. **Mode-specific:** resolve the validator set and walk the hops, then check the current header's
+   seals against the set. The current header must be after the last hop and after the anchor
+   block. See the mode spec.
+4. Walk the account proof from `header.stateRoot` to the peer service; the leaf's `codeHash` must
+   equal the anchor's `codeHash`.
+5. Prove the channel slots under the account's `storageRoot` and read the queue metadata.
+6. Decode the message payloads from the bundle content (field 2 of the protobuf, repeated).
+7. With 7 items: prove the manifest commitment slot and check the preimage's `keccak256`.
+8. Return `newTrustAnchor` and `newTrustAnchorId` when the set changed (hops were walked);
+   otherwise both are empty.
+
+### Storage layout
+
+Slot keys are derived from the `channelId` in `channelContext`:
+
 ```
-qBase   = keccak256(abi.encode(channelId, MESSAGE_QUEUES_BASE_SLOT))
+cBase = keccak256(abi.encode(channelId, 17))   // _channels mapping on the peer chain
+```
+
+| Entry | Slot key | Field | Extracted |
+|---|---|---|---|
+| 0 | `cBase + 1` | `Channel` slot+1 | `state = uint8(value >> 160)`, `nextMessageId = uint64(value >> 168)` |
+| 1 | `cBase + 2` | `Channel` slot+2 | `receivedMessageId = uint64(value >> 64)` |
+| 2 | `cBase + 4` | `sentRunningHash` | `value` |
+| 3 | `cBase + 5` | `receivedRunningHash` | `value` |
+| 4 | `cBase + 16` | `endpointManifestVersion` | `uint64(value)` |
+| 5 (optional) | see below | `MessageValue.runningHashAfterProcessing` | verified, not surfaced |
+
+The optional 6th entry is present when the bundle carries messages:
+
+```
+qBase   = keccak256(abi.encode(channelId, 1))               // _messageQueues
 msgBase = keccak256(abi.encode(uint64(nextMessageId - 1), qBase))
-slot    = msgBase + 1   // MessageValue.runningHashAfterProcessing
+slot    = msgBase + 1
 ```
 
-`verifyProvenSlots` in `ClprEvmStateProof` accepts entries in any order — it matches each expected slot key against the entry's `slotKey` field. Relays SHOULD emit entries in the order the verifier derives its expected slots (the five Channel slots, then the message slot): the matcher keeps a rotating cursor, so ordered entries are found in one probe each, while a disordered layout still verifies but costs the sender O(N²) scanning gas.
+The manifest commitment slot (7-item shape) is `keccak256(abi.encode(channelId, 18))`.
 
-> **Note.** Slot packing (`state` and `nextMessageId` packed into `Channel` slot+1 above the 20-byte `address verifier`) mirrors the Solidity `ClprTypes.Channel` struct storage layout. Any change to the struct order on the peer chain requires a corresponding update here.
+Entries may come in any order; the matcher keeps a rotating cursor, so the derived order (the five
+channel slots, then the message slot) is found in one probe each. Slot packing mirrors the
+`ClprTypes.Channel` struct; a change to the struct on the peer chain needs a change here.
 
 ## verifyConfig
 
-Signature:
 ```solidity
-function verifyConfig(bytes calldata configProofBytes, bytes32 channelId)
+function verifyConfig(bytes calldata configProofBytes, bytes32 channelId, bytes calldata endpointManifestProofBytes)
   external view
   returns (
+    bytes memory channelContext,
     string memory chainId,
     bytes memory serviceAddress,
     uint96 peerConfigNanos,
     ClprTypes.Throttles memory throttles,
     bytes memory initialTrustAnchor,
     bytes memory initialTrustAnchorId,
-    ClprTypes.Endpoint[] memory seedEndpoints
+    ClprTypes.ClprEndpointManifest memory endpointManifest
   )
 ```
 
-`configProofBytes` is an RLP list of exactly **10** fields. The block header's QBFT seal is verified — `verifyConfig` is authenticated.
+`configProofBytes` is one RLP list: **6** fields in header mode, **7** in contract mode. The block
+header's seals are verified, so `verifyConfig` is authenticated by the set the header (or the
+contract) names; the channel creator trusts that header.
 
-`channelId` is supplied by `ChannelLogic._createChannel` (which already holds it before calling `verifyConfig`) and embedded into the returned `initialTrustAnchor`. `ChannelLogic` independently validates it via `_deriveChannelId` immediately after this call returns.
+| Field | Content | Mode-specific? |
+|---|---|---|
+| 0 | Service address (20 bytes) | no |
+| 1 | Chain id (UTF-8, e.g. `eip155:1`) | no |
+| 2 | Peer config nanos (uint96) | no |
+| 3 | Throttles: list of 5 (legacy) or 7 scalars | no |
+| 4 | Trust anchor descriptor: byte string wrapping `RLP([mode, …])` | **yes** — header mode `[0, codeHash]`; contract mode `[1, serviceAddress, codeHash, validatorContract, arraySlot]` |
+| 5 | Header mode: the block header. Contract mode: the validator contract proof (the same 4-item shape as in bundle field 1, wrapped in a byte string) | **yes** |
+| 6 | Contract mode only: the block header (list of 15–22 items) | **yes** |
 
-**configProof field layout:**
+Outputs: `channelContext = abi.encode(channelId, field 0)`, `initialTrustAnchor` in the mode's
+layout, `initialTrustAnchorId = header.number` as 8 bytes big-endian.
 
-| Index | Content | Usage |
-| --- | --- | --- |
-| 0 | Validator address (20 bytes) | Seal verification target; embedded in trust anchor via field 6. |
-| 1 | Service address (bytes) | Returned as `serviceAddress`; embedded in trust anchor via field 6. |
-| 2 | Code hash (bytes32) | Part of format; embedded in trust anchor via field 6. |
-| 3 | Chain ID (bytes/string) | Returned as `chainId`. |
-| 4 | Peer config timestamp (uint256) | Returned as `peerConfigNanos`. |
-| 5 | Throttles (RLP list of 7 uint256) | Returned as `throttles`. |
-| 6 | Trust anchor RLP `[validator, service, codeHash]` | Decoded and re-encoded with `epochLength`, `epochNumber`, `channelId` appended to form `initialTrustAnchor`. |
-| 7 | Trust anchor ID (bytes) | Present in format; ignored — `initialTrustAnchorId` is derived as `abi.encodePacked(epochNumber)`. |
-| 8 | Latest epoch block header (RLP) | QBFT seal verified against validator (field 0); `epochNumber = blockNumber / epochLength`. |
-| 9 | Epoch length (uint256) | Stored in trust anchor. |
+### Endpoint manifest proof
 
-`initialTrustAnchorId` is returned as `abi.encodePacked(epochNumber)` (big-endian uint64).
+Empty `endpointManifestProofBytes` returns the uninitialised manifest at version 0. Otherwise:
 
-`seedEndpoints` is always empty — the configProof format does not carry endpoints.
+```
+RLP([blockHeader, accountProof, manifestStorageProof, manifestPreimage])
+```
 
-Reverts:
-- `InvalidPayloadShape()` — `configProofBytes` is empty.
-- `"configProof: wrong field count"` — top-level list ≠ 10 items.
-- `"configProof: no header"` — header at field 8 has fewer than `MIN_BLOCK_HEADER_FIELDS` (15) fields.
-- `"configProof: wrong throttle field count"` — throttles list at field 5 ≠ 7 items.
-- `"trustAnchor: expected 3 fields"` — RLP trust anchor at field 6 ≠ 3 items.
-- Seal verification errors from `ClprQbftSeal` (see error table above).
+The header must be sealed by a quorum of the initial set. The account proof and the single-entry
+storage proof are checked as in `verifyBundle`; the preimage's `keccak256` must equal the proven
+commitment.
 
-## Test fixture
+## Reverts
 
-A self-contained happy-path fixture lives at `test/verifiers/evm/qbft/fixtures/` (generated by `tools/qbft-proof-generator/`, gitignored):
+Mode-specific reverts are listed in each mode spec. The shared ones:
 
-| File | Content |
-| --- | --- |
-| `bundlePayload.hex` | Full RLP-encoded proof bundle captured from a single-validator Besu QBFT node, with the 5-entry (ACK-only) channel storage proof. |
-| `trustAnchor.hex` | `RLP([validator20, service20, codeHash32])`. The test re-encodes this with synthetic `epochLength` and `epochNumber` appended to produce the 128-byte ABI form. |
-| `configProof.hex` | RLP-encoded 10-field configProof for integration tests. |
-| `serviceAddress.hex` | Expected service address for assertion in `test_verifyConfig_success`. |
+| Selector | Cause | From |
+|---|---|---|
+| `InvalidTrustAnchor()` | anchor length is wrong for this verifier | base |
+| `UnknownValidatorMode(mode)` | anchor or descriptor mode byte is not this verifier's mode (or not 0/1 at the router) | base / router |
+| `InvalidPayloadShape()` | top-level list ∉ {5, 7}, or field 1 has the wrong item count, or a hop has the wrong shape; empty config bytes | base |
+| `InvalidProofPayloadShape()` | config list has the wrong field count for the mode (6 / 7), or manifest proof ≠ 4 items | base |
+| `InvalidHeader()` | header field count outside [15, 22], or a header-mode `validators[]` item is not a list of non-zero 20-byte addresses (each the fixed 21-byte RLP item Besu writes) | base |
+| `InvalidConfigHeader()` | config or manifest header has fewer than 15 fields | base |
+| `InvalidConfigThrottleFieldCount()` | throttles list ∉ {5, 7} | base |
+| `InvalidTrustAnchorFields()` | descriptor item count is wrong for the mode (or empty at the router) | base |
+| `InvalidTrustedSet()` | field 1 item 0 is not a list of non-zero 20-byte addresses (each the fixed 21-byte RLP item; a shorter scalar form or the empty string is rejected) | base |
+| `WrongSetCommitment(got, expected)` | the submitted trusted set (or, in header mode with an empty item 0, the current header's list) does not hash to the anchor | base |
+| `HandoffHeaderNotAscending(got, lastSeen)` | hops out of order, or a hop at or before the anchor block | base |
+| `CurrentHeaderBehindWalk(got, lastSeen)` | current header at or before the last hop / anchor block | base |
+| `EmptyValidatorSet()` / `ValidatorSetTooLarge(n)` | a set is empty, or larger than 256 | `ClprQbftQuorum` |
+| `EmptySeals()` | a header carries no committed seals | `ClprQbftQuorum` |
+| `QuorumNotReached(got, required)` | fewer than `ceil(2N/3)` distinct in-set signers | `ClprQbftQuorum` |
+| `TooManySetChanges(added, removed)` | header mode: a header's list differs from the trusted set by more than one member | `ClprQbftQuorum` |
+| `TrustLinkNotReached(got, required)` | header mode: too few trusted-set signers for the one-change rule | `ClprQbftQuorum` |
+| `InvalidExtraData()` | `extraData` is empty or not a 5-item list | `ClprQbftSeal` |
+| `SealLengthMismatch(got)` | a seal is not 65 bytes | `ClprQbftSeal` |
+| `SealRecoverFailed()` | `ecrecover` returned `address(0)` | `ClprQbftSeal` |
+| `CodeHashMismatch()` | service account `codeHash` ≠ anchor `codeHash` | `ClprEvmBundleVerifier` |
+| `InvalidStorageProofShape()` | storage entries ∉ {5, 6} | `ClprEvmBundleVerifier` |
+| `InvalidStorageProof()` / `InvalidStorageEntry()` / `InvalidAccount()` / `SlotNotProven(slot)` | malformed storage proof, entry or account leaf; an expected slot has no entry | `ClprEvmStateProof` |
+| `MPT*` (`MPTEmptyProof`, `MPTInvalidNode`, `MPTInvalidHashRef`, `MPTInvalidPathPrefix`, `MPTInlineNodeUnsupported`, `MPTKeyMismatch`, `MPTKeyAbsent`, `MPTProofEndedEarly`) | Merkle-Patricia walk failed; account walks are strict, storage walks read an absent slot as zero | `MerklePatriciaProof` |
+| `RlpCursorOutOfBounds()` / `RlpCursorUnexpectedList()` / `RlpCursorScalarTooLong()` | an RLP item inside a proof overruns its range, is a list where a byte string was expected, or a scalar is longer than 32 bytes | `RlpCursor` |
+| `RLPInvalidEncoding()` | malformed RLP in the payload / config / header decode | OZ `RLP` |
 
-The test loader (`_readHexFile`) reads via `vm.readFile`, strips trailing CRLF, and parses with `vm.parseBytes`. Foundry's `fs_permissions` (in `foundry.toml`) grants read access to `test/verifiers/evm/qbft/fixtures`.
+## Test infrastructure
 
-The negative-path tests (`test_revertWhen_*`) build minimal synthetic payloads in-test (see `test/helpers/QbftSyntheticProofs.sol`); the happy paths run on synthetic proofs too, so the suite does not depend on the generated fixture. Fixture-dependent tests skip when the fixture is absent or its shape is stale (outer payload ∉ {5, 7} items, storage proof ∉ {5, 6} entries).
+| Path | Role |
+|---|---|
+| `test/helpers/QbftSyntheticProofs.sol` | Synthetic headers, seals, account and storage proofs, config proofs. |
+| `test/verifiers/evm/qbft/QbftHeaderModeProofBuilders.sol` | Header-mode scenarios: steady state, rotations, config. |
+| `test/verifiers/evm/qbft/QbftContractProofs.sol` | Contract-mode scenarios: validator contract storage, hops, config. |
+| `test/verifiers/evm/qbft/QbftHeaderModeVerifier.t.sol`, `QbftContractModeVerifier.t.sol` | Per-mode suites. |
+| `test/verifiers/evm/qbft/QBFTVerifier.t.sol` | Router tests. |
+| `test/verifiers/evm/qbft/GasUsage.t.sol`, `QbftGasReport.t.sol` | Gas baselines (`npm run gas:check`) and the breakdown behind `GAS_REPORT.md`. |
+| `test/libraries/proof/qbft/` | Unit tests of the seal, quorum and validator-set libraries. |
+| `test/verifiers/compliance/QBFTComplianceTest.t.sol`, `QbftContractModeComplianceTest.t.sol` | Cross-verifier conformance suite adapters. |
+| `test/integration/IntegrationQBFT.t.sol` | Lifecycle test on the real Besu fixture; skips when the fixture is missing or stale. |
+| `test/verifiers/evm/qbft/fixtures/` | Generated by `tools/qbft-proof-generator/` (gitignored): `bundlePayload.hex`, `configProof.hex`, `trustAnchor.hex`, `channelContext.hex`, `serviceAddress.hex`. |
+
+The negative-path tests build minimal synthetic payloads in-test; the happy paths run on synthetic
+proofs too, so the suites do not depend on the generated fixture.
 
 ## File map
 
 | Path | Role |
-| --- | --- |
-| `src/verifiers/evm/qbft/QBFTVerifier.sol` | The verifier contract. |
-| `src/libraries/proof/evm/ClprEvmStateProof.sol` | Account-proof and storage-proof verification; `verifyAccountFields`, `verifyProvenSlots`. |
-| `src/libraries/proof/qbft/ClprQbftSeal.sol` | QBFT committed-seal verification; `verify` checks ≥ N seals and finds the expected validator among the recovered signers. |
-| `src/libraries/proof/evm/MerklePatriciaProof.sol` | MPT walker (`requireValueRange`, `valueRangeOrZero`), over `RlpCursor`. |
-| `src/libraries/codec/ClprProtobufHelpers.sol` | Protobuf varint / length-delimited helpers used for bundle content decoding. |
-| `lib/openzeppelin-contracts/contracts/utils/RLP.sol` | OZ RLP decode / encode. |
-| `test/verifiers/evm/qbft/QBFTVerifier.t.sol` | Forge test suite. |
-| `test/verifiers/evm/qbft/fixtures/` | Generated Besu QBFT proof fixture (gitignored). |
-| `test/integration/IntegrationQBFT.t.sol` | End-to-end lifecycle test against the fixture (skips when fixture is stale). |
+|---|---|
+| `src/verifiers/evm/qbft/QbftVerifierBase.sol` | Shared decode, walk helpers, storage tail, config-proof and manifest handling. |
+| `src/verifiers/evm/qbft/QbftHeaderModeVerifier.sol` | Header mode (`qbft-header-mode.md`). |
+| `src/verifiers/evm/qbft/QbftContractModeVerifier.sol` | Contract mode (`qbft-contract-mode.md`). |
+| `src/verifiers/evm/qbft/QBFTVerifier.sol` | Router by mode byte. |
+| `src/verifiers/evm/common/ClprEvmBundleVerifier.sol` | Shared EVM storage tail: service account, channel slots, bundle content, manifest. |
+| `src/libraries/proof/qbft/ClprQbftSeal.sol` | `extraData` decode, sealing digest, `ecrecover` of seals. |
+| `src/libraries/proof/qbft/ClprQbftQuorum.sol` | Quorum counting over a sorted set (256-member bitmask) and the header-mode one-change rotation rule. |
+| `src/libraries/proof/qbft/QbftValidators.sol` | `ValidatorSet`, sort/dedupe, `commit`, `quorum`, `QbftValidatorMode`. |
+| `src/libraries/proof/qbft/QbftContractValidatorSource.sol` | Contract mode: the validator contract's storage layout. |
+| `src/libraries/proof/evm/ClprEvmStateProof.sol`, `MerklePatriciaProof.sol`, `RlpCursor.sol` | Account/storage proofs, MPT walk, allocation-free RLP reader. |
+| `src/verifiers/evm/qbft/GAS_REPORT.md` | Measured gas for both modes. |

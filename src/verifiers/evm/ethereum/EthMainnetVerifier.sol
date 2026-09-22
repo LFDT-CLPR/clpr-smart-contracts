@@ -214,6 +214,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         // committee is a 32-byte Merkle commitment — the keys themselves never touch storage).
         AnchorScalars memory anchor = _decodeAnchorScalars(trustAnchor);
 
+        if (proofBytes.length < 2) revert InvalidPayloadShape();
         bytes memory proofMem = proofBytes;
         Memory.Slice[] memory payload = RLP.decodeList(proofMem);
         if (payload.length != PAYLOAD_FIELDS && payload.length != PAYLOAD_FIELDS_WITH_MANIFEST) {

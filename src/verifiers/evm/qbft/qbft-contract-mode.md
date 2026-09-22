@@ -178,7 +178,7 @@ block `n` you need to submit the data from block n-1.
 
 | Item | Name | What it holds |
 |------|------|---------------|
-| 0 | trusted set | the full member list behind the anchor's `setCommitment` (sort + dedup, the hash must equal it). An RLP list of 20-byte address items; anything else reverts `InvalidTrustedSet` |
+| 0 | trusted set | the full member list behind the anchor's `setCommitment` (sort + dedup, the hash must equal it). An RLP list of non-zero 20-byte address items, each the fixed 21-byte item Besu writes; anything else, including the zero address, reverts `InvalidTrustedSet` |
 | 1 | hops | a list of rotation hops. Empty when no rotation occurred |
 | 2 | contract proof | the contract proof at the **current** block, as a byte string (see below) |
 
@@ -234,7 +234,7 @@ the slot, read it with `eth_getStorageAt`. The value must equal the length of th
 
 ## 5. The config proof bytes
 
-The config proof is one RLP list of 8 fields. It creates the first trust anchor.
+The config proof is one RLP list of 7 fields. It creates the first trust anchor.
 
 | Field | Name | What it holds |
 |-------|------|---------------|
@@ -245,7 +245,8 @@ The config proof is one RLP list of 8 fields. It creates the first trust anchor.
 | 4 | trust anchor descriptor | `RLP([1, serviceAddress, codeHash, validatorContract, arraySlot])` — 5 items. The validator contract's code hash is not declared here: the verifier takes it from the proven account in field 5 and pins it |
 | 5 | validator contract proof | required. The same 4-item shape as in the bundle, wrapped in a byte string |
 | 6 | block header | a recent block whose state root proves the contract (field 5) |
-| 7 | epoch length | kept for shape. Contract mode does not use it |
+
+Any other count reverts `InvalidProofPayloadShape`.
 
 ## 6. How the verifier checks a bundle
 

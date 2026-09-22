@@ -115,7 +115,7 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         return RLP.encode(top);
     }
 
-    /// @dev An 8-field Contract-mode config proof: descriptor [mode=1, service, codeHash,
+    /// @dev A 7-field Contract-mode config proof: descriptor [mode=1, service, codeHash,
     ///      validatorContract, arraySlot], the validator-contract proof at field 5, the header at field 6.
     function _buildContractConfigProof(bytes32 arraySlot, bytes memory vcProof, bytes memory header)
         internal
@@ -133,7 +133,7 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         taItems[3] = RLP.encode(VALIDATOR_CONTRACT);
         taItems[4] = RLP.encode(arraySlot);
 
-        bytes[] memory items = new bytes[](8);
+        bytes[] memory items = new bytes[](7);
         items[0] = RLP.encode(abi.encodePacked(SERVICE_ADDR));
         items[1] = RLP.encode(bytes("eip155:1"));
         items[2] = RLP.encode(uint256(0));
@@ -141,7 +141,6 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         items[4] = RLP.encode(RLP.encode(taItems));
         items[5] = RLP.encode(vcProof);
         items[6] = header;
-        items[7] = RLP.encode(uint256(30000));
         return RLP.encode(items);
     }
 
@@ -176,7 +175,7 @@ abstract contract QbftContractModeProofBuilders is QbftContractProofs {
         anchor = _contractAnchor(oldSet, VALIDATOR_CONTRACT, cb.arraySlot, 0);
     }
 
-    /// @dev An 8-field config proof over a 3-member set derived from `seed`, 2 seals at block 500.
+    /// @dev A 7-field config proof over a 3-member set derived from `seed`, 2 seals at block 500.
     function _configScenario(string memory seed) internal pure returns (bytes memory configProof) {
         address[] memory vals = _setN(seed, 3);
         uint256[] memory pks = _pksN(seed, 2);

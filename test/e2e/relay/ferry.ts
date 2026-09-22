@@ -86,21 +86,18 @@ export async function ferry(opts: {
     channelId: Hex;
     range: FerryRange;
     sourceKind?: BackendKind;
-    validatorAddr?: Hex;
     trustAnchor?: Hex;
 }): Promise<FerryResult> {
     const sourceKind = opts.sourceKind ?? "anvil";
 
     if (sourceKind === "besu") {
-        if (!opts.validatorAddr) throw new Error("ferry: validatorAddr required for besu source");
         return ferryQbft({
             source: opts.source,
             dest: opts.dest,
             sourceAddrs: opts.sourceAddrs,
             destAddrs: opts.destAddrs,
             channelId: opts.channelId,
-            range: opts.range,
-            validatorAddr: opts.validatorAddr
+            range: opts.range
         });
     }
 
@@ -176,7 +173,6 @@ export async function ferryQbft(opts: {
     destAddrs: {clprService: Hex};
     channelId: Hex;
     range: FerryRange;
-    validatorAddr: Hex;
 }): Promise<FerryResult> {
     const rpcUrl = opts.source.chain.rpcUrls.default.http[0];
     if (!rpcUrl) throw new Error("ferryQbft: missing source RPC URL");
@@ -198,7 +194,6 @@ export async function ferryQbft(opts: {
             rpcUrl,
             serviceAddr: opts.sourceAddrs.clprService,
             channelId: opts.channelId,
-            validatorAddr: opts.validatorAddr,
             payloads,
             lastMessageId: conn.nextMessageId - 1n
         }).then((r) => r.proofBytes)

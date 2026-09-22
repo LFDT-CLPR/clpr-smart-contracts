@@ -48,9 +48,21 @@ abstract contract QbftSyntheticProofs is Test {
     }
 
     function _buildExtraData(bytes[] memory seals, uint256 round) internal pure returns (bytes memory) {
+        return _buildExtraDataListing(new address[](0), seals, round);
+    }
+
+    function _buildExtraDataListing(address[] memory listed, bytes[] memory seals, uint256 round)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bytes[] memory vItems = new bytes[](listed.length);
+        for (uint256 i = 0; i < listed.length; i++) {
+            vItems[i] = RLP.encode(listed[i]);
+        }
         bytes[] memory extra = new bytes[](5);
         extra[0] = RLP.encode(new bytes(32)); // vanity
-        extra[1] = RLP.encode(new bytes[](0)); // validators — empty (non-epoch)
+        extra[1] = RLP.encode(vItems); // validators
         extra[2] = RLP.encode(new bytes(0)); // vote
         extra[3] = RLP.encode(round);
         bytes[] memory wrappedSeals = new bytes[](seals.length);
@@ -61,80 +73,20 @@ abstract contract QbftSyntheticProofs is Test {
         return RLP.encode(extra);
     }
 
-    function _buildSealedHeader(uint256 pk, bytes32 stateRoot, uint256 round) internal pure returns (bytes memory) {
-        bytes memory sealingExtra = _buildExtraData(new bytes[](0), round);
-        bytes memory sealingHeader = _buildHeader(stateRoot, sealingExtra);
-        bytes32 sealHash = keccak256(sealingHeader);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, sealHash);
-        bytes[] memory seals = new bytes[](1);
-        seals[0] = abi.encodePacked(r, s, uint8(v - 27));
-        return _buildHeader(stateRoot, _buildExtraData(seals, round));
-    }
-
     function _buildSealedCurrentHeader(uint256 blockNumber, bytes32 stateRoot, uint256 pk)
         internal
         pure
         returns (bytes memory)
     {
-        bytes memory sealingExtra = _buildExtraData(new bytes[](0), 0);
+        address[] memory listed = new address[](1);
+        listed[0] = vm.addr(pk);
+        bytes memory sealingExtra = _buildExtraDataListing(listed, new bytes[](0), 0);
         bytes memory sealingHeader = _buildHeaderAtNumber(blockNumber, stateRoot, sealingExtra);
         bytes32 sealHash = keccak256(sealingHeader);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, sealHash);
         bytes[] memory seals = new bytes[](1);
         seals[0] = abi.encodePacked(r, s, uint8(v - 27));
-        return _buildHeaderAtNumber(blockNumber, stateRoot, _buildExtraData(seals, 0));
-    }
-
-    function _buildSignedEpochHeader(uint256 blockNumber, address nextValidator, uint256 signerPk)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        bytes[] memory validatorItems = new bytes[](1);
-        validatorItems[0] = RLP.encode(nextValidator);
-        bytes[] memory sealingExtra = new bytes[](5);
-        sealingExtra[0] = RLP.encode(new bytes(32));
-        sealingExtra[1] = RLP.encode(validatorItems);
-        sealingExtra[2] = RLP.encode(new bytes(0));
-        sealingExtra[3] = RLP.encode(uint256(0));
-        sealingExtra[4] = RLP.encode(new bytes[](0));
-        bytes memory sealingHeader = _buildHeaderAtNumber(blockNumber, bytes32(0), RLP.encode(sealingExtra));
-        bytes32 sealHash = keccak256(sealingHeader);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, sealHash);
-        bytes[] memory wrappedSeals = new bytes[](1);
-        wrappedSeals[0] = RLP.encode(abi.encodePacked(r, s, uint8(v - 27)));
-        bytes[] memory signedExtra = new bytes[](5);
-        signedExtra[0] = RLP.encode(new bytes(32));
-        signedExtra[1] = RLP.encode(validatorItems);
-        signedExtra[2] = RLP.encode(new bytes(0));
-        signedExtra[3] = RLP.encode(uint256(0));
-        signedExtra[4] = RLP.encode(wrappedSeals);
-        return _buildHeaderAtNumber(blockNumber, bytes32(0), RLP.encode(signedExtra));
-    }
-
-    function _buildSignedEpochHeaderCustomValidators(
-        uint256 blockNumber,
-        bytes memory rlpValidatorList,
-        uint256 signerPk
-    ) internal pure returns (bytes memory) {
-        bytes[] memory sealingExtra = new bytes[](5);
-        sealingExtra[0] = RLP.encode(new bytes(32));
-        sealingExtra[1] = rlpValidatorList;
-        sealingExtra[2] = RLP.encode(new bytes(0));
-        sealingExtra[3] = RLP.encode(uint256(0));
-        sealingExtra[4] = RLP.encode(new bytes[](0));
-        bytes memory sealingHeader = _buildHeaderAtNumber(blockNumber, bytes32(0), RLP.encode(sealingExtra));
-        bytes32 sealHash = keccak256(sealingHeader);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, sealHash);
-        bytes[] memory wrappedSeals = new bytes[](1);
-        wrappedSeals[0] = RLP.encode(abi.encodePacked(r, s, uint8(v - 27)));
-        bytes[] memory signedExtra = new bytes[](5);
-        signedExtra[0] = RLP.encode(new bytes(32));
-        signedExtra[1] = rlpValidatorList;
-        signedExtra[2] = RLP.encode(new bytes(0));
-        signedExtra[3] = RLP.encode(uint256(0));
-        signedExtra[4] = RLP.encode(wrappedSeals);
-        return _buildHeaderAtNumber(blockNumber, bytes32(0), RLP.encode(signedExtra));
+        return _buildHeaderAtNumber(blockNumber, stateRoot, _buildExtraDataListing(listed, seals, 0));
     }
 
     function _buildMultiSealedHeaderAtBlock(
@@ -159,46 +111,6 @@ abstract contract QbftSyntheticProofs is Test {
             seals[idx++] = abi.encodePacked(r, s, uint8(v - 27));
         }
         return _buildHeaderAtNumber(blockNumber, stateRoot, _buildExtraData(seals, round));
-    }
-
-    function _buildMultiSealedHeader(
-        uint256[] memory signerPks,
-        bytes32 stateRoot,
-        uint256 round,
-        uint256 extraPk1,
-        uint256 extraPk2
-    ) internal pure returns (bytes memory) {
-        bytes memory sealingExtra = _buildExtraData(new bytes[](0), round);
-        bytes memory sealingHeader = _buildHeader(stateRoot, sealingExtra);
-        bytes32 sealHash = keccak256(sealingHeader);
-        uint256 total = signerPks.length + (extraPk1 != 0 ? 1 : 0) + (extraPk2 != 0 ? 1 : 0);
-        bytes[] memory seals = new bytes[](total);
-        uint256 idx;
-        for (uint256 i = 0; i < signerPks.length; i++) {
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPks[i], sealHash);
-            seals[idx++] = abi.encodePacked(r, s, uint8(v - 27));
-        }
-        if (extraPk1 != 0) {
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(extraPk1, sealHash);
-            seals[idx++] = abi.encodePacked(r, s, uint8(v - 27));
-        }
-        if (extraPk2 != 0) {
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(extraPk2, sealHash);
-            seals[idx++] = abi.encodePacked(r, s, uint8(v - 27));
-        }
-        return _buildHeader(stateRoot, _buildExtraData(seals, round));
-    }
-
-    // ── Payload shell ──────────────────────────────────────────────────────────
-
-    function _buildPayloadWithHeader(bytes memory header) internal pure returns (bytes memory) {
-        bytes[] memory top = new bytes[](5);
-        top[0] = header;
-        top[1] = hex"c0"; // empty epoch headers
-        top[2] = hex"c0";
-        top[3] = hex"c0";
-        top[4] = RLP.encode(new bytes(0));
-        return RLP.encode(top);
     }
 
     // ── MPT helpers ────────────────────────────────────────────────────────────
@@ -376,42 +288,40 @@ abstract contract QbftSyntheticProofs is Test {
 
     // ── Config proof ───────────────────────────────────────────────────────────
 
-    /// @dev Build a synthetic 10-field QBFT verifyConfig proof signed by `validatorPk`.
-    ///      The embedded trust anchor carries (validator, peerService, codeHash).
-    ///      Uses block 0 → epoch 0. Compatible with QBFTVerifier(1).
+    /// @dev A header-mode config proof: RLP([serviceAddr, chainId, peerConfigNanos, throttles(5),
+    ///      descriptor, blockHeader]) with the descriptor [mode = 0, codeHash]. The header (block 0)
+    ///      lists the single validator `vm.addr(validatorPk)` and is sealed by it.
     function _buildSyntheticConfigProof(
         uint256 validatorPk,
         address peerService,
         bytes32 codeHash,
-        string memory chainId,
-        uint64 epochLength
+        string memory chainId
     ) internal pure returns (bytes memory) {
-        address validator = vm.addr(validatorPk);
         bytes memory header = _buildSealedCurrentHeader(0, bytes32(0), validatorPk);
+        return _buildHeaderModeConfigProof(header, peerService, codeHash, chainId);
+    }
 
+    function _buildHeaderModeConfigProof(
+        bytes memory header,
+        address peerService,
+        bytes32 codeHash,
+        string memory chainId
+    ) internal pure returns (bytes memory) {
         bytes[] memory throttleItems = new bytes[](5);
         for (uint256 i = 0; i < 5; i++) {
             throttleItems[i] = RLP.encode(uint256(0));
         }
+        bytes[] memory taItems = new bytes[](2);
+        taItems[0] = RLP.encode(uint256(0)); // mode: header
+        taItems[1] = RLP.encode(codeHash);
 
-        // proof[6]: RLP byte string whose inner bytes are RLP([validator, peerService, codeHash])
-        bytes[] memory taItems = new bytes[](3);
-        taItems[0] = RLP.encode(validator);
-        taItems[1] = RLP.encode(peerService);
-        taItems[2] = RLP.encode(codeHash);
-        bytes memory trustAnchorItem = RLP.encode(RLP.encode(taItems));
-
-        bytes[] memory items = new bytes[](10);
-        items[0] = RLP.encode(validator);
-        items[1] = RLP.encode(abi.encodePacked(peerService));
-        items[2] = RLP.encode(new bytes(0));
-        items[3] = RLP.encode(bytes(chainId));
-        items[4] = RLP.encode(uint256(0)); // peerConfigNanos
-        items[5] = RLP.encode(throttleItems);
-        items[6] = trustAnchorItem;
-        items[7] = RLP.encode(new bytes(0));
-        items[8] = header;
-        items[9] = RLP.encode(uint256(epochLength));
+        bytes[] memory items = new bytes[](6);
+        items[0] = RLP.encode(abi.encodePacked(peerService));
+        items[1] = RLP.encode(bytes(chainId));
+        items[2] = RLP.encode(uint256(0)); // peerConfigNanos
+        items[3] = RLP.encode(throttleItems);
+        items[4] = RLP.encode(RLP.encode(taItems));
+        items[5] = header;
         return RLP.encode(items);
     }
 }

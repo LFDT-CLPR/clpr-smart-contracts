@@ -8,7 +8,7 @@ import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprEvmStateProof} from "@hiero-ledger/clpr/libraries/proof/evm/ClprEvmStateProof.sol";
 import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
 import {IntegrationTestBase} from "@test/integration/IntegrationTestBase.sol";
-import {QbftSyntheticProofs} from "@test/helpers/QbftSyntheticProofs.sol";
+import {QbftContractProofs} from "@test/helpers/QbftContractProofs.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
@@ -27,9 +27,13 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///     real round-trip), so `expectedResponseCount = 0` and `expectedAckedMsgId = 0`.
 ///   - msg2 is a second DATA from a Besu-local connector; it doesn't deliver locally
 ///     but makes receivedMessageId = 2 and nextMessageId = 3 consistent with the mock.
-contract IntegrationQBFTTest is IntegrationTestBase, QbftSyntheticProofs {
-    // Anvil test account #0 — the validator address that signed the fixture config proof.
+contract IntegrationQBFTTest is IntegrationTestBase, QbftContractProofs {
+    // The fixture chain's three QBFT validators are anvil test accounts #0..#2 (see
+    // tools/qbft-proof-generator/node-key-*). Their keys let the tests seal synthetic headers that
+    // the fixture's trust anchor accepts.
     uint256 internal constant QBFT_VALIDATOR_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+    uint256 internal constant QBFT_VALIDATOR_PK_1 = 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d;
+    uint256 internal constant QBFT_VALIDATOR_PK_2 = 0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a;
 
     /// @dev Selector of the builtin `Panic(uint256)` - solc's marker for unchecked indexing or
     ///      arithmetic, i.e. a missing guard rather than a deliberate rejection.
@@ -38,11 +42,12 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftSyntheticProofs {
     QBFTVerifier internal qbftVerifier;
 
     string internal constant BUNDLE_PATH = "test/verifiers/evm/qbft/fixtures/bundlePayload.hex";
+    string internal constant ROTATION_BUNDLE_PATH = "test/verifiers/evm/qbft/fixtures/bundlePayload.rotation.hex";
     string internal constant CONFIG_PROOF_PATH = "test/verifiers/evm/qbft/fixtures/configProof.hex";
     bytes internal bundlePayload;
 
     function setUp() public override {
-        qbftVerifier = QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier", abi.encode(uint8(2))));
+        qbftVerifier = QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier"));
         bundlePayload = _readHexFile(BUNDLE_PATH);
         _deployServiceAndConnect(address(qbftVerifier));
     }
@@ -62,18 +67,16 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftSyntheticProofs {
     // ═══════════════════════════════════════════════════════════════════
     // Full lifecycle: register connector → send → receive bundle → close
     // ═══════════════════════════════════════════════════════════════════
-    /// @dev Requires fresh fixture: `node tools/qbft-proof-generator/generate-fixture.js`
-    ///      bundlePayload.hex must be rebuilt with the 5-item layout:
-    ///      [currentHeader, epochHeaders[], accountProof, storageProof, bundleContent]
+    /// @dev Requires a fresh fixture: `node tools/qbft-proof-generator/generate-fixture.js`.
+    ///      bundlePayload.hex has the 5-item layout
+    ///      [currentHeader, [trustedSet, hops], accountProof, storageProof, bundleContent].
     function test_fullLifecycle() public {
+        // Stale fixtures fail here rather than skipping: the shape checks name the regeneration step.
         Memory.Slice[] memory topLevel = RLP.decodeList(bundlePayload);
-        if (topLevel.length != 5) {
-            vm.skip(true); // stale fixture — regenerate with node generate-fixture.js
-        }
+        assertEq(topLevel.length, 5, "stale fixture: regenerate with tools/qbft-proof-generator");
+        assertEq(RLP.readList(topLevel[1]).length, 2, "stale fixture: field 1 must be [trustedSet, hops]");
         Memory.Slice[] memory storageEntries = RLP.readList(topLevel[3]);
-        if (storageEntries.length != 4 && storageEntries.length != 5) {
-            vm.skip(true); // old storage proof format — channelId now lives in ChannelContext
-        }
+        assertEq(storageEntries.length, 6, "stale fixture: expected 5 channel slots + 1 message slot");
 
         uint64 outboundMsgId = _registerConnectorAndSend();
         assertEq(outboundMsgId, 1, "first outbound message");
@@ -81,6 +84,40 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftSyntheticProofs {
         service.submitBundle(channelId, bundlePayload);
 
         _verifyPostBundle(1, 3, hex"48454C4C4F", 2, 1, 0, ClprTypes.ChannelStatus.ACTIVE, 0);
+        _closeChannel();
+    }
+
+    function test_fullLifecycle_withRotation() public {
+        bytes memory rotationPayload = _readHexFile(ROTATION_BUNDLE_PATH);
+        Memory.Slice[] memory topLevel = RLP.decodeList(rotationPayload);
+        assertEq(topLevel.length, 5, "stale rotation fixture: regenerate with tools/qbft-proof-generator");
+        Memory.Slice[] memory source = RLP.readList(topLevel[1]);
+        assertEq(source.length, 2, "stale rotation fixture: field 1 must be [trustedSet, hops]");
+        assertEq(RLP.readList(source[1]).length, 1, "rotation fixture must carry exactly one hop");
+
+        (, bytes32 anchorBefore,, uint64 anchorBlockBefore) =
+            abi.decode(service.getChannel(channelId).trustAnchor, (uint8, bytes32, bytes32, uint64));
+        address[] memory threeMembers = new address[](3);
+        threeMembers[0] = vm.addr(QBFT_VALIDATOR_PK);
+        threeMembers[1] = vm.addr(QBFT_VALIDATOR_PK_1);
+        threeMembers[2] = vm.addr(QBFT_VALIDATOR_PK_2);
+        assertEq(anchorBefore, _commit(threeMembers), "anchor must start at the 3-member set");
+
+        uint64 outboundMsgId = _registerConnectorAndSend();
+        assertEq(outboundMsgId, 1, "first outbound message");
+
+        service.submitBundle(channelId, rotationPayload);
+
+        _verifyPostBundle(1, 3, hex"48454C4C4F", 2, 1, 0, ClprTypes.ChannelStatus.ACTIVE, 0);
+
+        (, bytes32 anchorAfter,, uint64 anchorBlockAfter) =
+            abi.decode(service.getChannel(channelId).trustAnchor, (uint8, bytes32, bytes32, uint64));
+        address[] memory twoMembers = new address[](2);
+        twoMembers[0] = vm.addr(QBFT_VALIDATOR_PK);
+        twoMembers[1] = vm.addr(QBFT_VALIDATOR_PK_1);
+        assertEq(anchorAfter, _commit(twoMembers), "anchor must rotate to the 2-member set");
+        assertGt(anchorBlockAfter, anchorBlockBefore, "anchor block must advance to the proven block");
+
         _closeChannel();
     }
 
@@ -93,8 +130,7 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftSyntheticProofs {
     // that the submitted proof covers exactly those slots.
     function test_rejectBundle_storageProofForWrongChannel() public override {
         ClprTypes.Channel memory channel = service.getChannel(channelId);
-        (, bytes32 codeHash, uint64 epochLength, uint64 epochNumber) =
-            abi.decode(channel.trustAnchor, (address, bytes32, uint64, uint64));
+        (,, bytes32 codeHash, uint64 anchorBlock) = abi.decode(channel.trustAnchor, (uint8, bytes32, bytes32, uint64));
         ClprTypes.ChannelContext memory ctx = ClprTypes.decodeChannelContext(channel.channelContext);
         address clprService;
         bytes memory svc = ctx.remoteServiceAddress;
@@ -108,18 +144,24 @@ contract IntegrationQBFTTest is IntegrationTestBase, QbftSyntheticProofs {
         (bytes32 stateRoot, bytes memory accountProofRlp) =
             _buildSyntheticAccountProof(clprService, storageRoot, codeHash);
 
-        // Header must be in the same epoch as the trust anchor so the verifier
-        // reaches the storage proof check rather than reverting on EpochMismatch.
-        uint256 blockNumber = uint256(epochNumber) * uint256(epochLength) + 1;
-        // QBFTVerifier(2) requires MIN_COMMITTED_SEALS = 2: sign with the fixture
-        // validator (QBFT_VALIDATOR_PK) plus one extra key.
-        uint256 extraSignerPk = uint256(keccak256("extra-signer"));
-        bytes memory header =
-            _buildMultiSealedHeaderAtBlock(blockNumber, stateRoot, 0, QBFT_VALIDATOR_PK, extraSignerPk);
+        // The header must be after the anchor block, list the fixture chain's three validators (so
+        // the submitted set hashes to the anchor's commitment) and be sealed by a 2-of-3 quorum.
+        uint256 blockNumber = uint256(anchorBlock) + 1;
+        address[] memory set = new address[](3);
+        set[0] = vm.addr(QBFT_VALIDATOR_PK);
+        set[1] = vm.addr(QBFT_VALIDATOR_PK_1);
+        set[2] = vm.addr(QBFT_VALIDATOR_PK_2);
+        uint256[] memory pks = new uint256[](2);
+        pks[0] = QBFT_VALIDATOR_PK;
+        pks[1] = QBFT_VALIDATOR_PK_1;
+        bytes memory header = _buildListedSealedHeader(blockNumber, stateRoot, set, pks);
 
+        bytes[] memory source = new bytes[](2);
+        source[0] = _memberListRlp(set);
+        source[1] = RLP.encode(new bytes[](0));
         bytes[] memory top = new bytes[](5);
         top[0] = header;
-        top[1] = hex"c0";
+        top[1] = RLP.encode(source);
         top[2] = accountProofRlp;
         top[3] = storageProofRlp;
         top[4] = RLP.encode(new bytes(0));

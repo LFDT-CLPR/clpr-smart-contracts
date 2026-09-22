@@ -5,16 +5,13 @@ import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
 /// @title ClprQbftSeal
-/// @notice Verifies that a Besu QBFT block header's committed-seals list contains at
-///         least MIN_COMMITTED_SEALS entries and that the expected validator signed at
-///         least one of them.  Reconstructs the sealing-header digest (same header with
+/// @notice Reads a Besu QBFT block header's `extraData`: the validator list it carries and the
+///         committed seals over it. Reconstructs the sealing-header digest (same header with
 ///         `committedSeals = []` in extraData) and recovers each seal via `ecrecover`.
 library ClprQbftSeal {
     error InvalidExtraData();
-    error WrongSealCount(uint256 got, uint256 expected);
     error SealLengthMismatch(uint256 got);
     error SealRecoverFailed();
-    error ValidatorSealNotFound(address expected);
 
     /// @dev Index of the `extraData` field within an Ethereum block header. QBFT carries
     ///      its consensus metadata here.
@@ -22,40 +19,47 @@ library ClprQbftSeal {
 
     // QBFT extraData layout: [vanity, validators[], vote, round, committedSeals[]]
     uint8 private constant EXTRA_FIELDS = 5;
+    uint8 private constant EXTRA_INDEX_VALIDATORS = 1;
     uint8 private constant EXTRA_INDEX_COMMITTED_SEALS = 4;
     uint8 private constant SEAL_LENGTH = 65;
 
-    /// @dev Verify that `header[12]` (extraData) contains at least minCommittedSeals
-    ///      committed seals and that `expectedValidator` signed at least one of them.
-    ///      Reverts on any structural mismatch, recovery failure, or missing validator.
-    function verify(uint8 minCommittedSeals, Memory.Slice[] memory header, address expectedValidator) internal pure {
-        (bytes32 sealHash, Memory.Slice[] memory seals) = decodeSealsContextFromHeader(header);
-        if (seals.length < minCommittedSeals) revert WrongSealCount(seals.length, minCommittedSeals);
-
-        for (uint256 i = 0; i < seals.length;) {
-            if (recoverSeal(sealHash, seals[i]) == expectedValidator) return;
-            unchecked {
-                i++;
-            }
-        }
-        revert ValidatorSealNotFound(expectedValidator);
+    /// @notice A header's `extraData`, decoded once: the digest the seals signed, the seals, and the
+    ///         validator list. A verifier that needs both the list and the seals reads them from one
+    ///         of these instead of decoding the header twice.
+    struct HeaderExtra {
+        bytes32 sealHash;
+        Memory.Slice[] seals;
+        Memory.Slice validators;
     }
 
-    /// @dev Read the committed seals and the digest they signed from a header.
+    /// @dev Decode `header[12]` (extraData) exactly once. Reverts `InvalidExtraData` when it is
+    ///      empty or not the 5-item QBFT layout.
+    function decodeHeader(Memory.Slice[] memory header) internal pure returns (HeaderExtra memory x) {
+        Memory.Slice[] memory extra = _decodeExtra(header);
+        x.seals = RLP.readList(extra[EXTRA_INDEX_COMMITTED_SEALS]);
+        x.validators = extra[EXTRA_INDEX_VALIDATORS];
+        x.sealHash = _sealingDigest(header, extra);
+    }
+
+    /// @dev The seals and the digest they signed, for a caller that reads no validator list from
+    ///      the header.
     function decodeSealsContextFromHeader(Memory.Slice[] memory header)
         internal
         pure
         returns (bytes32 sealHash, Memory.Slice[] memory seals)
     {
+        Memory.Slice[] memory extra = _decodeExtra(header);
+        seals = RLP.readList(extra[EXTRA_INDEX_COMMITTED_SEALS]);
+        sealHash = _sealingDigest(header, extra);
+    }
+
+    function _decodeExtra(Memory.Slice[] memory header) private pure returns (Memory.Slice[] memory extra) {
         bytes memory extraDataInner = RLP.readBytes(header[HEADER_EXTRA_DATA_INDEX]);
         // Guard the empty case explicitly: RLP.decodeList would otherwise reject it with the
         // generic RLPInvalidEncoding instead of this library's structural error.
         if (extraDataInner.length == 0) revert InvalidExtraData();
-        Memory.Slice[] memory extra = RLP.decodeList(extraDataInner);
+        extra = RLP.decodeList(extraDataInner);
         if (extra.length != EXTRA_FIELDS) revert InvalidExtraData();
-
-        seals = RLP.readList(extra[EXTRA_INDEX_COMMITTED_SEALS]);
-        sealHash = _sealingDigest(header, extra);
     }
 
     /// @dev Recover the signer of one committed seal over `sealHash`. Reverts on a bad length or a

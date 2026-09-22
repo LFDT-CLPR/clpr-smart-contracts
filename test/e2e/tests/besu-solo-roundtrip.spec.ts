@@ -13,7 +13,6 @@ import type {Backend} from "../backend/Backend.js";
 import type {ChainClients} from "../lib/clients.js";
 import {provisionE2ESuite} from "../lib/provisionSuite.js";
 import {resolveSoloLedgerId} from "../lib/soloLedger.js";
-import {resolveQbftValidator} from "../lib/verifierContext.js";
 import {loadArtifact} from "../../../script/deploy/artifacts.js";
 import {deployE2EPair, deployModeFor, type DeployedAddresses} from "../deploy/deploy.js";
 import {wireConfig, registerEndpoint} from "../deploy/wire.js";
@@ -93,8 +92,7 @@ describe.runIf(shouldRun())("cross-verifier roundtrip (besu+solo)", () => {
             addrsA,
             addrsB,
             peerKindA: backend.kindB(),
-            peerKindB: backend.kindA(),
-            validatorAddr: resolveQbftValidator()
+            peerKindB: backend.kindA()
         });
 
         connector = await wireConnector({
@@ -143,7 +141,6 @@ describe.runIf(shouldRun())("cross-verifier roundtrip (besu+solo)", () => {
             channelId: channel.channelId,
             range: {fromId: 1n, throughId: 1n},
             sourceKind: backend.kindA(),
-            validatorAddr: resolveQbftValidator(),
             trustAnchor: ledgerId
         });
 
@@ -165,7 +162,6 @@ describe.runIf(shouldRun())("cross-verifier roundtrip (besu+solo)", () => {
             channelId: channel.channelId,
             range: {fromId: 1n, throughId: 1n},
             sourceKind: backend.kindB(),
-            validatorAddr: resolveQbftValidator(),
             trustAnchor: ledgerId
         });
     });

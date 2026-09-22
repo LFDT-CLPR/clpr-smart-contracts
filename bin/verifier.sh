@@ -9,7 +9,7 @@ if [ $# -lt 2 ]; then
     echo "" >&2
     echo "Examples:" >&2
     echo "  ./bin/verifier.sh hiero --rpc-url anvil --ledger-id 0x..." >&2
-    echo "  ./bin/verifier.sh qbft --rpc-url besu --min-committed-seals 2" >&2
+    echo "  ./bin/verifier.sh qbft --rpc-url besu" >&2
     echo "  ./bin/verifier.sh sei --rpc-url anvil" >&2
     echo "  ./bin/verifier.sh eth-mainnet --rpc-url anvil" >&2
     exit 1

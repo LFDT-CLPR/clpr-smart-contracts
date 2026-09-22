@@ -22,7 +22,7 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
     /// @dev Deploys the Header-mode {QBFTVerifier}: every vector here is Contract mode, so each
     ///      call forwards to the embedded QbftContractModeVerifier.
     function _deployVerifier() internal override returns (IClprVerifier) {
-        return IClprVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier", abi.encode(uint8(1))));
+        return IClprVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier"));
     }
 
     /// @dev The single-member trusted set the fixtures anchor on.
@@ -113,7 +113,7 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
 
     // ── Contract-mode proof assembly ──────────
 
-    /// @dev An 8-field Contract-mode config proof: the contract proof at field 5 proves the set
+    /// @dev A 7-field Contract-mode config proof: the contract proof at field 5 proves the set
     ///      under the field-6 header's state root, and the header is sealed by that set.
     function _validConfigProofBytes(string memory chainId) private pure returns (bytes memory) {
         (bytes32 stateRoot, bytes32 arraySlot, bytes memory vcProof) =
@@ -122,7 +122,7 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
         return _buildContractConfigProof(arraySlot, vcProof, header, chainId, RLP.encode(uint256(1)));
     }
 
-    /// @dev Assemble the 8-field config proof with a chosen descriptor mode item.
+    /// @dev Assemble the 7-field config proof with a chosen descriptor mode item.
     function _buildContractConfigProof(
         bytes32 arraySlot,
         bytes memory vcProof,
@@ -141,7 +141,7 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
         taItems[3] = RLP.encode(VALIDATOR_CONTRACT);
         taItems[4] = RLP.encode(arraySlot);
 
-        bytes[] memory items = new bytes[](8);
+        bytes[] memory items = new bytes[](7);
         items[0] = RLP.encode(abi.encodePacked(SERVICE_ADDR));
         items[1] = RLP.encode(bytes(chainId));
         items[2] = RLP.encode(uint256(0));
@@ -149,7 +149,6 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
         items[4] = RLP.encode(RLP.encode(taItems));
         items[5] = RLP.encode(vcProof);
         items[6] = header;
-        items[7] = RLP.encode(uint256(30000));
         return RLP.encode(items);
     }
 
@@ -228,12 +227,10 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
         return (proof, SYNTHETIC_CHANNEL_ID);
     }
 
-    /// @dev verifyConfig requires exactly 8 RLP items. A 7-item proof (epochLength absent) is the
+    /// @dev verifyConfig requires exactly 7 RLP items. A 6-item proof (block header absent) is the
     ///      Contract-mode realization of "partial field coverage."
     function _partialSlotCoverageVector() internal pure override returns (bytes memory, bytes32) {
-        (bytes32 stateRoot, bytes32 arraySlot, bytes memory vcProof) =
-            _validatorContractProof(VALIDATOR_CONTRACT, _cmSet());
-        bytes memory header = _buildSealedCurrentHeader(1, stateRoot, VALIDATOR_PK);
+        (, bytes32 arraySlot, bytes memory vcProof) = _validatorContractProof(VALIDATOR_CONTRACT, _cmSet());
 
         bytes[] memory throttleItems = new bytes[](5);
         for (uint256 i = 0; i < 5; i++) {
@@ -246,14 +243,13 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
         taItems[3] = RLP.encode(VALIDATOR_CONTRACT);
         taItems[4] = RLP.encode(arraySlot);
 
-        bytes[] memory items = new bytes[](7); // omits items[7] (epochLength)
+        bytes[] memory items = new bytes[](6); // omits items[6] (the block header)
         items[0] = RLP.encode(abi.encodePacked(SERVICE_ADDR));
         items[1] = RLP.encode(bytes("eip155:1"));
         items[2] = RLP.encode(uint256(0));
         items[3] = RLP.encode(throttleItems);
         items[4] = RLP.encode(RLP.encode(taItems));
         items[5] = RLP.encode(vcProof);
-        items[6] = header;
 
         return (RLP.encode(items), SYNTHETIC_CHANNEL_ID);
     }

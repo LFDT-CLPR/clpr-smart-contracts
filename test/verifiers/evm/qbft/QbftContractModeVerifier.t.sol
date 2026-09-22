@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
+import {QbftVerifierBase} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftVerifierBase.sol";
 import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
 import {QbftContractModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftContractModeVerifier.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
@@ -42,11 +43,11 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
 
     function setUp() public {
         validatorAddr = vm.addr(VALIDATOR_PK);
-        verifier = _qbftVerifier(2);
+        verifier = _qbftVerifier();
     }
 
-    function _qbftVerifier(uint8 n) private returns (QBFTVerifier) {
-        return QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier", abi.encode(n)));
+    function _qbftVerifier() private returns (QBFTVerifier) {
+        return QBFTVerifier(deployCode("QBFTVerifier.sol:QBFTVerifier"));
     }
 
     function _decodeAnchor(bytes memory anchor) internal pure returns (DecodedAnchor memory a) {
@@ -110,7 +111,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         taItems[3] = RLP.encode(validatorContract);
         taItems[4] = RLP.encode(arraySlot);
 
-        bytes[] memory items = new bytes[](8);
+        bytes[] memory items = new bytes[](7);
         items[0] = RLP.encode(abi.encodePacked(SERVICE_ADDR));
         items[1] = RLP.encode(bytes("eip155:1"));
         items[2] = RLP.encode(uint256(0));
@@ -118,7 +119,6 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         items[4] = RLP.encode(RLP.encode(taItems));
         items[5] = RLP.encode(vcProof);
         items[6] = header;
-        items[7] = RLP.encode(uint256(30000));
         return RLP.encode(items);
     }
 
@@ -204,27 +204,16 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         return RLP.encode(out);
     }
 
-    function test_revertWhen_SealSignatureIsZero() public {
-        bytes memory code = abi.encodePacked(vm.getCode("QBFTVerifier.sol:QBFTVerifier"), abi.encode(uint8(0)));
-        vm.expectRevert(QBFTVerifier.InvalidNumberOfSealSignatures.selector);
-        assembly {
-            let addr := create(0, add(code, 0x20), mload(code))
-            if iszero(addr) {
-                returndatacopy(0, 0, returndatasize())
-                revert(0, returndatasize())
-            }
-        }
-    }
-
     function test_revertWhen_TrustAnchorWrongLength() public {
         vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
         verifier.verifyBundle(hex"c0", hex"deadbeef", "");
     }
 
-    /// @dev A 5-word mode-0 anchor is not forwarded. The legacy path rejects its length.
-    function test_revertWhen_HeaderModeAnchor_staysOnLegacyPath() public {
-        bytes memory anchor = abi.encode(uint8(0), bytes32(0), SERVICE_CODE_HASH, uint64(0), uint64(30000));
-        vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
+    /// @dev A mode-0 anchor is forwarded to the header-mode verifier, which owns its checks: here
+    ///      the empty proof fails its payload shape check.
+    function test_headerModeAnchor_routesToHeaderMode() public {
+        bytes memory anchor = abi.encode(uint8(0), bytes32(0), SERVICE_CODE_HASH, uint64(0));
+        vm.expectRevert(QbftVerifierBase.InvalidPayloadShape.selector);
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
 
@@ -235,11 +224,11 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
 
-    /// @dev A 7-word anchor whose mode word is not 1 is not forwarded. The legacy path rejects it.
-    function test_revertWhen_UnknownModeAnchor_staysOnLegacyPath() public {
+    /// @dev A 7-word anchor whose mode word is neither 0 nor 1 is rejected by the router.
+    function test_revertWhen_UnknownModeAnchor() public {
         bytes memory anchor =
             abi.encode(uint8(2), bytes32(0), SERVICE_CODE_HASH, address(0), bytes32(0), uint64(0), VALIDATOR_CODE_HASH);
-        vm.expectRevert(QBFTVerifier.InvalidTrustAnchor.selector);
+        vm.expectRevert(abi.encodeWithSelector(QBFTVerifier.UnknownValidatorMode.selector, 2));
         verifier.verifyBundle(hex"c0", anchor, _syntheticChannelContext());
     }
 
@@ -258,9 +247,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
 
         bytes memory anchor = _contractAnchor(anchored, address(0x1234), bytes32(uint256(1)), 0);
         vm.expectRevert(
-            abi.encodeWithSelector(
-                QbftContractModeVerifier.WrongSetCommitment.selector, _commit(submitted), _commit(anchored)
-            )
+            abi.encodeWithSelector(QbftVerifierBase.WrongSetCommitment.selector, _commit(submitted), _commit(anchored))
         );
         verifier.verifyBundle(RLP.encode(top), anchor, _syntheticChannelContext());
     }
@@ -294,7 +281,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
 
     function test_revertWhen_TrustedSetNotAList() public {
         OpenCommitmentHarness oc = new OpenCommitmentHarness();
-        vm.expectRevert(QbftContractModeVerifier.InvalidTrustedSet.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidTrustedSet.selector);
         oc.open(RLP.encode(bytes(hex"deadbeef")), bytes32(0));
     }
 
@@ -303,11 +290,11 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         bytes[] memory items = new bytes[](2);
         items[0] = RLP.encode(address(0xAAA1));
         items[1] = RLP.encode(bytes(hex"0102030405060708090a0b0c0d0e0f1011121314151617")); // 23 bytes
-        vm.expectRevert(QbftContractModeVerifier.InvalidTrustedSet.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidTrustedSet.selector);
         oc.open(RLP.encode(items), bytes32(0));
 
         items[1] = RLP.encode(new bytes[](0)); // a list where an address belongs
-        vm.expectRevert(QbftContractModeVerifier.InvalidTrustedSet.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidTrustedSet.selector);
         oc.open(RLP.encode(items), bytes32(0));
     }
 
@@ -458,7 +445,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     /// @dev verifyConfig reads the set from the validator contract, checks the header seal against
     ///      a quorum of it, and returns a Contract-mode anchor keyed by block number.
     function test_verifyConfig_anchorsContractSet() public {
-        _checkVerifyConfigAnchorsContractSet(IClprVerifier(address(_qbftVerifier(2)))); // quorum(3) = 2
+        _checkVerifyConfigAnchorsContractSet(IClprVerifier(address(_qbftVerifier()))); // quorum(3) = 2
     }
 
     function _checkVerifyConfigAnchorsContractSet(IClprVerifier v) private view {
@@ -490,39 +477,38 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         assertEq(initialTrustAnchorId, abi.encodePacked(uint64(500)), "anchor id is the block number");
     }
 
-    /// @dev A Header-mode (0) descriptor reverts: this verifier serves Contract mode only.
-    function test_verifyConfig_headerModeDescriptor_reverts() public {
+    /// @dev A mode-0 descriptor is routed to the header-mode verifier, which rejects the 4-item
+    ///      contract-mode descriptor layout (it expects [mode, codeHash]).
+    function test_verifyConfig_headerModeDescriptor_routesToHeaderMode() public {
         bytes memory header = _buildMultiSealedHeaderAtBlock(500, bytes32(0), 0, VALIDATOR_PK, 0);
 
         bytes[] memory throttleItems = new bytes[](5);
         for (uint256 i = 0; i < 5; i++) {
             throttleItems[i] = RLP.encode(uint256(0));
         }
-        bytes[] memory taItems = new bytes[](5);
+        bytes[] memory taItems = new bytes[](4);
         taItems[0] = RLP.encode(uint256(0)); // mode = Header
-        taItems[1] = RLP.encode(abi.encodePacked(SERVICE_ADDR));
-        taItems[2] = RLP.encode(SERVICE_CODE_HASH);
-        taItems[3] = RLP.encode(address(0xC04511AC));
-        taItems[4] = RLP.encode(bytes32(uint256(1)));
+        taItems[1] = RLP.encode(SERVICE_CODE_HASH);
+        taItems[2] = RLP.encode(address(0xC04511AC));
+        taItems[3] = RLP.encode(bytes32(uint256(1)));
 
-        bytes[] memory items = new bytes[](8);
+        // The 6-field header-mode layout: no validator contract proof, header at field 5.
+        bytes[] memory items = new bytes[](6);
         items[0] = RLP.encode(abi.encodePacked(SERVICE_ADDR));
         items[1] = RLP.encode(bytes("eip155:1"));
         items[2] = RLP.encode(uint256(0));
         items[3] = RLP.encode(throttleItems);
         items[4] = RLP.encode(RLP.encode(taItems));
-        items[5] = RLP.encode(new bytes(0));
-        items[6] = header;
-        items[7] = RLP.encode(uint256(30000));
+        items[5] = header;
 
-        vm.expectRevert(abi.encodeWithSelector(QbftContractModeVerifier.UnknownValidatorMode.selector, uint8(0)));
+        vm.expectRevert(QbftVerifierBase.InvalidTrustAnchorFields.selector);
         verifier.verifyConfig(RLP.encode(items), SYNTHETIC_CHANNEL_ID, "");
     }
 
     /// @dev verifyBundle checks the current block against the trusted set, reads the set the
     ///      contract now holds, and rotates the anchor to it (keyed by block number).
     function test_verifyBundle_rotatesToContractSet() public {
-        _checkVerifyBundleRotates(IClprVerifier(address(_qbftVerifier(2)))); // quorum(3) = 2
+        _checkVerifyBundleRotates(IClprVerifier(address(_qbftVerifier()))); // quorum(3) = 2
     }
 
     function _checkVerifyBundleRotates(IClprVerifier v) private view {
@@ -571,7 +557,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     /// @dev A hop at a change block advances the walk as well. Old set A seals the hop at block 300
     ///      whose state holds mid set B; the current block 301 is sealed by B and its state holds B.
     function test_hopWalk_crossesRotation() public {
-        QBFTVerifier v = _qbftVerifier(2); // quorum(3) = 2
+        QBFTVerifier v = _qbftVerifier(); // quorum(3) = 2
         address[] memory oldSet = _set3("hop-o1", "hop-o2", "hop-o3");
         address[] memory midSet = _set3("hop-m1", "hop-m2", "hop-m3");
 
@@ -594,7 +580,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
     ///      B's change block stays replayable in a later bundle. Also asserts the replay is then
     ///      rejected against the advanced anchor.
     function test_verifyBundle_roundTripAdvancesFloorAndBlocksReplay() public {
-        QBFTVerifier v = _qbftVerifier(2); // quorum(3) = 2
+        QBFTVerifier v = _qbftVerifier(); // quorum(3) = 2
         address[] memory setA = _set3("rt-a1", "rt-a2", "rt-a3");
         address[] memory setB = _set3("rt-b1", "rt-b2", "rt-b3");
 
@@ -617,9 +603,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
 
         // The advanced anchor (floor 400) must now reject a replay of hop1 @200.
         vm.expectRevert(
-            abi.encodeWithSelector(
-                QbftContractModeVerifier.HandoffHeaderNotAscending.selector, uint64(200), uint64(400)
-            )
+            abi.encodeWithSelector(QbftVerifierBase.HandoffHeaderNotAscending.selector, uint64(200), uint64(400))
         );
         v.verifyBundle(proof, _contractAnchor(setA, VALIDATOR_CONTRACT, cb.arraySlot, 400), _syntheticChannelContext());
     }
@@ -636,7 +620,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         top[3] = hex"c0";
         top[4] = RLP.encode(new bytes(0));
 
-        vm.expectRevert(QbftContractModeVerifier.InvalidPayloadShape.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidPayloadShape.selector);
         verifier.verifyBundle(RLP.encode(top), anchor, _syntheticChannelContext());
     }
 
@@ -657,7 +641,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         top[3] = hex"c0";
         top[4] = RLP.encode(new bytes(0));
 
-        vm.expectRevert(QbftContractModeVerifier.InvalidPayloadShape.selector);
+        vm.expectRevert(QbftVerifierBase.InvalidPayloadShape.selector);
         verifier.verifyBundle(RLP.encode(top), anchor, _syntheticChannelContext());
     }
 
@@ -677,7 +661,7 @@ contract QbftContractModeVerifierTest is QbftContractProofs {
         top[4] = RLP.encode(new bytes(0));
 
         vm.expectRevert(
-            abi.encodeWithSelector(QbftContractModeVerifier.HandoffHeaderNotAscending.selector, uint64(0), uint64(0))
+            abi.encodeWithSelector(QbftVerifierBase.HandoffHeaderNotAscending.selector, uint64(0), uint64(0))
         );
         verifier.verifyBundle(RLP.encode(top), anchor, _syntheticChannelContext());
     }

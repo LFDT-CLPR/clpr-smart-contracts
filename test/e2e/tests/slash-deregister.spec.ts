@@ -48,9 +48,6 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
     const STAKE = parseEther("1");
     const EXPECTED_REMAINING = STAKE - DEFAULT_ECON.basePenalty; // partial slash leaves this on-ledger
 
-    // Besu single-node genesis validator — matches infra/besu-genesis.json.
-    const BESU_VALIDATOR = "0xf39Fd6e51aad88F6f4ce6aB8827279cffFb92266" as Hex;
-
     beforeAll(async () => {
         backend = createBackend();
         await backend.start();
@@ -73,8 +70,7 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
             const conn = await wireChannel({
                 chainA: A, chainB: B,
                 caipA: backend.caipA(), caipB: backend.caipB(),
-                addrsA: a, addrsB: b,
-                validatorAddr: BESU_VALIDATOR
+                addrsA: a, addrsB: b
             });
             channelId = conn.channelId;
 
@@ -129,7 +125,7 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
             await waitForBlock(backend.rpcA(), Number(block) + 2, 30_000);
             await ferryQbft({
                 source: A, dest: B, sourceAddrs: addrsA, destAddrs: addrsB,
-                channelId, validatorAddr: BESU_VALIDATOR,
+                channelId,
                 range: {fromId: 1n, throughId: 1n}
             });
 
@@ -138,7 +134,7 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
             await waitForBlock(backend.rpcB(), Number(block) + 2, 30_000);
             await ferryQbft({
                 source: B, dest: A, sourceAddrs: addrsB, destAddrs: addrsA,
-                channelId, validatorAddr: BESU_VALIDATOR,
+                channelId,
                 range: {fromId: 1n, throughId: 1n}
             });
         } else {

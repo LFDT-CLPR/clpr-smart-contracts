@@ -27,7 +27,8 @@ clpr-smart-contracts-<version>/
 
 Packaged contracts: `ClprService`, the five logic modules (`ChannelLogic`,
 `MessagingLogic`, `BundleLogic`, `ConnectorLogic`, `AdminLogic`), `BundleDecodeHelper`,
-and the production verifiers (`QBFTVerifier`, `HieroVerifier`, `TSSVerifier`,
+and the production verifiers (`QBFTVerifier` together with the two mode verifiers it routes to,
+`QbftHeaderModeVerifier` and `QbftContractModeVerifier`; `HieroVerifier`, `TSSVerifier`,
 `EthMainnetVerifier`, `SeiCometBftVerifier`, `Ed25519Verifier`).
 
 The Hiero verifier's on-chain dependencies ship alongside it — `PoseidonPermuteA`,

@@ -1,2 +1,7 @@
 .DS_Store
 .idea/
+
+# The *.hex fixtures are committed: IntegrationQBFT.t.sol reads them in CI. Only the
+# generator's debugging side-outputs stay local.
+test/verifiers/evm/qbft/fixtures/metadata.json
+test/verifiers/evm/qbft/fixtures/debug-proof-data.json

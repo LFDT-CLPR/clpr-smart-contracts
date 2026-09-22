@@ -69,7 +69,7 @@ contract SeiE2EVerifierTest is Test {
 
     /// @dev Same guarantee for the QBFT E2E wrapper's setSeedEndpoints().
     function test_qbftWrapper_setSeedEndpoints_rejectsDnsName() public {
-        QbftE2EVerifier qbft = new QbftE2EVerifier(new QBFTVerifier(1));
+        QbftE2EVerifier qbft = new QbftE2EVerifier(new QBFTVerifier());
         ClprTypes.Endpoint[] memory seeds = new ClprTypes.Endpoint[](1);
         seeds[0] =
             ClprTypes.Endpoint({ipAddress: "clpr-relay-besu-grpc", port: 50211, tlsCertificate: "", accountId: ""});
