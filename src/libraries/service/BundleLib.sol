@@ -478,6 +478,15 @@ library BundleLib {
     ///      is advanced past any non-DATA or redacted (zero-payload) outbound ids to the
     ///      next live outbound DATA.
     ///
+    ///      The walk starts at `ctx.messageStartIndex`, skipping the leading already-received
+    ///      duplicate prefix exactly as the running-hash (Step 5) and dispatch (Step 10) loops
+    ///      do. A peer legitimately re-sends messages until its ack round-trips, and a read-only
+    ///      proof format (the Hiero block-stream StateProof) cannot be trimmed endpoint-side, so
+    ///      those duplicates reach this pre-scan by design. Re-scanning them would compare an
+    ///      already-consumed REPLY against an already-advanced `nextExpectedReplyId` and report
+    ///      a spurious backward-reply violation, pausing the channel and dropping the genuinely
+    ///      new messages that follow it in the same bundle.
+    ///
     /// @return violation true if any ordering rule was broken.
     /// @return nextExpectedReplyId
     function _checkResponseOrdering(
@@ -490,7 +499,8 @@ library BundleLib {
         uint64 nextMessageId = channel.nextMessageId;
         bytes32 channelId = ctx.channelId;
 
-        for (uint256 j = 0; j < messagePayloads.length; j++) {
+        // Start past the already-received duplicate prefix; see the note above.
+        for (uint256 j = ctx.messageStartIndex; j < messagePayloads.length; j++) {
             // Unknown/empty types can't be REPLYs and are irrelevant to response ordering; skip
             // them here so a malformed message degrades to a per-message skip in _dispatchMessages
             // rather than reverting the entire bundle during this pre-scan.
