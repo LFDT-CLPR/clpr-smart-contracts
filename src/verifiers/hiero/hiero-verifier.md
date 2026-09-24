@@ -66,7 +66,7 @@ Processing steps
    - This performs the WRAPS pairing check with the ledger’s WRAPS VK and checks the aggregate signature against the block root. See “TSS/WRAPS path” below.
    - Failure: `ClprHieroTssVerificationFailed()` if the TSS verification returns false.
 
-   ![tss-overview.png](img/tss-overview.png)
+   ![tss-overview.png](../../../docs/img/tss-overview.png)
 
    Diagram: Threshold-signature (TSS) verification over the block root using WRAPS ensures the block is authentic; we only trust Merkle paths after this succeeds.
 
@@ -77,7 +77,7 @@ Processing steps
      - Extracts all `ClprMessageValue` leaves and returns an array of message payload bytes.
    - Failure: Propagates `ClprTypes.VerifyFailed(string)` and other library errors if any path fails or required data is missing.
 
-     ![state-proof.png](img/state-proof.png)
+     ![state-proof.png](../../../docs/img/state-proof.png)
 
      Figure: State-proof Merkle tree showing the ClprChannel leaf (for queue metadata) and one or more ClprMessageValue leaves; the verifier proves inclusion against the block root and extracts the message payloads.
 
@@ -201,6 +201,7 @@ References in repo:
 
 - Stateless: HieroVerifier does not mutate storage during verification. `ledgerId` and `tssVerifier` are immutable post‑deploy (except `ledgerId` which is a bytes stored at construction and never changed). `verifyBundle` and `verifyConfig` are `view`.
 - Deterministic output: given the same `proofBytes` and `ledgerId`, outputs are fully deterministic.
+- Gas: full transaction cost and per-step breakdown of `verifyBundle`, including the hinTS aggregate check, are in [`GAS_REPORT.md`](GAS_REPORT.md).
 
 
 ## Testing references
