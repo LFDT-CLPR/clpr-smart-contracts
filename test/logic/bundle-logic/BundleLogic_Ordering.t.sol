@@ -59,6 +59,43 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED));
     }
 
+    // ── Ack commit on the PAUSE path
+
+    /// @dev the ack that triggers the response-ordering PAUSE must
+    ///      still be committed to chan.ackedMessageId, even though dispatch is skipped. Otherwise
+    ///      chan.ackedMessageId never advances, so an identical resubmission of the same ack-only
+    ///      bundle keeps looking like fresh "ack progress" to _checkBundleProgress and re-pauses
+    ///      indefinitely instead of being rejected as a no-op.
+    function test_pause_commitsAck_soRepeatedNoOpBundleIsRejectedAsNoProgress() public {
+        _registerTestConnector();
+
+        // Send an outbound DATA message so there's something to ack.
+        service.sendMessage(channelId, connectorId, hex"0011223344", hex"01020304");
+
+        // Bundle acks our message without providing its REPLY -> PAUSE.
+        bytes[] memory emptyMsgs = new bytes[](0);
+        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
+            nextMessageId: 1,
+            sentRunningHash: bytes32(0),
+            receivedMessageId: 1, // acking our outbound message 1
+            receivedRunningHash: bytes32(0),
+            state: ClprTypes.ChannelStatus.ACTIVE,
+            endpointManifestVersion: 0
+        });
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        _submitBundle(hex"00FF");
+
+        ClprTypes.Channel memory chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.PAUSED));
+        assertEq(chan.ackedMessageId, 1, "ack that triggered the pause must still be committed");
+
+        // Resubmitting the exact same ack-only bundle no longer looks like fresh ack progress,
+        // so it must be rejected as a no-op instead of re-triggering the same pause again.
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        vm.expectRevert(BundleLib.NoProgress.selector);
+        _submitBundle(hex"00FF");
+    }
+
     // ── Test 7: Auto-resume after PAUSE
 
     function test_autoResume_afterPause() public {
@@ -194,8 +231,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED), "should be PAUSED");
 
         // Bundle 2: peer provides REPLY for message 1 (ordering satisfied) + peer state = CLOSING.
-        //           Peer still has NOT acked our message 2, so ackedMessageId remains at 0
-        //           and CLOSING won't immediately drain.
+        //           Bundle 1's ack of message 1 is already committed (see #416 fix), so ack
+        //           progress can't go backward; keep it at 1 so message 2 stays unacked and
+        //           CLOSING won't immediately drain.
         {
             bytes memory replyPayload = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
             bytes[] memory msgs = new bytes[](1);
@@ -205,7 +243,7 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
                 nextMessageId: 2,
                 sentRunningHash: hash,
-                receivedMessageId: 0, // NOT acking our messages yet
+                receivedMessageId: 1, // no further ack progress; message 2 still unacked
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.CLOSING, // peer is closing
                 endpointManifestVersion: 0
@@ -467,6 +505,51 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         _submitBundle(hex"00FF");
     }
 
+    // ── CLOSING + AwaitingReply → state machine must still transition
+
+    /// @dev A CLOSING channel receives an ack-only bundle: the ack satisfies dataAcked (so
+    ///      CLOSING -> DRAINED should fire), but the acked DATA has no REPLY yet, so
+    ///      _checkResponseOrdering reports AwaitingReply rather than Ok. The early-return path
+    ///      must still apply the state machine transition, not just commit the ack — otherwise
+    ///      the channel is stuck CLOSING forever and the identical bundle can be resubmitted
+    ///      indefinitely with no progress and no revert.
+    function test_closingPlusAwaitingReply_stillTransitionsToDrained() public {
+        _registerTestConnector();
+
+        // Send one outbound DATA message so there is something to ack.
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"AABB");
+
+        // Close the channel locally.
+        service.closeChannel(channelId);
+        ClprTypes.Channel memory chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.CLOSING));
+
+        // Peer acks our DATA #1 but hasn't sent its REPLY yet -> AwaitingReply.
+        bytes[] memory emptyMsgs = new bytes[](0);
+        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
+            nextMessageId: 1,
+            sentRunningHash: bytes32(0),
+            receivedMessageId: 1, // acking our DATA #1
+            receivedRunningHash: bytes32(0),
+            state: ClprTypes.ChannelStatus.CLOSING, // peer is also closing
+            endpointManifestVersion: 0
+        });
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        _submitBundle(hex"00FF");
+
+        // dataAcked is now true, so CLOSING -> DRAINED must fire even though dispatch was
+        // skipped for the AwaitingReply outcome.
+        chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.DRAINED), "must drain, not stay stuck CLOSING");
+        assertEq(chan.ackedMessageId, 1, "ack must still be committed");
+
+        // Resubmitting the identical no-op bundle must now be rejected as no progress,
+        // instead of silently re-evaluating the same transition forever.
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        vm.expectRevert(BundleLib.NoProgress.selector);
+        _submitBundle(hex"00FF");
+    }
+
     function test_redactMessage_decrementsInflight() public {
         _registerTestConnector();
 
@@ -643,7 +726,7 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         assertEq(slot2.payload.length, 0, "slot 2 DATA deleted after reply");
     }
 
-    function test_duplicateReply_crossBundle_isIgnored() public {
+    function test_duplicateReply_crossBundle_pausesChannel() public {
         _registerTestConnector();
 
         // Send outbound DATA message 1 (nextMessageId becomes 2)
@@ -671,7 +754,7 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "still ACTIVE after bundle 1");
 
-        // duplicate reply → silently skipped → channel stays ACTIVE
+        // duplicate reply → ordering violation → channel PAUSED
         bytes memory replyPayload2 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"0304");
         {
             bytes[] memory msgs = new bytes[](1);
@@ -691,9 +774,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             _submitBundle(hex"00FF02");
         }
 
-        // Duplicate reply is silently skipped; channel remains ACTIVE
+        // Duplicate reply is an ordering violation; channel is PAUSED
         channel = service.getChannel(channelId);
-        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "ACTIVE after duplicate reply");
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED), "PAUSED after duplicate reply");
     }
 
     function test_checkResponseOrdering_replyForFutureMessage_causesViolation() public {

@@ -272,12 +272,12 @@ contract BundleLib_ResponseOrderingTest is BundleLibTestBase {
         assertEq(slot2.payload.length, 0, "slot 2 DATA deleted after reply");
     }
 
-    // ── duplicate REPLY (replyId < nextExpected) → ignored, channel stays ACTIVE
+    // ── duplicate REPLY (replyId < nextExpected) → violation, channel PAUSED
 
     /// @dev Bundle 1 provides a valid REPLY for outbound DATA #1, advancing nextExpectedReplyId to 2.
     ///      Bundle 2 provides a duplicate REPLY for DATA #1 again (replyId=1 < nextExpected=2).
-    ///      The spec allows stale duplicates; they must be silently skipped, not treated as violations.
-    function test_duplicateReply_crossBundle_isIgnored() public {
+    ///      A reply not matching the oldest unresponded DATA is an ordering violation → PAUSED.
+    function test_duplicateReply_crossBundle_pausesChannel() public {
         _registerTestConnector();
 
         // Send outbound DATA message 1 (nextMessageId becomes 2)
@@ -305,7 +305,7 @@ contract BundleLib_ResponseOrderingTest is BundleLibTestBase {
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "still ACTIVE after bundle 1");
 
-        // replyId=1, channel.nextExpectedReplyId=2 → duplicate reply → silently skipped → ACTIVE
+        // replyId=1, channel.nextExpectedReplyId=2 → duplicate reply → ordering violation → PAUSED
         bytes memory replyPayload2 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"0304");
         {
             bytes[] memory msgs = new bytes[](1);
@@ -325,9 +325,9 @@ contract BundleLib_ResponseOrderingTest is BundleLibTestBase {
             _submitBundle(hex"00FF02");
         }
 
-        // Duplicate reply must be ignored — channel stays ACTIVE
+        // Duplicate reply is an ordering violation; channel is PAUSED
         channel = service.getChannel(channelId);
-        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "ACTIVE after duplicate reply");
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED), "PAUSED after duplicate reply");
     }
 
     /// @dev `if (replyId >= channel.nextMessageId) return true`

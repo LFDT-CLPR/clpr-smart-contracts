@@ -630,8 +630,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED), "should be PAUSED");
 
         // Bundle 2: peer provides REPLY for message 1 (ordering satisfied) + peer state = CLOSING.
-        //           Peer still has NOT acked our message 2, so ackedMessageId remains at 0
-        //           and CLOSING won't immediately drain.
+        //           Bundle 1's ack of message 1 is already committed, so ack
+        //           progress can't go backward; keep it at 1 so message 2 stays unacked and
+        //           CLOSING won't immediately drain.
         {
             bytes memory replyPayload = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
             bytes[] memory msgs = new bytes[](1);
@@ -641,7 +642,7 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
                 nextMessageId: 2,
                 sentRunningHash: hash,
-                receivedMessageId: 0, // NOT acking our messages yet
+                receivedMessageId: 1, // no further ack progress; message 2 still unacked
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.CLOSING, // peer is closing
                 endpointManifestVersion: 0

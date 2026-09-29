@@ -315,18 +315,23 @@ library BundleLib {
         }
 
         // ── Step 7: Response ordering pre-scan ───────────────────────
-        (bool violation, uint64 nextExpected) = _checkResponseOrdering(ctx, channel, messagePayloads, _messageQueues);
-        if (violation) {
-            // A CLOSING channel receiving out-of-order responses is unrecoverable — revert.
+        (OrderingOutcome outcome, uint64 nextExpected) =
+            _checkResponseOrdering(ctx, channel, messagePayloads, _messageQueues);
+        if (outcome != OrderingOutcome.Ok) {
             if (channel.status == ClprTypes.ChannelStatus.CLOSING) {
-                revert ClprTypes.ClprBundleVerificationFailed();
-            }
-            // Out-of-order responses on ACTIVE → transition to PAUSED
-            if (channel.status == ClprTypes.ChannelStatus.ACTIVE) {
+                // A CLOSING channel receiving out-of-order responses is unrecoverable — revert.
+                if (outcome == OrderingOutcome.StructuralViolation) revert ClprTypes.ClprBundleVerificationFailed();
+                // AwaitingReply on a CLOSING channel: dispatch is skipped, but the CLOSING -> DRAINED
+                // hop is gated only by dataAcked, not by the outstanding REPLY, so it can still fire.
+                _applyStateMachine(ctx.channelId, channel, metadata, ctx.newAckedMessageId);
+            } else if (channel.status == ClprTypes.ChannelStatus.ACTIVE) {
+                // Out-of-order responses on ACTIVE → transition to PAUSED
                 channel.status = ClprTypes.ChannelStatus.PAUSED;
                 emit ChannelStatusChanged(ctx.channelId, ClprTypes.ChannelStatus.PAUSED);
             }
-            // If channel.status == ClprTypes.ChannelStatus.PAUSED do nothing
+            // Commit the verified ack even though dispatch is skipped
+            _deleteAckedNonDataMessages(ctx.channelId, ctx.oldAckedMessageId, ctx.newAckedMessageId, _messageQueues);
+            channel.ackedMessageId = ctx.newAckedMessageId;
             _channels[ctx.channelId] = channel;
             return (ctx, channel, metadata, messagePayloads, true);
         }
@@ -459,6 +464,17 @@ library BundleLib {
 
     // ── Internal: Response ordering check ─────────────────────────────────
 
+    /// @dev Outcome of the Step 7 response-ordering pre-scan.
+    enum OrderingOutcome {
+        Ok,
+        /// A REPLY in this bundle is backward/duplicate, targets an unsent message, or skips
+        /// an earlier live DATA - the proof itself is malformed.
+        StructuralViolation,
+        /// The ack covers a live DATA message with no REPLY for it: the peer's state
+        /// is ahead of what's been relayed back.
+        AwaitingReply
+    }
+
     /// @dev Check if the payload is a message of type DATA
     function _isMessageValueOfTypeData(
         bytes32 channelId,
@@ -487,14 +503,14 @@ library BundleLib {
     ///      a spurious backward-reply violation, pausing the channel and dropping the genuinely
     ///      new messages that follow it in the same bundle.
     ///
-    /// @return violation true if any ordering rule was broken.
+    /// @return outcome see OrderingOutcome.
     /// @return nextExpectedReplyId
     function _checkResponseOrdering(
         BundleContext memory ctx,
         ClprTypes.Channel memory channel,
         bytes[] memory messagePayloads,
         mapping(bytes32 => mapping(uint64 => ClprTypes.MessageValue)) storage _messageQueues
-    ) internal view returns (bool violation, uint64) {
+    ) internal view returns (OrderingOutcome, uint64) {
         uint64 nextExpectedReplyId = channel.nextExpectedReplyId;
         uint64 nextMessageId = channel.nextMessageId;
         bytes32 channelId = ctx.channelId;
@@ -510,10 +526,10 @@ library BundleLib {
             uint64 replyMessageId = ClprProtobuf.decodeReplyMessage(messagePayloads[j]).messageId;
 
             // A REPLY for an un-acked outbound message is a violation.
-            if (replyMessageId >= nextMessageId) return (true, 0);
+            if (replyMessageId >= nextMessageId) return (OrderingOutcome.StructuralViolation, 0);
 
-            // Duplicate reply — skip silently.
-            if (nextExpectedReplyId > replyMessageId) continue;
+            // Backward/duplicate reply - violation.
+            if (nextExpectedReplyId > replyMessageId) return (OrderingOutcome.StructuralViolation, 0);
 
             // Advance past skipped live DATA messages.
             while (nextExpectedReplyId < replyMessageId) {
@@ -523,7 +539,7 @@ library BundleLib {
                     nextExpectedReplyId < nextMessageId
                         && _isMessageValueOfTypeData(channelId, nextExpectedReplyId, _messageQueues)
                 ) {
-                    return (true, 0);
+                    return (OrderingOutcome.StructuralViolation, 0);
                     // CONTROL/REPLY/redacted-DATA slots are skipped silently.
                 }
                 nextExpectedReplyId++;
@@ -547,14 +563,14 @@ library BundleLib {
         uint64 scanId = nextExpectedReplyId;
         while (scanId <= ctx.newAckedMessageId) {
             if (scanId < nextMessageId && _isMessageValueOfTypeData(channelId, scanId, _messageQueues)) {
-                // A live DATA message was acked but no REPLY arrived — violation.
-                return (true, 0);
+                // A live DATA message was acked but no REPLY arrived — awaiting reply, not malformed.
+                return (OrderingOutcome.AwaitingReply, 0);
             }
             // Non-DATA slots (CONTROL/REPLY) are always skipped.
             scanId++;
         }
 
-        return (false, nextExpectedReplyId);
+        return (OrderingOutcome.Ok, nextExpectedReplyId);
     }
 
     // ── Internal: Delete acked non-data messages ──────────────────────────
