@@ -347,12 +347,12 @@ library ClprProtobuf {
                 (result.config.trustAnchor, pos) = PB.decodeLengthDelimited(configMsg, pos);
             } else if (fieldNum == 8) {
                 (result.config.trustAnchorId, pos) = PB.decodeLengthDelimited(configMsg, pos);
+                // FIXME Skip deprecated `seed_endpoints`: peers still send it, and rejecting it blocks the channel.
+                //       Remove 2 lines below after the deprecated seed_endpoints field (6) is removed from LedgerConfiguration.
+            } else if (fieldNum == 6) {
+                pos = PB.skipField(configMsg, pos, wireType);
             } else {
                 // Strict wire format: every unrecognized field number rejects the whole bundle.
-                // This includes the retired field 6 (`seed_endpoints`) — the endpoint set moved out
-                // of LedgerConfiguration into the versioned endpoint manifest, and the peer protos
-                // (clpr-evm-endpoint, clpr-hiero) dropped it too, so a peer still sending it is
-                // speaking a configuration dialect this ledger does not understand.
                 revert ClprTypes.ClprUnknownWireField(fieldNum);
             }
         }

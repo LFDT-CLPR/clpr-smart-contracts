@@ -648,10 +648,9 @@ contract ClprProtobufTest is Test {
         assertEq(keccak256(decoded.config.trustAnchorId), keccak256(cfg.trustAnchorId));
     }
 
-    /// @dev The retired `seed_endpoints` (field 6) is no longer part of LedgerConfiguration — the
-    ///      endpoint set moved into the versioned endpoint manifest and the peer protos dropped the
-    ///      field too. A peer still sending it must be rejected as an unknown wire field.
-    function test_decodeControlMessage_retiredSeedEndpointsField_reverts() public {
+    /// @dev Deprecated `seed_endpoints` (field 6) is skipped, not rejected, because peers still send it.
+    ///      Change it to expect a revert after the deprecated seed_endpoints field (6) is removed from LedgerConfiguration.
+    function test_decodeControlMessage_deprecatedSeedEndpointsField_isSkipped() public view {
         bytes memory throttlesMsg = abi.encodePacked(
             ClprProtobufHelpers.encodeVarintField(1, 10), // maxMessagesPerBundle
             ClprProtobufHelpers.encodeVarintField(2, 1000), // maxMessagePayloadBytes
@@ -664,11 +663,13 @@ contract ClprProtobufTest is Test {
             ClprProtobufHelpers.encodeBytesField(2, bytes("chain")), // chainId
             ClprProtobufHelpers.encodeFieldKey(5, 2),
             ClprProtobufHelpers.encodeLengthDelimited(throttlesMsg), // throttles
-            ClprProtobufHelpers.encodeBytesField(6, hex"AABB") // RETIRED seed_endpoints → must reject
+            ClprProtobufHelpers.encodeBytesField(6, hex"AABB") // DEPRECATED seed_endpoints → skipped
         );
 
-        vm.expectRevert(abi.encodeWithSelector(ClprTypes.ClprUnknownWireField.selector, 6));
-        harness.decodeControlMessage(_wrapConfigAsControlPayload(configMsg));
+        ClprTypes.DecodedControl memory dc = harness.decodeControlMessage(_wrapConfigAsControlPayload(configMsg));
+        assertEq(dc.config.protocolVersion, 1, "protocolVersion decoded past the skipped field");
+        assertEq(dc.config.chainId, "chain", "chainId decoded past the skipped field");
+        assertEq(dc.config.throttles.maxMessagesPerBundle, 10, "throttles decoded past the skipped field");
     }
 
     /// @dev Endpoints now reach `_decodeEndpoint` through the endpoint manifest. An unknown field in
