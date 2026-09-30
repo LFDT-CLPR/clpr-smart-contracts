@@ -103,8 +103,6 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
             bytes32 stateRoot = RLP.readBytes32(header[BLOCK_HEADER_STATE_ROOT_INDEX]);
             _verifySeal(header, validator);
             currentEpoch = uint64(RLP.readUint256(header[BLOCK_HEADER_NUMBER_INDEX])) / epochLength;
-            // forge-lint: disable-next-line(unsafe-typecast)
-            if (currentEpoch != trustAnchorEpoch + uint64(epochHeaderCount)) revert EpochMismatch();
             storageRoot = _verifyServiceStorageRoot(
                 payload[PAYLOAD_ACCOUNT_PROOF_INDEX], stateRoot, clprService, expectedCodeHash
             );
