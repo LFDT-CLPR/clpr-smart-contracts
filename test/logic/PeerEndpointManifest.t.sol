@@ -42,7 +42,9 @@ contract PeerEndpointManifestTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
     }
 
@@ -236,6 +238,8 @@ contract PeerEndpointManifestTest is ClprTestBase {
         ClprTypes.QueueMetadata memory meta = _noOpMetadata();
         meta.nextMessageId = 2; // one new message...
         meta.sentRunningHash = bytes32(uint256(0xBAD)); // ...with a wrong running hash
+        meta.lastMessageId = 1;
+        meta.lastMessageRunningHash = meta.sentRunningHash;
 
         verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewEndpointManifest(_manifest(9, 3));

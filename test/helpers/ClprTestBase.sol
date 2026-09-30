@@ -261,7 +261,9 @@ abstract contract ClprTestBase is Test {
             receivedMessageId: outboundMsgId,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         service.submitBundle(channelId, hex"00");

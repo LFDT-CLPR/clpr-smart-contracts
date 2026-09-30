@@ -197,6 +197,19 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
 
     // ── Hook implementations ─────────────────────────────────────────────────
 
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        pure
+        override
+        returns (bytes memory, bytes memory, bytes memory)
+    {
+        return (
+            _buildBundleProofWithSentHash(nextMessageId, sentRunningHash, bundleContent),
+            _validTrustAnchor(),
+            _validChannelContext()
+        );
+    }
+
     function _runningHashVector() internal pure override returns (RunningHashVector memory) {
         bytes memory payload = ClprProtobuf.encodeDataMessage(hex"01", hex"02", hex"03", hex"04");
         bytes32 expectedSentRunningHash = sha256(abi.encodePacked(bytes32(0), sha256(payload)));
@@ -207,7 +220,9 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
         bytes memory bundleContent = ClprProtobuf.encodeBundleContent(dummyMeta, payloads);
 
         return RunningHashVector({
-            proofBytes: _buildBundleProofWithSentHash(expectedSentRunningHash, bundleContent),
+            proofBytes: _buildBundleProofWithSentHash(
+                ONE_MESSAGE_NEXT_MESSAGE_ID, expectedSentRunningHash, bundleContent
+            ),
             trustAnchor: _validTrustAnchor(),
             channelContext: _validChannelContext(),
             previousRunningHash: bytes32(0)
@@ -317,26 +332,14 @@ contract QbftContractModeComplianceTest is ClprEvmStorageComplianceTest, QbftCon
 
     /// @dev Build a bundle proof where the sentRunningHash slot (Channel slot +4) proves sentHash;
     ///      the remaining channel slots are absent from the trie (value = 0).
-    function _buildBundleProofWithSentHash(bytes32 sentHash, bytes memory bundleContent)
+    function _buildBundleProofWithSentHash(uint64 nextMessageId, bytes32 sentHash, bytes memory bundleContent)
         private
         pure
         returns (bytes memory)
     {
         bytes32 cBase = keccak256(abi.encode(SYNTHETIC_CHANNEL_ID, uint256(15)));
-        (bytes32 storageRoot, bytes memory proofNodes) = _buildSyntheticMPTProof(
-            keccak256(abi.encodePacked(bytes32(uint256(cBase) + 4))), RLP.encode(uint256(sentHash))
-        );
-
-        uint8[5] memory offsets = [1, 2, 4, 5, 16];
-        bytes[] memory storageEntries = new bytes[](5);
-        for (uint256 i = 0; i < 5; i++) {
-            bytes32 slotKey = bytes32(uint256(cBase) + offsets[i]);
-            bytes[] memory entry = new bytes[](2);
-            entry[0] = RLP.encode(abi.encodePacked(slotKey));
-            entry[1] = proofNodes;
-            storageEntries[i] = RLP.encode(entry);
-        }
-
-        return _cmTop(storageRoot, RLP.encode(storageEntries), RLP.encode(bundleContent));
+        (bytes32 storageRoot, bytes memory storageEntries) =
+            _buildChannelStorageEntriesWithSentHash(cBase, nextMessageId, sentHash);
+        return _cmTop(storageRoot, storageEntries, RLP.encode(bundleContent));
     }
 }

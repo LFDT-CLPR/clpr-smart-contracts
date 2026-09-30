@@ -202,8 +202,10 @@ abstract contract QbftVerifierBase is ClprEvmBundleVerifier {
         bytes32 storageRoot = _verifyServiceStorageRoot(
             payload[PAYLOAD_ACCOUNT_PROOF_INDEX], stateRoot, _toAddress(ctx.remoteServiceAddress), codeHash
         );
-        metadata = _verifyChannelStorage(payload[PAYLOAD_STORAGE_PROOF_INDEX], storageRoot, ctx.channelId);
         messagePayloads = _decodeBundleContent(RLP.readBytes(payload[PAYLOAD_BUNDLE_CONTENT_INDEX]));
+        metadata = _verifyChannelStorage(
+            payload[PAYLOAD_STORAGE_PROOF_INDEX], storageRoot, ctx.channelId, messagePayloads.length
+        );
         if (payload.length == PAYLOAD_SHAPE_WITH_MANIFEST) {
             newEndpointManifest = _verifyEndpointManifest(
                 payload[PAYLOAD_MANIFEST_STORAGE_PROOF_INDEX],

@@ -125,6 +125,56 @@ abstract contract QbftSyntheticProofs is Test {
         proofRlp = MptWire.wrapOne(leafNode);
     }
 
+    /// @dev Storage entries for the five Channel slots at `cBase` + [1, 2, 4, 5, 16], proven against a
+    ///      branch-rooted trie holding `nextMessageId` (slot +1, other fields zero) and `sentHash`
+    ///      (slot +4); the other three slots prove zero. Reverts if the two key hashes share a first
+    ///      nibble, which would need an extension node.
+    function _buildChannelStorageEntriesWithSentHash(bytes32 cBase, uint64 nextMessageId, bytes32 sentHash)
+        internal
+        pure
+        returns (bytes32 storageRoot, bytes memory storageEntriesRlp)
+    {
+        bytes32 nextKey = keccak256(abi.encodePacked(bytes32(uint256(cBase) + 1)));
+        bytes32 sentKey = keccak256(abi.encodePacked(bytes32(uint256(cBase) + 4)));
+        uint8 nextNib = uint8(nextKey[0]) >> 4;
+        uint8 sentNib = uint8(sentKey[0]) >> 4;
+        require(nextNib != sentNib, "two-leaf trie: shared first nibble");
+
+        bytes[16] memory leaves;
+        leaves[nextNib] = MptWire.leafAfterBranch(nextKey, RLP.encode(RLP.encode(uint256(nextMessageId) << 168)));
+        leaves[sentNib] = MptWire.leafAfterBranch(sentKey, RLP.encode(RLP.encode(uint256(sentHash))));
+        bytes32[16] memory children;
+        children[nextNib] = keccak256(leaves[nextNib]);
+        children[sentNib] = keccak256(leaves[sentNib]);
+        bytes memory root = MptWire.branch(children);
+        storageRoot = keccak256(root);
+
+        uint8[5] memory offsets = [1, 2, 4, 5, 16];
+        bytes[] memory entries = new bytes[](5);
+        for (uint256 i = 0; i < 5; i++) {
+            entries[i] = _twoLeafStorageEntry(bytes32(uint256(cBase) + offsets[i]), root, leaves);
+        }
+        storageEntriesRlp = RLP.encode(entries);
+    }
+
+    /// @dev One `[slotKey, proofNodes]` entry against the trie built by
+    ///      {_buildChannelStorageEntriesWithSentHash}: the root branch, plus the leaf under the key's
+    ///      first nibble when one exists. Split out to stay within the stack under `--ir-minimum`.
+    function _twoLeafStorageEntry(bytes32 slotKey, bytes memory root, bytes[16] memory leaves)
+        private
+        pure
+        returns (bytes memory)
+    {
+        bytes memory leaf = leaves[uint8(keccak256(abi.encodePacked(slotKey))[0]) >> 4];
+        bytes[] memory nodes = new bytes[](leaf.length == 0 ? 1 : 2);
+        nodes[0] = root;
+        if (leaf.length != 0) nodes[1] = leaf;
+        bytes[] memory entry = new bytes[](2);
+        entry[0] = RLP.encode(abi.encodePacked(slotKey));
+        entry[1] = MptWire.wrap(nodes);
+        return RLP.encode(entry);
+    }
+
     function _buildAccountRlp(bytes32 storageRoot, bytes32 codeHash) internal pure returns (bytes memory) {
         bytes[] memory fields = new bytes[](4);
         fields[0] = RLP.encode(uint256(0)); // nonce

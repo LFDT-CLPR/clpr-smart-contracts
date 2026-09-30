@@ -187,8 +187,9 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @dev Build one storage trie holding the peer channel's real state, then emit a per-slot proof
-    ///      for each slot the verifier derives. Two slots are non-zero (`+1` packs
-    ///      `nextMessageId`/status, `+4` holds `sentRunningHash`); the rest are proven *absent*,
+    ///      for each slot the verifier derives. `+1` (packing `nextMessageId`/status) is non-zero, and
+    ///      so are `+4` and the last message's running-hash slot when the bundle carries messages
+    ///      (both holding `sentRunningHash`); the rest are proven *absent*,
     ///      which the verifier reads as zero — the shape a freshly-acked channel genuinely has.
     function _buildStorageProof(BundleSpec memory s, bytes32 sentRunningHash, uint64 nextMessageId)
         private
@@ -208,7 +209,7 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         slots[2] = bytes32(uint256(cBase) + 4); // sentRunningHash                 (non-zero iff N>0)
         slots[3] = bytes32(uint256(cBase) + 5); // receivedRunningHash             (zero)
         slots[4] = bytes32(uint256(cBase) + 16); // endpointManifestVersion        (zero)
-        slots[5] = _lastMessageRunningHashSlot(s.channelId, nextMessageId - 1); // proven, value unused
+        slots[5] = _lastMessageRunningHashSlot(s.channelId, nextMessageId - 1); // last message's running hash
         slots[6] = bytes32(MANIFEST_COMMITMENT_SLOT); // manifest commitment       (non-zero iff manifest)
 
         manifestPreimage = _manifestPreimage(s);
@@ -228,6 +229,8 @@ abstract contract EthBundleProofFactory is EthCommitteeFixtures {
         values[1] = RLP.encode(uint256(s.ackedByPeer) << 64);
         present[2] = s.messageCount > 0;
         values[2] = RLP.encode(uint256(sentRunningHash));
+        present[5] = s.messageCount > 0;
+        values[5] = RLP.encode(uint256(sentRunningHash));
         present[6] = s.manifest;
         values[6] = RLP.encode(uint256(keccak256(manifestPreimage)));
 

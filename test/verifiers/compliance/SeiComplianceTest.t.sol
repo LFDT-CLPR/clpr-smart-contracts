@@ -293,6 +293,23 @@ contract SeiComplianceTest is ClprEvmStorageComplianceTest, SeiSyntheticProofs {
         });
     }
 
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        view
+        override
+        returns (bytes memory, bytes memory, bytes memory)
+    {
+        bytes32[5] memory values = _successValues();
+        values[0] = bytes32((uint256(1) << 160) | (uint256(nextMessageId) << 168));
+        values[1] = bytes32(0);
+        values[2] = sentRunningHash;
+        return (
+            _bundle(CHANNEL_ID, SERVICE_ADDR20, values, bundleContent),
+            _trustAnchor(),
+            _ctxFor(CHANNEL_ID, SERVICE_ADDR20)
+        );
+    }
+
     function _runningHashVector() internal view override returns (RunningHashVector memory) {
         bytes memory payload = hex"aabbcc";
         bytes32[5] memory values = _successValues();

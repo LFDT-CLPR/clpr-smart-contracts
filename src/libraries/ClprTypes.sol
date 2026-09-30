@@ -190,6 +190,9 @@ library ClprTypes {
         uint32 maxQueueDepth;
     }
 
+    /// @dev The sender's proven channel state at the proof's block. A bundle may carry only a prefix
+    ///      of the sender's queue, so `nextMessageId`/`sentRunningHash` can run ahead of the bundle's
+    ///      messages; `lastMessageId`/`lastMessageRunningHash` pin the bundle's own last message.
     struct QueueMetadata {
         uint64 nextMessageId;
         bytes32 sentRunningHash;
@@ -200,6 +203,10 @@ library ClprTypes {
         ///      receiver detect whether the remote endpoint manifest has advanced since the last sync
         ///      without a full state query. Zero indicates the (source) Channel is PENDING.
         uint64 endpointManifestVersion;
+        /// @dev Id of the bundle's last message; 0 when the bundle carries no messages.
+        uint64 lastMessageId;
+        /// @dev The sender's running hash after `lastMessageId`; zero when the bundle carries no messages.
+        bytes32 lastMessageRunningHash;
     }
 
     /// @param maxLocalEndpoints Max endpoints registrable locally on this ledger (via
@@ -418,6 +425,8 @@ library ClprTypes {
     error ClprRunningHashMismatch();
     /// @notice The bundle's acknowledged range has already been processed (replay).
     error ClprReplayDetected();
+    /// @notice The bundle's first message is at or before the sender's proven ackedMessageId.
+    error ClprBundleStartsAtOrBeforeAcked();
     /// @notice A ConfigUpdate control message declared a protocol_version this ledger
     ///         does not recognize.
     error ClprProtocolVersionMismatch();

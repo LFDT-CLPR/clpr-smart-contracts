@@ -19,20 +19,20 @@ log_benchmarks:
       # leaf's channel_id (proto field 1) is now decoded and bound, and a MerklePath's content
       # oneof is enforced; both the decode and the two Merkle walks in the breakdown test carry
       # that cost, and the shared-memory growth ripples into the later gasleft() deltas.
-      "Protobuf decode": 177655
-      "Merkle path 1": 1407397
-      "Merkle path 2": 1194929
+      "Protobuf decode": 177547
+      "Merkle path 1": 1407829
+      "Merkle path 2": 1195361
       "hinTS BLS12-381": 902672
       "WRAPS Groth16+KZG": 2456774
-      "TOTAL": 6139427
+      "TOTAL": 6140183
 
   - name: Ethereum mainnet verifier (BLS / SSZ hot paths)
     match_path: test/verifiers/evm/ethereum/GasUsage.t.sol
     metrics:
       "hashToG2": 113934
-      "BLS aggregateVerifyComplement 342 (170 nonP)": 1348432
+      "BLS aggregateVerifyComplement 342 (170 nonP)": 1344779
       "BLS aggregateVerifyComplement 512 (0 nonP)": 218662
-      "SSZ syncCommitteeRootFromUncompressed 512": 1187812
+      "SSZ syncCommitteeRootFromUncompressed 512": 1136563
 
 # End-to-end function gas from `forge test --gas-report`, keyed by contract +
 # function + column (contract-aware: ClprService.submitBundle is distinct from
@@ -57,25 +57,25 @@ gas_report_benchmarks:
     contract: HieroVerifier
     function: verifyBundle
     column: min
-    baseline: 6110101
+    baseline: 6115321
   - name: QbftHeaderModeVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: min
-    baseline: 122915
+    baseline: 123232
   - name: QbftHeaderModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: median
-    baseline: 364757
+    baseline: 365095
   - name: QbftHeaderModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: max
-    baseline: 1232862
+    baseline: 1233252
   - name: QbftHeaderModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
@@ -88,19 +88,19 @@ gas_report_benchmarks:
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: min
-    baseline: 217931
+    baseline: 218259
   - name: QbftContractModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: median
-    baseline: 689645
+    baseline: 690010
   - name: QbftContractModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: max
-    baseline: 3201507
+    baseline: 3202023
   - name: QbftContractModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier

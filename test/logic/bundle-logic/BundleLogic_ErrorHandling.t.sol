@@ -65,7 +65,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: bytes32(uint256(0xDEAD))
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -83,7 +85,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 5, // acking unsent
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -276,7 +280,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, msgs);
         // Trust anchor advancement keeps the bundle non-empty (NoProgress guard)
@@ -290,7 +296,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         verifier.setNewTrustAnchor(hex"02");
@@ -303,7 +311,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta3, msgs);
 
@@ -327,7 +337,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, msgs);
         verifier.setNewTrustAnchor(hex"01");
@@ -339,7 +351,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         verifier.setNewTrustAnchor(hex"02");
@@ -352,7 +366,9 @@ contract BundleLogic_ErrorHandling is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta3, msgs);
 

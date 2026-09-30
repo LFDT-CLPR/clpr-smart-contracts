@@ -35,7 +35,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: bytes32(uint256(0xDEAD))
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -55,7 +57,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
             receivedMessageId: 5, // acking unsent
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -96,7 +100,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 101,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, tooMany);
 
@@ -119,7 +125,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -143,7 +151,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -172,7 +182,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         // _newTrustAnchor defaults to "" in mock, receivedMessageId == ackedMessageId == 0
@@ -209,7 +221,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash1
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"A1");
@@ -226,7 +240,9 @@ contract BundleLib_ValidationTest is BundleLibTestBase {
                 receivedMessageId: 0, // backward: < channel.ackedMessageId=1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash1
             });
             verifier.setVerifyBundleResult(meta, msgs);
             vm.expectRevert(ClprTypes.ClprAckVerificationFailed.selector);

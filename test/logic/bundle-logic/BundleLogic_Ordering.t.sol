@@ -48,7 +48,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // acking our outbound message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -80,7 +82,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // acking our outbound message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         _submitBundle(hex"00FF");
@@ -112,7 +116,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, emptyMsgs);
         _submitBundle(hex"00FF");
@@ -133,7 +139,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // same ack level
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         _submitBundle(hex"00FF02");
@@ -163,7 +171,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // ack message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -193,7 +203,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // ack message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -222,7 +234,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // acking our DATA #1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, emptyMsgs);
             _submitBundle(hex"00FF");
@@ -246,7 +260,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // no further ack progress; message 2 still unacked
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.CLOSING, // peer is closing
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF02");
@@ -278,7 +294,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 2, // acking both our messages
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, emptyMsgs);
             _submitBundle(hex"00FF");
@@ -311,7 +329,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, empty);
             _submitBundle(hex"B101");
@@ -345,7 +365,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 3,
+                lastMessageRunningHash: hash124
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"B102");
@@ -371,7 +393,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 3,
+                lastMessageRunningHash: hash124
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"B103");
@@ -400,7 +424,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 4,
+                lastMessageRunningHash: hash1234
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"B104");
@@ -431,7 +457,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, empty);
             _submitBundle(hex"C101");
@@ -455,7 +483,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
 
@@ -497,7 +527,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 2,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -532,7 +564,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // acking our DATA #1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSING, // peer is also closing
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         _submitBundle(hex"00FF");
@@ -574,7 +608,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         _submitBundle(hex"00FF");
@@ -609,7 +645,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -638,7 +676,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 0, // peer hasn't acked our DATA yet
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00A1");
@@ -659,7 +699,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // peer acks our DATA at slot 1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00A2");
@@ -688,7 +730,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 0,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00B1");
@@ -713,7 +757,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 2, // peer acks our slots 1 (REPLY) and 2 (DATA)
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00B2");
@@ -744,7 +790,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // peer acked our DATA #1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF");
@@ -768,7 +816,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // peer still acked only message 1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF02");
@@ -794,7 +844,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"EE");
@@ -818,7 +870,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"DD");
@@ -958,7 +1012,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: outboundMsgId,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         submitter.submitBundle(IClprService(address(service)), channelId, hex"00");
@@ -985,7 +1041,10 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: outboundIds[n - 1],
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            lastMessageId: uint64(n),
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         service.submitBundle(channelId, hex"00");
@@ -1023,7 +1082,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash1
             }),
             msgs1
         );
@@ -1050,7 +1111,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // ack level unchanged
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             }),
             msgs2
         );
@@ -1087,7 +1150,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash1
             }),
             msgs1
         );
@@ -1116,7 +1181,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 3,
+                lastMessageRunningHash: hash2
             }),
             msgs2
         );

@@ -247,7 +247,7 @@ With `cBase = keccak256(abi.encode(channelId, 15))` (`_channels` base slot, `sto
 | 2 | `cBase + 4` | `sentRunningHash` | `sentRunningHash` |
 | 3 | `cBase + 5` | `receivedRunningHash` | `receivedRunningHash` |
 | 4 | `cBase + 16` | `endpointManifestVersion` | `endpointManifestVersion = uint64(slot)` |
-| 5 (with outbound messages) | `_messageQueues[channelId][nextMessageId − 1]` + 1 | `runningHashAfterProcessing` | proven, not surfaced in metadata; `nextMessageId == 0` reverts `InvalidNextMessageId` |
+| 5 (with outbound messages) | `_messageQueues[channelId][lastMessageId]`| `runningHashAfterProcessing` | `lastMessageRunningHash`; `lastMessageId` is the id in `[ackedMessageId + messageCount, nextMessageId - 1]` whose slot matches. Absent: the bundle ends at `nextMessageId - 1` / `sentRunningHash` |
 
 A count other than 5 or 6 reverts `InvalidStorageProofShape`.
 

@@ -277,12 +277,13 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes32 storageRoot =
             _verifyServiceStorageRoot(payload[IDX_ACCOUNT_PROOF], executionStateRoot, clprService, anchor.codeHash);
 
-        // Step 6 — MPT storage proof of the queue-metadata slots, bound to channelId (the proven
-        // values are tied to this channel's Channel struct, never taken positionally).
-        metadata = _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, anchor.channelId);
-
         // Bundle content → message payloads.
         messagePayloads = _decodeBundleContent(RLP.readBytes(payload[IDX_BUNDLE_CONTENT]));
+
+        // Step 6 — MPT storage proof of the queue-metadata slots, bound to channelId (the proven
+        // values are tied to this channel's Channel struct, never taken positionally).
+        metadata =
+            _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, anchor.channelId, messagePayloads.length);
 
         // Optional endpoint-manifest update (12-field shape): prove the manifest-commitment slot against
         // the same execution storage root and bind the supplied preimage; absent (version 0) otherwise.

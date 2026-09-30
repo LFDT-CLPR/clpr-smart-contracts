@@ -42,7 +42,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -79,7 +81,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -118,7 +122,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -146,7 +152,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -194,7 +202,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -264,7 +274,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -316,7 +328,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -363,7 +377,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -395,7 +411,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -423,7 +441,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -455,7 +475,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -495,7 +517,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 3,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -556,7 +580,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -671,7 +697,9 @@ contract BundleProcessor_ReplyDecodeFailTest is ClprTestBase {
             receivedMessageId: 4,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 

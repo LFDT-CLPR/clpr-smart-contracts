@@ -153,6 +153,19 @@ contract QBFTComplianceTest is ClprEvmStorageComplianceTest, QbftContractProofs 
 
     // ── Hook implementations ─────────────────────────────────────────────────
 
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        view
+        override
+        returns (bytes memory, bytes memory, bytes memory)
+    {
+        return (
+            _buildBundleProofWithSentHash(nextMessageId, sentRunningHash, bundleContent),
+            _validTrustAnchor(),
+            _validChannelContext()
+        );
+    }
+
     function _runningHashVector() internal view override returns (RunningHashVector memory) {
         bytes memory payload = ClprProtobuf.encodeDataMessage(hex"01", hex"02", hex"03", hex"04");
         bytes32 expectedSentRunningHash = sha256(abi.encodePacked(bytes32(0), sha256(payload)));
@@ -163,7 +176,9 @@ contract QBFTComplianceTest is ClprEvmStorageComplianceTest, QbftContractProofs 
         bytes memory bundleContent = ClprProtobuf.encodeBundleContent(dummyMeta, payloads);
 
         return RunningHashVector({
-            proofBytes: _buildBundleProofWithSentHash(expectedSentRunningHash, bundleContent),
+            proofBytes: _buildBundleProofWithSentHash(
+                ONE_MESSAGE_NEXT_MESSAGE_ID, expectedSentRunningHash, bundleContent
+            ),
             trustAnchor: _validTrustAnchor(),
             channelContext: _validChannelContext(),
             previousRunningHash: bytes32(0)
@@ -255,24 +270,14 @@ contract QBFTComplianceTest is ClprEvmStorageComplianceTest, QbftContractProofs 
 
     /// @dev Build a bundle proof where Channel slot +4 (`sentRunningHash`) proves `sentHash`; the
     ///      other four channel slots diverge in the one-leaf trie and prove zero.
-    function _buildBundleProofWithSentHash(bytes32 sentHash, bytes memory bundleContent)
+    function _buildBundleProofWithSentHash(uint64 nextMessageId, bytes32 sentHash, bytes memory bundleContent)
         private
         view
         returns (bytes memory)
     {
         bytes32 cBase = keccak256(abi.encode(SYNTHETIC_CHANNEL_ID, uint256(15)));
-        (bytes32 storageRoot, bytes memory proofNodes) = _buildSyntheticMPTProof(
-            keccak256(abi.encodePacked(bytes32(uint256(cBase) + 4))), RLP.encode(uint256(sentHash))
-        );
-
-        uint8[5] memory offsets = [1, 2, 4, 5, 16];
-        bytes[] memory storageEntries = new bytes[](5);
-        for (uint256 i = 0; i < 5; i++) {
-            bytes[] memory entry = new bytes[](2);
-            entry[0] = RLP.encode(abi.encodePacked(bytes32(uint256(cBase) + offsets[i])));
-            entry[1] = proofNodes;
-            storageEntries[i] = RLP.encode(entry);
-        }
+        (bytes32 storageRoot, bytes memory storageEntries) =
+            _buildChannelStorageEntriesWithSentHash(cBase, nextMessageId, sentHash);
 
         (bytes32 stateRoot, bytes memory accountProofRlp) =
             _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
@@ -281,7 +286,7 @@ contract QBFTComplianceTest is ClprEvmStorageComplianceTest, QbftContractProofs 
         top[0] = _buildSealedCurrentHeader(1, stateRoot, VALIDATOR_PK);
         top[1] = _sourceField();
         top[2] = accountProofRlp;
-        top[3] = RLP.encode(storageEntries);
+        top[3] = storageEntries;
         top[4] = RLP.encode(bundleContent);
         return RLP.encode(top);
     }

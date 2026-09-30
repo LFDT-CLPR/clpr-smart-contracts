@@ -15,6 +15,7 @@ import {ClprMerkleProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprMerk
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {Sha384} from "@hiero-ledger/clpr/libraries/crypto/Sha384.sol";
 
 /// @dev Integration test for HieroVerifier.verifyBundle using real state-proof data
 ///      captured from a localnet block. Fixtures live in test/verifiers/hiero/fixtures/.
@@ -132,9 +133,16 @@ contract HieroVerifierTest is Test {
         ClprStateProof.StateProofDecoded memory sp = ClprStateProof.decode(proof);
         bytes memory blockRoot = ClprMerkleProof.computeChainedRoot(sp.paths, 0);
 
-        (ClprTypes.Channel memory channel, bytes[] memory payloads, bytes memory manifestWire) =
-            ClprStateProof.extractDecodedQueueData(sp.paths, blockRoot);
+        (
+            ClprTypes.Channel memory channel,
+            bytes[] memory payloads,
+            bytes memory manifestWire,
+            uint64 lastMessageId,
+            bytes32 lastMessageRunningHash
+        ) = ClprStateProof.extractDecodedQueueData(sp.paths, blockRoot);
         assertEq(manifestWire.length, 0, "fixture carries no manifest leaf");
+        assertEq(lastMessageId, 1, "last message id read from the message leaf key");
+        assertEq(lastMessageRunningHash, EXPECTED_SENT_RUNNING_HASH, "bundle ends at the sender's latest message");
 
         // Channel
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "status must be ACTIVE");
@@ -162,7 +170,9 @@ contract HieroVerifierTest is Test {
 
         // Structural checks
         assertEq(uint8(meta.state), uint8(ClprTypes.ChannelStatus.ACTIVE), "state must be ACTIVE");
-        assertEq(meta.nextMessageId, 2, "nextMessageId = ackedMessageId(0) + 1 + payloads.length(1)");
+        assertEq(meta.nextMessageId, 2, "nextMessageId is the sender's channel.nextMessageId");
+        assertEq(meta.lastMessageId, 1, "lastMessageId from the message leaf key");
+        assertEq(meta.lastMessageRunningHash, EXPECTED_SENT_RUNNING_HASH, "lastMessageRunningHash mismatch");
         assertEq(meta.receivedMessageId, 1, "receivedMessageId == 1");
         assertEq(meta.sentRunningHash, EXPECTED_SENT_RUNNING_HASH, "sentRunningHash mismatch");
         assertEq(meta.receivedRunningHash, EXPECTED_RECV_RUNNING_HASH, "receivedRunningHash mismatch");
@@ -423,6 +433,66 @@ contract HieroVerifierTest is Test {
 
         vm.expectRevert(HieroVerifier.ClprHieroNoStateItemLeaf.selector);
         hieroVerifier.verifyBundle(stateProof, LEDGER_ID, "");
+    }
+
+    /// @dev The fixture's message leaf is message 1: with ackedMessageId 1 the bundle starts at acked.
+    function test_verifyBundle_startsAtAcked_reverts() public {
+        _mockTssValid();
+        vm.expectRevert(ClprTypes.ClprBundleStartsAtOrBeforeAcked.selector);
+        hieroVerifier.verifyBundle(_proofWithChannelAcked(1), LEDGER_ID, _ctx());
+    }
+
+    function test_verifyBundle_startsAfterAcked_succeeds() public {
+        _mockTssValid();
+        (ClprTypes.QueueMetadata memory meta, bytes[] memory payloads,,,) =
+            hieroVerifier.verifyBundle(_proofWithChannelAcked(0), LEDGER_ID, _ctx());
+        assertEq(payloads.length, 1);
+        assertEq(meta.lastMessageId, 1);
+    }
+
+    function _mockTssValid() internal {
+        vm.mockCall(address(tssVerifier), abi.encodeWithSelector(TSSVerifier.verifyTss.selector), abi.encode(true, ""));
+    }
+
+    /// @dev A two-leaf StateProof: a synthetic ACTIVE ClprChannel (EXPECTED_CHANNEL_ID, nextMessageId 2,
+    ///      the given ackedMessageId) and the fixture's message-1 leaf, each carrying the other's leaf
+    ///      hash as its sibling so both paths converge on one root.
+    function _proofWithChannelAcked(uint64 ackedMessageId) internal view returns (bytes memory) {
+        bytes memory channel = abi.encodePacked(
+            PB.encodeBytesField(1, abi.encodePacked(EXPECTED_CHANNEL_ID)),
+            PB.encodeVarintField(7, uint64(ClprTypes.ChannelStatus.ACTIVE)),
+            PB.encodeVarintField(8, 2),
+            PB.encodeVarintField(9, ackedMessageId)
+        );
+        // SV_CHANNEL_TAG is the full wire tag (field << 3 | wire type 2); >> 3 is the field number.
+        bytes memory channelLeaf = PB.encodeBytesField(
+            ClprStateProof.STATE_ITEM_VALUE_FIELD, PB.encodeBytesField(ClprStateProof.SV_CHANNEL_TAG >> 3, channel)
+        );
+        bytes memory messageLeaf = ClprStateProof.decode(_loadProof()).paths[1].stateItemLeaf;
+
+        bytes memory channelHash = Sha384.hash(abi.encodePacked(bytes1(0x00), channelLeaf));
+        bytes memory messageHash = Sha384.hash(abi.encodePacked(bytes1(0x00), messageLeaf));
+        return abi.encodePacked(
+            PB.encodeBytesField(ClprStateProof.SP_PATHS, _leafPath(channelLeaf, messageHash, false)),
+            PB.encodeBytesField(ClprStateProof.SP_PATHS, _leafPath(messageLeaf, channelHash, true)),
+            PB.encodeBytesField(
+                ClprStateProof.SP_SIGNED_BLOCK_PROOF, PB.encodeBytesField(ClprStateProof.SBP_BLOCK_SIGNATURE, hex"01")
+            )
+        );
+    }
+
+    function _leafPath(bytes memory leaf, bytes memory siblingHash, bool siblingIsLeft)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bytes memory sibling = PB.encodeBytesField(ClprStateProof.SIB_HASH, siblingHash);
+        if (siblingIsLeft) sibling = abi.encodePacked(PB.encodeVarintField(ClprStateProof.SIB_IS_LEFT, 1), sibling);
+        return abi.encodePacked(
+            PB.encodeBytesField(ClprStateProof.MP_SIBLINGS, sibling),
+            PB.encodeVarintField(ClprStateProof.MP_NEXT_PATH_INDEX, uint64(type(uint32).max)),
+            PB.encodeBytesField(ClprStateProof.MP_STATE_ITEM_LEAF, leaf)
+        );
     }
 }
 

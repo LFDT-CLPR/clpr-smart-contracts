@@ -38,7 +38,9 @@ contract StubClprVerifierTest is Test {
             receivedMessageId: 3,
             receivedRunningHash: bytes32(uint256(0xCAFEBABE)),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 6,
+            lastMessageRunningHash: bytes32(uint256(0xDEADBEEF))
         });
 
         bytes[] memory payloads = new bytes[](2);
@@ -77,7 +79,9 @@ contract StubClprVerifierTest is Test {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSING,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(uint256(1))
         });
 
         bytes[] memory payloads = new bytes[](0);
@@ -102,7 +106,9 @@ contract StubClprVerifierTest is Test {
             receivedMessageId: 15,
             receivedRunningHash: bytes32(keccak256("rcvdHash")),
             state: ClprTypes.ChannelStatus.PAUSED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 19,
+            lastMessageRunningHash: bytes32(keccak256("sentHash"))
         });
 
         bytes[] memory payloads = new bytes[](3);
@@ -133,7 +139,9 @@ contract StubClprVerifierTest is Test {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         bytes[] memory payloads = new bytes[](0);
         bytes memory bundleContent = ClprProtobuf.encodeBundleContent(meta, payloads);

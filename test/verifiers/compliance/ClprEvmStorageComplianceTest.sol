@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ClprVerifierComplianceTest} from "@test/verifiers/compliance/ClprVerifierComplianceTest.sol";
+import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {ClprEvmBundleVerifier} from "@hiero-ledger/clpr/verifiers/evm/common/ClprEvmBundleVerifier.sol";
 
@@ -19,6 +20,10 @@ abstract contract ClprEvmStorageComplianceTest is ClprVerifierComplianceTest {
 
     /// @dev Spec: channel metadata lives under `keccak256(abi.encode(channelId, 15))`.
     uint256 internal constant CHANNELS_BASE_SLOT = 15;
+
+    /// @dev Proven `nextMessageId` for a one-payload bundle with nothing acked: the payload is
+    ///      message 1, so the sender's next id is 2.
+    uint64 internal constant ONE_MESSAGE_NEXT_MESSAGE_ID = 2;
 
     /// @dev A bundle whose storage proof is bound to one channel but whose channelContext
     ///      claims a DIFFERENT channel, plus the exact revert this verifier must produce. The
@@ -109,6 +114,43 @@ abstract contract ClprEvmStorageComplianceTest is ClprVerifierComplianceTest {
         BundleVector memory v = _validBundle();
         // Does not revert ↔ the verifier accepted a proof keyed by the canonical formula.
         verifier.verifyBundle(v.proofBytes, v.trustAnchor, v.channelContext);
+    }
+
+    /// @dev Return a five-slot bundle proof whose Channel proves `nextMessageId`, `sentRunningHash`
+    ///      and ackedMessageId 0, carrying `bundleContent`.
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        virtual
+        returns (bytes memory proofBytes, bytes memory trustAnchor, bytes memory channelContext);
+
+    /// @dev One payload with nothing acked must be message 1; a proven nextMessageId of 1 places it
+    ///      at message 0, at the sender's ackedMessageId.
+    function test_compliance_verifyBundle_fiveSlotStartsAtAcked_reverts() public {
+        (bytes memory content, bytes32 sentHash) = _oneMessageBundleContent();
+        (bytes memory proofBytes, bytes memory trustAnchor, bytes memory channelContext) =
+            _fiveSlotBundleVector(ONE_MESSAGE_NEXT_MESSAGE_ID - 1, sentHash, content);
+        vm.expectRevert(ClprTypes.ClprBundleStartsAtOrBeforeAcked.selector);
+        verifier.verifyBundle(proofBytes, trustAnchor, channelContext);
+    }
+
+    function test_compliance_verifyBundle_fiveSlotStartsAfterAcked_succeeds() public {
+        (bytes memory content, bytes32 sentHash) = _oneMessageBundleContent();
+        (bytes memory proofBytes, bytes memory trustAnchor, bytes memory channelContext) =
+            _fiveSlotBundleVector(ONE_MESSAGE_NEXT_MESSAGE_ID, sentHash, content);
+        (ClprTypes.QueueMetadata memory meta, bytes[] memory payloads,,,) =
+            verifier.verifyBundle(proofBytes, trustAnchor, channelContext);
+        assertEq(payloads.length, 1);
+        assertEq(meta.lastMessageId, ONE_MESSAGE_NEXT_MESSAGE_ID - 1);
+        assertEq(meta.lastMessageRunningHash, sentHash);
+    }
+
+    /// @dev A ClprBundleContent with one DATA payload, and the running hash over it from zero.
+    function _oneMessageBundleContent() internal pure returns (bytes memory content, bytes32 sentHash) {
+        bytes[] memory payloads = new bytes[](1);
+        payloads[0] = ClprProtobuf.encodeDataMessage(hex"01", hex"02", hex"03", hex"04");
+        ClprTypes.QueueMetadata memory emptyMeta;
+        content = ClprProtobuf.encodeBundleContent(emptyMeta, payloads);
+        sentHash = sha256(abi.encodePacked(bytes32(0), sha256(payloads[0])));
     }
 
     // ── Manifest: exact rejection reasons ─────────────────────────────────────

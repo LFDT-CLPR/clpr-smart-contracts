@@ -20,7 +20,9 @@ contract BundleLib_ProgressTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE, // same state
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewTrustAnchor(hex"ABCD1234"); // only progress is trust anchor
@@ -42,7 +44,9 @@ contract BundleLib_ProgressTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE, // same state
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         // No trust anchor advancement (verifier returns empty bytes by default)
@@ -63,7 +67,9 @@ contract BundleLib_ProgressTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         verifier.setNewTrustAnchor(newAnchor);
@@ -91,7 +97,9 @@ contract BundleLib_ProgressTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewTrustAnchor(newAnchor);

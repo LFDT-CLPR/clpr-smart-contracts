@@ -13,6 +13,7 @@ import {deriveCommittee, firstNParticipants, type BlsCommittee} from "../../rela
 import {provisionE2ESuite} from "../../lib/provisionSuite.js";
 import {wireConfig, registerEndpoint} from "../../deploy/wire.js";
 import {wireChannel} from "../../deploy/wireChannel.js";
+import {wireConnector} from "../../deploy/wireConnector.js";
 
 /// End-to-end test for EthMainnetVerifier.verifyBundle — real on-chain BLS12-381 sync-committee
 /// verification via EIP-2537 precompiles (G1MSM aggregation + hash-to-G2 + pairing), plus everything
@@ -98,6 +99,24 @@ export async function provisionEthVerifierStack(suiteName: string): Promise<EthV
         addrsA: pair.addrsA,
         addrsB: pair.addrsB
     });
+
+    // The verifier rejects a message-bearing bundle unless the proven channel has an unacked
+    // message (ackedMessageId + messageCount < nextMessageId), so enqueue one on chain A.
+    const connector = await wireConnector({
+        chainA: A,
+        chainB: B,
+        addrsA: pair.addrsA,
+        addrsB: pair.addrsB,
+        channelId: conn.channelId,
+        skipChainB: true
+    });
+    const sendTx = await A.walletClient.writeContract({
+        address: pair.addrsA.clprService,
+        abi: loadArtifact("ClprService").abi as never,
+        functionName: "sendMessage",
+        args: [conn.channelId, connector.connectorId, pair.addrsB.application, "0xdeadbeefcafe"]
+    });
+    await A.publicClient.waitForTransactionReceipt({hash: sendTx});
 
     const code = await A.publicClient.getCode({address: pair.addrsA.clprService});
     if (!code || code === "0x") throw new Error("ClprService has no code on chain A");

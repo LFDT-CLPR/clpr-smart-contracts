@@ -167,6 +167,8 @@ contract SeiCometBftVerifier is ClprEvmBundleVerifier {
         BundlePayload memory payload = _parseBundlePayload(proofMem);
         bytes memory nextValidatorSetBytes = payload.nextValidatorSet;
 
+        messagePayloads = _decodeBundleContent(payload.bundleContent);
+
         // ── Verify state proof ────────────────────────────────────────────────
         // Every proven slot must match the channel's real metadata layout — the relay cannot
         // substitute an unrelated (or another channel's) slot at any position.
@@ -175,7 +177,7 @@ contract SeiCometBftVerifier is ClprEvmBundleVerifier {
             bytes32[] memory slotValues,
             ClprTypes.QueueMetadata memory parsedMetadata,
             bytes32 storeRoot
-        ) = _verifyChannelStateProof(payload.stateProof, validators, serviceAddr, ctx.channelId);
+        ) = _verifyChannelStateProof(payload.stateProof, validators, serviceAddr, ctx.channelId, messagePayloads.length);
 
         // ── Optional endpoint-manifest update ─────────────────────────────────
         // An IAVL proof of the peer service's manifest-commitment slot against the same storeRoot,
@@ -208,9 +210,6 @@ contract SeiCometBftVerifier is ClprEvmBundleVerifier {
             revert StorageProofFailed();
         }
         metadata = parsedMetadata;
-
-        // ── Bundle content ────────────────────────────────────────────────────
-        messagePayloads = _decodeBundleContent(payload.bundleContent);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -472,18 +471,16 @@ contract SeiCometBftVerifier is ClprEvmBundleVerifier {
         }
     }
 
-    /// @dev Wraps {_verifyStateProof} for the `verifyBundle` path: binds every proven slot to
-    ///      `channelId`'s real metadata layout — indices 0..3 must match
-    ///      `_channelMetadataSlots(channelId)`, and any slot beyond index 3 must match the
-    ///      derived last-message running-hash slot — so a relay cannot substitute an unrelated or
-    ///      foreign-channel slot at any position, then decodes indices 0..3 into `metadata`.
-    ///      Kept separate from the channel-agnostic primitive so callers with no channel
-    ///      semantics (`verifyConfig`) never carry this logic.
+    /// @dev Wraps {_verifyStateProof} for the `verifyBundle` path, binding every proven slot to
+    ///      `channelId`'s metadata layout via {_bindChannelSlots}. Kept separate from the
+    ///      channel-agnostic primitive so callers with no channel semantics (`verifyConfig`) never
+    ///      carry this logic.
     function _verifyChannelStateProof(
         bytes memory stateProofBytes,
         CometBftLib.SeiValidator[] memory trustedValidators,
         bytes20 serviceAddr,
-        bytes32 channelId
+        bytes32 channelId,
+        uint256 messageCount
     )
         internal
         view
@@ -497,45 +494,61 @@ contract SeiCometBftVerifier is ClprEvmBundleVerifier {
         bytes32[] memory slotNumbers;
         (header, slotValues, slotNumbers, storeRoot) =
             _verifyStateProof(stateProofBytes, trustedValidators, serviceAddr);
-        metadata = _bindChannelSlots(slotNumbers, slotValues, channelId);
+        metadata = _bindChannelSlots(slotNumbers, slotValues, channelId, messageCount);
     }
 
-    /// @dev The slot-binding half of {_verifyChannelStateProof}: every proven slot number must
-    ///      match the channel's real metadata layout, then the values decode into `metadata`
-    ///      (the message running-hash slot is derived from the proven nextMessageId - 1; the
-    ///      bundle-scoped ackedMessageId + payloadCount form was reverted on main by #379).
-    function _bindChannelSlots(bytes32[] memory slotNumbers, bytes32[] memory slotValues, bytes32 channelId)
-        private
-        pure
-        returns (ClprTypes.QueueMetadata memory metadata)
-    {
+    /// @dev The slot-binding half of {_verifyChannelStateProof}: the leading proven slot numbers
+    ///      must match the channel's real metadata layout, then the values decode into `metadata`.
+    ///      A message-bearing bundle may carry one more slot, the running-hash slot of its last
+    ///      message, from which `lastMessageId` and `lastMessageRunningHash` are derived. Without it
+    ///      the bundle is taken to end at the sender's latest message (`nextMessageId - 1`,
+    ///      `sentRunningHash`), which BundleLib's running-hash check then enforces, and reverts with
+    ///      `ClprTypes.ClprBundleStartsAtOrBeforeAcked` if that start would not lie past the proven
+    ///      ackedMessageId. Extra slots on a message-less bundle are ignored.
+    function _bindChannelSlots(
+        bytes32[] memory slotNumbers,
+        bytes32[] memory slotValues,
+        bytes32 channelId,
+        uint256 messageCount
+    ) private pure returns (ClprTypes.QueueMetadata memory metadata) {
         bytes32[] memory channelSlots = _channelMetadataSlots(channelId);
         uint256 slotCount = slotNumbers.length;
 
-        // Indices 0..3 (or however many entries are present, if fewer — the caller rejects a
+        // Indices 0..4 (or however many entries are present, if fewer — the caller rejects a
         // too-short proof separately) must match this channel's real Channel-struct slots.
         for (uint256 i = 0; i < slotCount && i < channelSlots.length; i++) {
             if (slotNumbers[i] != channelSlots[i]) revert StorageKeyMismatch();
         }
-
-        // Once all four Channel slots are present, decode `metadata` so it's ready both as the
-        // return value and to derive the optional 5th-and-beyond entry's expected slot below.
         if (slotCount >= channelSlots.length) {
             metadata = _buildQueueMetadata(slotValues);
         }
-        // A 5th-and-beyond entry claims to prove the *last sent* message's running hash, which only
-        // exists once nextMessageId > 0 (per the CLPR spec, a channel's nextMessageId starts at 1
-        // and only increments — 0 means no message was ever sent, so no last-message slot exists to
-        // derive). Guard explicitly instead of letting `nextMessageId - 1` underflow into an opaque
-        // panic: the proof is invalid either way, but this keeps the revert reason consistent with
-        // every other proof-shape check in this function.
-        // TODO(clpr-spec#50): switch to bundle-scoped bundleLastMessageId = ackedMessageId + payloadCount
-        //                     once spec PR #50 is merged.
-        if (slotCount > channelSlots.length && metadata.nextMessageId == 0) revert StorageKeyMismatch();
-        for (uint256 i = channelSlots.length; i < slotCount; i++) {
-            bytes32 expectedSlot = _lastMessageRunningHashSlot(channelId, uint64(metadata.nextMessageId - 1));
-            if (slotNumbers[i] != expectedSlot) revert StorageKeyMismatch();
+        if (messageCount == 0) return metadata;
+
+        uint256 msgIdx = channelSlots.length;
+        if (slotCount == msgIdx) {
+            // The bundle ends at nextMessageId - 1, so it starts at nextMessageId - messageCount,
+            // which must lie past the sender's proven ackedMessageId: this ledger has already
+            // acknowledged every message at or below it. Also keeps `nextMessageId - 1` from underflowing.
+            // casting to 'uint64' is safe: ackedMessageId is the low 64 bits of Channel slot +2.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            if (uint256(uint64(uint256(slotValues[1]))) + messageCount >= metadata.nextMessageId) {
+                revert ClprTypes.ClprBundleStartsAtOrBeforeAcked();
+            }
+            metadata.lastMessageId = metadata.nextMessageId - 1;
+            metadata.lastMessageRunningHash = metadata.sentRunningHash;
+            return metadata;
         }
+        if (slotCount != msgIdx + 1) revert StorageProofFailed();
+        metadata.lastMessageId = _findLastMessageId(
+            channelId,
+            slotNumbers[msgIdx],
+            // casting to 'uint64' is safe: ackedMessageId is the low 64 bits of Channel slot +2.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint64(uint256(slotValues[1])),
+            metadata.nextMessageId,
+            messageCount
+        );
+        metadata.lastMessageRunningHash = slotValues[msgIdx];
     }
 
     // ─────────────────────────────────────────────────────────────────────────

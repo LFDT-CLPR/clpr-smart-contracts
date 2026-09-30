@@ -40,7 +40,9 @@ contract BundleLib_ControlMessagesTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         bytes[] memory msgs = new bytes[](0);
         verifier.setVerifyBundleResult(meta, msgs);
@@ -82,7 +84,9 @@ contract BundleLib_ControlMessagesTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -121,7 +125,9 @@ contract BundleLib_ControlMessagesTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash2
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -152,7 +158,9 @@ contract BundleLib_ControlMessagesTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash2
         });
         verifier.setVerifyBundleResult(meta, msgs);
 

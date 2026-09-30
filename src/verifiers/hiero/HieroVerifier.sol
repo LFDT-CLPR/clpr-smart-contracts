@@ -65,6 +65,10 @@ contract HieroVerifier is IClprVerifier {
     }
 
     /// @inheritdoc IClprVerifier
+    /// @dev Reverts with `ClprTypes.ClprBundleStartsAtOrBeforeAcked` if the proven payloads start at or
+    ///      before the proven channel's ackedMessageId. The state proof authenticates the `ClprChannel`
+    ///      leaf's `service_address` directly; `channelContext` is decoded only to bind a carried
+    ///      endpoint manifest to the remote service address.
     function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
         external
         view
@@ -97,8 +101,19 @@ contract HieroVerifier is IClprVerifier {
         // Step 4: walk every leaf path, authenticate it against `blockRootHash`, decode the
         // proven `ClprChannel` and `ClprMessageValue` leaves. Reverts inside the lib if
         // any path fails to converge or the channel leaf is absent.
-        (ClprTypes.Channel memory channel, bytes[] memory payloads, bytes memory manifestWire) =
-            ClprStateProof.extractDecodedQueueData(sp.paths, blockRootHash);
+        (
+            ClprTypes.Channel memory channel,
+            bytes[] memory payloads,
+            bytes memory manifestWire,
+            uint64 lastMessageId,
+            bytes32 lastMessageRunningHash
+        ) = ClprStateProof.extractDecodedQueueData(sp.paths, blockRootHash);
+        // The payloads are contiguous and end at lastMessageId, so the first is
+        // lastMessageId - payloads.length + 1, which must lie past the sender's proven
+        // ackedMessageId: this ledger has already acknowledged every message at or below it.
+        if (payloads.length > 0 && uint256(channel.ackedMessageId) + payloads.length > lastMessageId) {
+            revert ClprTypes.ClprBundleStartsAtOrBeforeAcked();
+        }
 
         // Step 4b: bind the proven Channel to the local channel identity.
         if (channelContext.length < 32) revert ClprHieroChannelMismatch();
@@ -112,14 +127,15 @@ contract HieroVerifier is IClprVerifier {
         // is derived (acked + 1 + bundle size) so the receiver can sanity-check the bundle's
         // monotone-id invariant against the proven Channel state.
         metadata = ClprTypes.QueueMetadata({
-            nextMessageId: channel.ackedMessageId + 1 + uint64(payloads.length),
+            nextMessageId: channel.nextMessageId,
             sentRunningHash: channel.sentRunningHash,
             receivedMessageId: channel.receivedMessageId,
             receivedRunningHash: channel.receivedRunningHash,
             state: channel.status,
-            // Source's manifest version, surfaced from the proven Channel leaf so the receiver can
-            // detect staleness. Zero when the proven Channel carries no manifest version.
-            endpointManifestVersion: channel.endpointManifestVersion
+            // Zero when the proven Channel carries no manifest version.
+            endpointManifestVersion: channel.endpointManifestVersion,
+            lastMessageId: lastMessageId,
+            lastMessageRunningHash: lastMessageRunningHash
         });
         messagePayloads = payloads;
         newTrustAnchorId = "";

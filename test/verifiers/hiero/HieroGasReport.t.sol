@@ -30,7 +30,7 @@ contract HieroParts {
         returns (uint256 nMsgs, uint256 leafPaths)
     {
         ClprStateProof.StateProofDecoded memory sp = ClprStateProof.decode(proof);
-        (, bytes[] memory payloads,) = ClprStateProof.extractDecodedQueueData(sp.paths, root);
+        (, bytes[] memory payloads,,,) = ClprStateProof.extractDecodedQueueData(sp.paths, root);
         for (uint256 i = 0; i < sp.paths.length; i++) {
             if (sp.paths[i].stateItemLeaf.length != 0) leafPaths++;
         }

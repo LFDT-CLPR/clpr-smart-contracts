@@ -48,6 +48,7 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
         MIN_COMMITTED_SEALS = _sealSignatures;
     }
 
+    /// @inheritdoc IClprVerifier
     function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
         external
         view
@@ -108,8 +109,9 @@ contract QBFTVerifier is ClprEvmBundleVerifier {
                 payload[PAYLOAD_ACCOUNT_PROOF_INDEX], stateRoot, clprService, expectedCodeHash
             );
         }
-        metadata = _verifyChannelStorage(payload[PAYLOAD_STORAGE_PROOF_INDEX], storageRoot, channelId);
         messagePayloads = _decodeBundleContent(RLP.readBytes(payload[PAYLOAD_BUNDLE_CONTENT_INDEX]));
+        metadata =
+            _verifyChannelStorage(payload[PAYLOAD_STORAGE_PROOF_INDEX], storageRoot, channelId, messagePayloads.length);
         if (payload.length == PAYLOAD_SHAPE_WITH_MANIFEST) {
             newEndpointManifest = _verifyEndpointManifest(
                 payload[PAYLOAD_MANIFEST_STORAGE_PROOF_INDEX],

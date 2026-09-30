@@ -132,6 +132,19 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         return (RLP.encode(cfg), SYNTHETIC_CHANNEL_ID);
     }
 
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        view
+        override
+        returns (bytes memory, bytes memory, bytes memory)
+    {
+        return (
+            _buildBundleWithSentHash(nextMessageId, sentRunningHash, bundleContent),
+            _buildTrustAnchor(SYNTHETIC_CHANNEL_ID),
+            _validChannelContext()
+        );
+    }
+
     function _runningHashVector() internal view override returns (RunningHashVector memory) {
         bytes memory payload = ClprProtobuf.encodeDataMessage(hex"01", hex"02", hex"03", hex"04");
         bytes32 expectedSentRunningHash = sha256(abi.encodePacked(bytes32(0), sha256(payload)));
@@ -141,7 +154,7 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         bytes memory bundleContent = ClprProtobuf.encodeBundleContent(dummyMeta, payloads);
 
         return RunningHashVector({
-            proofBytes: _buildBundleWithSentHash(expectedSentRunningHash, bundleContent),
+            proofBytes: _buildBundleWithSentHash(ONE_MESSAGE_NEXT_MESSAGE_ID, expectedSentRunningHash, bundleContent),
             trustAnchor: _buildTrustAnchor(SYNTHETIC_CHANNEL_ID),
             channelContext: _validChannelContext(),
             previousRunningHash: bytes32(0)
@@ -291,28 +304,17 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
     }
 
     /// @dev Bundle where storage slot+4 (sentRunningHash) is proven to `sentHash`.
-    function _buildBundleWithSentHash(bytes32 sentHash, bytes memory bundleContent)
+    function _buildBundleWithSentHash(uint64 nextMessageId, bytes32 sentHash, bytes memory bundleContent)
         private
         view
         returns (bytes memory)
     {
         bytes32 cBase = keccak256(abi.encode(SYNTHETIC_CHANNEL_ID, uint256(15)));
-        bytes32 sentHashSlot = bytes32(uint256(cBase) + 4);
-        (bytes32 storageRoot, bytes memory proofNodes) =
-            _buildSyntheticMPTProof(keccak256(abi.encodePacked(sentHashSlot)), RLP.encode(uint256(sentHash)));
-
-        uint8[5] memory offsets = [1, 2, 4, 5, 16];
-        bytes[] memory entries = new bytes[](5);
-        for (uint256 i = 0; i < 5; i++) {
-            bytes32 slotKey = bytes32(uint256(cBase) + offsets[i]);
-            bytes[] memory entry = new bytes[](2);
-            entry[0] = RLP.encode(abi.encodePacked(slotKey));
-            entry[1] = proofNodes;
-            entries[i] = RLP.encode(entry);
-        }
+        (bytes32 storageRoot, bytes memory entries) =
+            _buildChannelStorageEntriesWithSentHash(cBase, nextMessageId, sentHash);
         (bytes32 executionStateRoot, bytes memory accountProofRlp) =
             _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
-        return _buildBundleProof(executionStateRoot, accountProofRlp, RLP.encode(entries), RLP.encode(bundleContent));
+        return _buildBundleProof(executionStateRoot, accountProofRlp, entries, RLP.encode(bundleContent));
     }
 
     /// @dev Bundle with `n` storage entries — triggers InvalidStorageProofShape for n < 5.

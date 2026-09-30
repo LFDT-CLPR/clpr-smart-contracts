@@ -20,7 +20,9 @@ contract StubBundleContentVerifierTest is Test {
             receivedMessageId: 4,
             receivedRunningHash: bytes32(uint256(0xBADF00D)),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 10,
+            lastMessageRunningHash: bytes32(uint256(0xC0FFEE))
         });
         bytes[] memory msgs = new bytes[](2);
         msgs[0] = ClprProtobuf.encodeDataMessage(hex"01", hex"02", hex"03", hex"04");

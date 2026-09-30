@@ -58,7 +58,9 @@ contract ClprManifestServiceComplianceTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
     }
 
@@ -77,6 +79,8 @@ contract ClprManifestServiceComplianceTest is ClprTestBase {
         ClprTypes.QueueMetadata memory meta = _noOpMetadata();
         meta.nextMessageId = 2;
         meta.sentRunningHash = sha256(abi.encodePacked(bytes32(0), sha256(payload)));
+        meta.lastMessageId = 1;
+        meta.lastMessageRunningHash = meta.sentRunningHash;
         verifier.setVerifyBundleResult(meta, msgs);
         service.submitBundle(channelId, hex"00FF");
     }
@@ -271,6 +275,8 @@ contract ClprManifestServiceComplianceTest is ClprTestBase {
         ClprTypes.QueueMetadata memory meta = _noOpMetadata();
         meta.nextMessageId = 2;
         meta.sentRunningHash = bytes32(uint256(0xBAD));
+        meta.lastMessageId = 1;
+        meta.lastMessageRunningHash = meta.sentRunningHash;
         verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewEndpointManifest(_manifest(9, 3));
         verifier.setNewTrustAnchor(hex"BEEF");

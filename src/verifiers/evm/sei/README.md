@@ -254,7 +254,7 @@ cBase = keccak256(abi.encode(channelId, 15))
 | 2 | `cBase + 4` | `sentRunningHash` | `sentRunningHash` |
 | 3 | `cBase + 5` | `receivedRunningHash` | `receivedRunningHash` |
 | 4 | `cBase + 16` | `endpointManifestVersion` | `endpointManifestVersion` |
-| 5 (with outbound messages) | `_messageQueues[channelId][nextMessageId − 1]` + 1 | `runningHashAfterProcessing` | verified; not surfaced |
+| 5 (with outbound messages) | `_messageQueues[channelId][lastMessageId]`| `runningHashAfterProcessing` of the bundle's last message | `lastMessageId`, `lastMessageRunningHash` |
 
 A bundle proves 5 entries (ACK-only) or 6 (message-bearing); any other count reverts `StorageProofFailed`.
 
@@ -267,6 +267,7 @@ A bundle proves 5 entries (ACK-only) or 6 (message-bearing); any other count rev
 
 ### Endpoint manifest
 
+A bundle proves the channel entries, plus optionally the last-message entry when it carries messages. Without it, a message-bearing bundle is taken to end at the sender's latest message (`nextMessageId - 1`, `sentRunningHash`).
 The manifest proof targets the fixed, channel-independent slot **18** (`EndpointManifestState.commitment`). `_verifySeiEndpointManifest` matches its IAVL key in full — prefix, service address, *and* the exact slot number (`StorageKeyMismatch`) — and requires an existence proof (`OnlyExistenceProofsSupported`) against the bundle's `storeRoot`. The supplied preimage must `keccak256` to the proven commitment (`ManifestCommitmentMismatch`), decode with `version >= 1` (`ManifestVersionZero`), and carry the expected service address (`ManifestServiceAddressMismatch`). With both fields absent, the verifier returns a version-0 manifest, which `BundleLib` treats as "no update".
 
 ### Validator-set rotation

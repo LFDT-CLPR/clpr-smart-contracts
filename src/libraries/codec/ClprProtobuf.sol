@@ -493,7 +493,9 @@ library ClprProtobuf {
         }
     }
 
-    /// @notice Decode a BundleContent proto encoded by {encodeBundleContent}.
+    /// @notice Decode a BundleContent proto encoded by {encodeBundleContent}. BundleContent has no
+    ///         last-message fields, so a message-bearing bundle is taken to end at the sender's latest
+    ///         message: `lastMessageId = nextMessageId - 1`, `lastMessageRunningHash = sentRunningHash`.
     function decodeBundleContent(bytes calldata data)
         internal
         pure
@@ -570,6 +572,10 @@ library ClprProtobuf {
             } else {
                 (messagePayloads[idx++], pos) = PB.decodeLengthDelimited(data, pos);
             }
+        }
+        if (messagePayloads.length > 0 && meta.nextMessageId > 0) {
+            meta.lastMessageId = meta.nextMessageId - 1;
+            meta.lastMessageRunningHash = meta.sentRunningHash;
         }
     }
 

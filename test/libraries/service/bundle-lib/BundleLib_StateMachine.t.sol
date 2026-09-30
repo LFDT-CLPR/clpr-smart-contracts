@@ -57,7 +57,14 @@ contract BundleLibHarness {
         meta.nextMessageId = metaNextMessageId;
         meta.receivedMessageId = metaReceivedMessageId;
 
-        BundleLib._checkBundleProgress(channel, meta, newTrustAnchor, false);
+        // Models a bundle that carries every message the peer has sent past connReceivedMessageId.
+        uint256 messageCount;
+        if (metaNextMessageId > uint256(connReceivedMessageId) + 1) {
+            meta.lastMessageId = metaNextMessageId - 1;
+            messageCount = metaNextMessageId - 1 - connReceivedMessageId;
+        }
+
+        BundleLib._checkBundleProgress(channel, meta, messageCount, newTrustAnchor, false);
     }
 }
 
@@ -339,7 +346,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0, // NOT acking our outbound message
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSING, // peer is closing
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         // Trust anchor advancement keeps the bundle non-empty (NoProgress guard)
@@ -365,7 +374,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED, // peer jumped straight to CLOSED without sending CLOSING first
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -392,7 +403,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta1, emptyMsgs);
             _submitBundle(hex"00FF");
@@ -413,7 +426,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.CLOSED,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: runningHash
             });
             verifier.setVerifyBundleResult(meta2, msgs);
             _submitBundle(hex"00FF02");
@@ -441,7 +456,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         // Trust anchor advancement keeps the bundle non-empty (NoProgress guard)
@@ -469,7 +486,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, msgs);
         // Trust anchor advancement should not be required to advance
@@ -485,7 +504,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         // Trust anchor advancement should not be required to advance
@@ -513,7 +534,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED, // All drained on both ends.
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         // Trust anchor advancement should not be required to advance
@@ -542,7 +565,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE, // peer is still ACTIVE
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -565,7 +590,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, msgs);
         // Trust anchor advancement keeps the bundle non-empty (NoProgress guard)
@@ -579,7 +606,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         verifier.setNewTrustAnchor(hex"02");
@@ -592,7 +621,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta3, msgs);
 
@@ -621,7 +652,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
                 receivedMessageId: 1, // acking our DATA #1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, emptyMsgs);
             _submitBundle(hex"00FF");
@@ -645,7 +678,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
                 receivedMessageId: 1, // no further ack progress; message 2 still unacked
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.CLOSING, // peer is closing
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF02");
@@ -673,7 +708,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, msgs);
         verifier.setNewTrustAnchor(hex"01");
@@ -685,7 +722,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         verifier.setNewTrustAnchor(hex"02");
@@ -698,7 +737,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta3, msgs);
 
@@ -745,7 +786,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewTrustAnchor(hex"01");
@@ -769,7 +812,9 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSING,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"CC");

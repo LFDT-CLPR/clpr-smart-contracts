@@ -33,7 +33,11 @@ library ClprStateProof {
     uint64 internal constant SBP_BLOCK_SIGNATURE = 1;
 
     // Field 2 of StateItem = StateKey; field 3 = StateValue
+    uint64 internal constant STATE_ITEM_KEY_FIELD = 2;
     uint64 internal constant STATE_ITEM_VALUE_FIELD = 3;
+    // StateKey.ClprService_I_MESSAGE_QUEUE = ClprMessageKey { channel_id = 1; message_id = 2; }
+    uint64 internal constant SK_MESSAGE_QUEUE_FIELD = 62;
+    uint64 internal constant MESSAGE_KEY_MESSAGE_ID_FIELD = 2;
 
     // Tags identifying which state-item the leaf carries. Derived from the
     // Hiero generated proto for `StateValue`
@@ -47,6 +51,8 @@ library ClprStateProof {
     error StateProofMissingChannel();
     /// @notice A `MerklePath` populated more than one `content`.
     error StateProofPathAmbiguousContent();
+    /// @notice The last `ClprMessageValue` state-item leaf's key carries no `ClprMessageKey.message_id`.
+    error StateProofMissingMessageKey();
 
     struct StateProofDecoded {
         // TSS Signature
@@ -208,8 +214,8 @@ library ClprStateProof {
     /// @notice Walks every `state_item_leaf` path in `paths`, authenticates each
     ///         chain against the trusted `blockRootHash`, and decodes the proven
     ///         leaves into a `ClprChannel` (exactly one is required) and an
-    ///         in-order list of `ClprMessageValue` payloads plus their
-    ///         `runningHashAfterProcessing`.
+    ///         in-order list of `ClprMessageValue` payloads plus the last
+    ///         message's id and `runningHashAfterProcessing`.
     ///
     /// @dev    Proto-shaped paths layout (`block/stream/state_proof.proto`):
     ///         ```
@@ -232,7 +238,7 @@ library ClprStateProof {
     ///           - `SV_CHANNEL_TAG` (482): exactly one is expected; the
     ///             wire bytes are decoded via `decodeChannelFromMemory`.
     ///           - `SV_MESSAGE_TAG` (498): zero or more; each contributes one
-    ///             payload + one running-hash entry, in path order.
+    ///             payload, in path order.
     ///           - `SV_ENDPOINT_MANIFEST_TAG` (514): at most one; carries the
     ///             source ledger's `ClprEndpointManifest` singleton for an
     ///             in-bundle manifest update (Step 1b). Its raw wire bytes are
@@ -242,13 +248,21 @@ library ClprStateProof {
     /// @return messagePayloads       Proven message payloads in path order.
     /// @return manifestWire          Raw proven `ClprEndpointManifest` bytes; empty
     ///                               when the proof carries no manifest leaf.
+    /// @return lastMessageId         `message_id` from the last message leaf's key; 0 with no messages.
+    /// @return lastMessageRunningHash `running_hash_after_processing` of the last message leaf; zero with no messages.
     function extractDecodedQueueData(MerklePath[] memory paths, bytes memory blockRootHash)
         internal
         pure
-        returns (ClprTypes.Channel memory channel, bytes[] memory messagePayloads, bytes memory manifestWire)
+        returns (
+            ClprTypes.Channel memory channel,
+            bytes[] memory messagePayloads,
+            bytes memory manifestWire,
+            uint64 lastMessageId,
+            bytes32 lastMessageRunningHash
+        )
     {
         // Upper-bound at `paths.length` (every leaf path contributes at most one
-        // entry) and truncate after the loop. Avoids the prior O(k²) regrow.
+        // entry) and truncate after the loop.
         bytes[] memory rawPayloads = new bytes[](paths.length);
         uint256 messageN;
         bytes memory channelWire;
@@ -287,6 +301,7 @@ library ClprStateProof {
                 rawPayloads[messageN] = mv.payload;
                 messageN++;
                 lastMessageIndex = i;
+                lastMessageRunningHash = mv.runningHashAfterProcessing;
             } else if (tag == SV_ENDPOINT_MANIFEST_TAG) {
                 // At most one manifest leaf; the last one wins (same permissive
                 // posture as the Channel leaf). Authenticate its chain unless
@@ -312,6 +327,9 @@ library ClprStateProof {
         if (lastMessageIndex != type(uint256).max && lastMessageIndex != firstStateItemLeaf) {
             bytes memory lastMessageRoot = ClprMerkleProof.computeChainedRoot(paths, lastMessageIndex);
             if (keccak256(lastMessageRoot) != expectedRoot) revert StateProofPathInvalid();
+        }
+        if (lastMessageIndex != type(uint256).max) {
+            lastMessageId = _messageIdFromStateItem(paths[lastMessageIndex].stateItemLeaf);
         }
 
         messagePayloads = new bytes[](messageN);
@@ -358,22 +376,43 @@ library ClprStateProof {
     /// @param stateItemLeaf Encoded `StateItem` protobuf bytes.
     /// @return value Raw `StateValue` bytes, or empty if not present.
     function extractStateItemValue(bytes memory stateItemLeaf) internal pure returns (bytes memory value) {
+        return _lengthDelimitedField(stateItemLeaf, STATE_ITEM_VALUE_FIELD);
+    }
+
+    /// @dev `ClprMessageKey.message_id` of a message-queue state-item leaf; reverts when absent.
+    function _messageIdFromStateItem(bytes memory stateItemLeaf) private pure returns (uint64) {
+        bytes memory messageKey =
+            _lengthDelimitedField(_lengthDelimitedField(stateItemLeaf, STATE_ITEM_KEY_FIELD), SK_MESSAGE_QUEUE_FIELD);
         uint256 pos;
-        while (pos < stateItemLeaf.length) {
+        while (pos < messageKey.length) {
             uint64 fieldNum;
             uint8 wireType;
-            (fieldNum, wireType, pos) = PB.decodeFieldKey(stateItemLeaf, pos);
+            (fieldNum, wireType, pos) = PB.decodeFieldKey(messageKey, pos);
+            if (fieldNum == MESSAGE_KEY_MESSAGE_ID_FIELD && wireType == 0) {
+                (uint64 messageId,) = PB.decodeVarint(messageKey, pos);
+                return messageId;
+            }
+            pos = PB.skipField(messageKey, pos, wireType);
+        }
+        revert StateProofMissingMessageKey();
+    }
 
+    /// @dev First length-delimited field `fieldNumber` of `data`; empty when absent.
+    function _lengthDelimitedField(bytes memory data, uint64 fieldNumber) private pure returns (bytes memory) {
+        uint256 pos;
+        while (pos < data.length) {
+            uint64 fieldNum;
+            uint8 wireType;
+            (fieldNum, wireType, pos) = PB.decodeFieldKey(data, pos);
             if (wireType == 2) {
                 bytes memory val;
-                (val, pos) = PB.decodeLengthDelimited(stateItemLeaf, pos);
-                if (fieldNum == STATE_ITEM_VALUE_FIELD) {
-                    return val;
-                }
+                (val, pos) = PB.decodeLengthDelimited(data, pos);
+                if (fieldNum == fieldNumber) return val;
             } else {
-                pos = PB.skipField(stateItemLeaf, pos, wireType);
+                pos = PB.skipField(data, pos, wireType);
             }
         }
+        return "";
     }
 
     /// @notice Read the first varint from `data` — used to get the `StateValue` oneof tag.

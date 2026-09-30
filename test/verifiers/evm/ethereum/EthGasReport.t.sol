@@ -151,12 +151,12 @@ contract InstrumentedEthMainnetVerifier is EthMainnetVerifier {
         t = _mark(g, S_ACCOUNT_PROOF, t);
 
         // ── Step 6: MPT storage proof of the queue-metadata slots ────────────
-        ClprTypes.QueueMetadata memory metadata =
-            _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, sel.channelId);
-        t = _mark(g, S_STORAGE_PROOF, t);
-
         bytes[] memory messagePayloads = _decodeBundleContent(RLP.readBytes(payload[IDX_BUNDLE_CONTENT]));
         t = _mark(g, S_BUNDLE_CONTENT, t);
+
+        ClprTypes.QueueMetadata memory metadata =
+            _verifyChannelStorage(payload[IDX_STORAGE_PROOF], storageRoot, sel.channelId, messagePayloads.length);
+        t = _mark(g, S_STORAGE_PROOF, t);
 
         ClprTypes.ClprEndpointManifest memory manifest;
         if (payload.length == PAYLOAD_FIELDS_WITH_MANIFEST) {

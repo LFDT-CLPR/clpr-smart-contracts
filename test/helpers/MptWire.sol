@@ -37,4 +37,29 @@ library MptWire {
         items[1] = valueItem;
         return RLP.encode(items);
     }
+
+    /// @dev A leaf node hanging directly off a root branch: covers the 63 nibbles of `keyHash`
+    ///      after the first, which the branch consumed (compact prefix 0x3 = leaf, odd).
+    function leafAfterBranch(bytes32 keyHash, bytes memory valueItem) internal pure returns (bytes memory) {
+        bytes memory path = new bytes(32);
+        path[0] = bytes1(0x30 | (uint8(keyHash[0]) & 0x0f));
+        for (uint256 i = 1; i < 32; i++) {
+            path[i] = keyHash[i];
+        }
+        bytes[] memory items = new bytes[](2);
+        items[0] = RLP.encode(path);
+        items[1] = valueItem;
+        return RLP.encode(items);
+    }
+
+    /// @dev A 17-item branch node whose child at nibble `i` is `children[i]` by hash, or empty
+    ///      when `children[i]` is zero; the terminal value is empty.
+    function branch(bytes32[16] memory children) internal pure returns (bytes memory) {
+        bytes[] memory items = new bytes[](17);
+        for (uint256 i = 0; i < 16; i++) {
+            items[i] = children[i] == bytes32(0) ? RLP.encode(new bytes(0)) : RLP.encode(children[i]);
+        }
+        items[16] = RLP.encode(new bytes(0));
+        return RLP.encode(items);
+    }
 }

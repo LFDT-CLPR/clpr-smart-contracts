@@ -73,7 +73,9 @@ contract BundleLogic_HappyPath is BundleLogicTestBase {
             receivedMessageId: 1, // must ack message 1 to match the reply
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -104,7 +106,9 @@ contract BundleLogic_HappyPath is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -125,7 +129,9 @@ contract BundleLogic_HappyPath is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
         // _newTrustAnchor defaults to "" in mock, receivedMessageId == ackedMessageId == 0

@@ -158,7 +158,7 @@
       "label": "_endpointManifest",
       "offset": 0,
       "slot": "17",
-      "type": "t_struct(EndpointManifestState)2134_storage"
+      "type": "t_struct(EndpointManifestState)2141_storage"
     },
     {
       "astId": 1413,
@@ -166,7 +166,7 @@
       "label": "_peerEndpointManifests",
       "offset": 0,
       "slot": "22",
-      "type": "t_mapping(t_bytes32,t_struct(ClprEndpointManifest)2070_storage)"
+      "type": "t_mapping(t_bytes32,t_struct(ClprEndpointManifest)2077_storage)"
     },
     {
       "astId": 1416,
@@ -174,7 +174,7 @@
       "label": "_config",
       "offset": 0,
       "slot": "23",
-      "type": "t_struct(LedgerConfiguration)2165_storage"
+      "type": "t_struct(LedgerConfiguration)2172_storage"
     },
     {
       "astId": 1419,
@@ -182,7 +182,7 @@
       "label": "economicConfig",
       "offset": 0,
       "slot": "31",
-      "type": "t_struct(EconomicConfig)2191_storage"
+      "type": "t_struct(EconomicConfig)2198_storage"
     },
     {
       "astId": 8,
@@ -211,11 +211,11 @@
       "numberOfBytes": "32",
       "base": "t_bytes32"
     },
-    "t_array(t_struct(Endpoint)2060_storage)dyn_storage": {
+    "t_array(t_struct(Endpoint)2067_storage)dyn_storage": {
       "encoding": "dynamic_array",
       "label": "struct ClprTypes.Endpoint[]",
       "numberOfBytes": "32",
-      "base": "t_struct(Endpoint)2060_storage"
+      "base": "t_struct(Endpoint)2067_storage"
     },
     "t_bool": {
       "encoding": "inplace",
@@ -242,12 +242,12 @@
       "label": "enum ClprTypes.EndpointStatus",
       "numberOfBytes": "1"
     },
-    "t_mapping(t_address,t_struct(EndpointManifestEntry)2109_storage)": {
+    "t_mapping(t_address,t_struct(EndpointManifestEntry)2116_storage)": {
       "encoding": "mapping",
       "key": "t_address",
       "label": "mapping(address => struct ClprTypes.EndpointManifestEntry)",
       "numberOfBytes": "32",
-      "value": "t_struct(EndpointManifestEntry)2109_storage"
+      "value": "t_struct(EndpointManifestEntry)2116_storage"
     },
     "t_mapping(t_address,t_uint256)": {
       "encoding": "mapping",
@@ -298,12 +298,12 @@
       "numberOfBytes": "32",
       "value": "t_struct(Channel)1994_storage"
     },
-    "t_mapping(t_bytes32,t_struct(ClprEndpointManifest)2070_storage)": {
+    "t_mapping(t_bytes32,t_struct(ClprEndpointManifest)2077_storage)": {
       "encoding": "mapping",
       "key": "t_bytes32",
       "label": "mapping(bytes32 => struct ClprTypes.ClprEndpointManifest)",
       "numberOfBytes": "32",
-      "value": "t_struct(ClprEndpointManifest)2070_storage"
+      "value": "t_struct(ClprEndpointManifest)2077_storage"
     },
     "t_mapping(t_bytes32,t_struct(Connector)2006_storage)": {
       "encoding": "mapping",
@@ -469,7 +469,7 @@
           "label": "peerThrottles",
           "offset": 0,
           "slot": "10",
-          "type": "t_struct(Throttles)2050_storage"
+          "type": "t_struct(Throttles)2057_storage"
         },
         {
           "astId": 1981,
@@ -513,13 +513,13 @@
         }
       ]
     },
-    "t_struct(ClprEndpointManifest)2070_storage": {
+    "t_struct(ClprEndpointManifest)2077_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.ClprEndpointManifest",
       "numberOfBytes": "96",
       "members": [
         {
-          "astId": 2063,
+          "astId": 2070,
           "contract": "src/ClprService.sol:ClprService",
           "label": "version",
           "offset": 0,
@@ -527,7 +527,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 2065,
+          "astId": 2072,
           "contract": "src/ClprService.sol:ClprService",
           "label": "serviceAddress",
           "offset": 0,
@@ -535,12 +535,12 @@
           "type": "t_bytes_storage"
         },
         {
-          "astId": 2069,
+          "astId": 2076,
           "contract": "src/ClprService.sol:ClprService",
           "label": "endpoints",
           "offset": 0,
           "slot": "2",
-          "type": "t_array(t_struct(Endpoint)2060_storage)dyn_storage"
+          "type": "t_array(t_struct(Endpoint)2067_storage)dyn_storage"
         }
       ]
     },
@@ -591,13 +591,13 @@
         }
       ]
     },
-    "t_struct(EconomicConfig)2191_storage": {
+    "t_struct(EconomicConfig)2198_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.EconomicConfig",
       "numberOfBytes": "224",
       "members": [
         {
-          "astId": 2167,
+          "astId": 2174,
           "contract": "src/ClprService.sol:ClprService",
           "label": "messageExecutionCost",
           "offset": 0,
@@ -605,7 +605,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2169,
+          "astId": 2176,
           "contract": "src/ClprService.sol:ClprService",
           "label": "endpointMarginPercent",
           "offset": 0,
@@ -613,7 +613,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2171,
+          "astId": 2178,
           "contract": "src/ClprService.sol:ClprService",
           "label": "minLockedStake",
           "offset": 0,
@@ -621,7 +621,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2173,
+          "astId": 2180,
           "contract": "src/ClprService.sol:ClprService",
           "label": "minEndpointBond",
           "offset": 0,
@@ -629,7 +629,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2175,
+          "astId": 2182,
           "contract": "src/ClprService.sol:ClprService",
           "label": "basePenalty",
           "offset": 0,
@@ -637,7 +637,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2177,
+          "astId": 2184,
           "contract": "src/ClprService.sol:ClprService",
           "label": "penaltyMultiplier",
           "offset": 0,
@@ -645,7 +645,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2179,
+          "astId": 2186,
           "contract": "src/ClprService.sol:ClprService",
           "label": "slashBanThreshold",
           "offset": 0,
@@ -653,7 +653,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2181,
+          "astId": 2188,
           "contract": "src/ClprService.sol:ClprService",
           "label": "connectorQueueQuotaPct",
           "offset": 4,
@@ -661,7 +661,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2184,
+          "astId": 2191,
           "contract": "src/ClprService.sol:ClprService",
           "label": "connectorInboundGasStipend",
           "offset": 8,
@@ -669,7 +669,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 2187,
+          "astId": 2194,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxChannels",
           "offset": 16,
@@ -677,7 +677,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2190,
+          "astId": 2197,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxConnectors",
           "offset": 20,
@@ -686,13 +686,13 @@
         }
       ]
     },
-    "t_struct(Endpoint)2060_storage": {
+    "t_struct(Endpoint)2067_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.Endpoint",
       "numberOfBytes": "128",
       "members": [
         {
-          "astId": 2053,
+          "astId": 2060,
           "contract": "src/ClprService.sol:ClprService",
           "label": "ipAddress",
           "offset": 0,
@@ -700,7 +700,7 @@
           "type": "t_string_storage"
         },
         {
-          "astId": 2055,
+          "astId": 2062,
           "contract": "src/ClprService.sol:ClprService",
           "label": "port",
           "offset": 0,
@@ -708,7 +708,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2057,
+          "astId": 2064,
           "contract": "src/ClprService.sol:ClprService",
           "label": "tlsCertificate",
           "offset": 0,
@@ -716,7 +716,7 @@
           "type": "t_bytes_storage"
         },
         {
-          "astId": 2059,
+          "astId": 2066,
           "contract": "src/ClprService.sol:ClprService",
           "label": "accountId",
           "offset": 0,
@@ -725,21 +725,21 @@
         }
       ]
     },
-    "t_struct(EndpointManifestEntry)2109_storage": {
+    "t_struct(EndpointManifestEntry)2116_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.EndpointManifestEntry",
       "numberOfBytes": "192",
       "members": [
         {
-          "astId": 2103,
+          "astId": 2110,
           "contract": "src/ClprService.sol:ClprService",
           "label": "endpoint",
           "offset": 0,
           "slot": "0",
-          "type": "t_struct(Endpoint)2060_storage"
+          "type": "t_struct(Endpoint)2067_storage"
         },
         {
-          "astId": 2105,
+          "astId": 2112,
           "contract": "src/ClprService.sol:ClprService",
           "label": "bond",
           "offset": 0,
@@ -747,7 +747,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 2108,
+          "astId": 2115,
           "contract": "src/ClprService.sol:ClprService",
           "label": "status",
           "offset": 0,
@@ -756,13 +756,13 @@
         }
       ]
     },
-    "t_struct(EndpointManifestState)2134_storage": {
+    "t_struct(EndpointManifestState)2141_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.EndpointManifestState",
       "numberOfBytes": "160",
       "members": [
         {
-          "astId": 2119,
+          "astId": 2126,
           "contract": "src/ClprService.sol:ClprService",
           "label": "version",
           "offset": 0,
@@ -770,7 +770,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 2121,
+          "astId": 2128,
           "contract": "src/ClprService.sol:ClprService",
           "label": "commitment",
           "offset": 0,
@@ -778,15 +778,15 @@
           "type": "t_bytes32"
         },
         {
-          "astId": 2126,
+          "astId": 2133,
           "contract": "src/ClprService.sol:ClprService",
           "label": "entries",
           "offset": 0,
           "slot": "2",
-          "type": "t_mapping(t_address,t_struct(EndpointManifestEntry)2109_storage)"
+          "type": "t_mapping(t_address,t_struct(EndpointManifestEntry)2116_storage)"
         },
         {
-          "astId": 2129,
+          "astId": 2136,
           "contract": "src/ClprService.sol:ClprService",
           "label": "liveAccounts",
           "offset": 0,
@@ -794,7 +794,7 @@
           "type": "t_array(t_address)dyn_storage"
         },
         {
-          "astId": 2133,
+          "astId": 2140,
           "contract": "src/ClprService.sol:ClprService",
           "label": "liveCounter",
           "offset": 0,
@@ -803,13 +803,13 @@
         }
       ]
     },
-    "t_struct(LedgerConfiguration)2165_storage": {
+    "t_struct(LedgerConfiguration)2172_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.LedgerConfiguration",
       "numberOfBytes": "256",
       "members": [
         {
-          "astId": 2148,
+          "astId": 2155,
           "contract": "src/ClprService.sol:ClprService",
           "label": "protocolVersion",
           "offset": 0,
@@ -817,7 +817,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2150,
+          "astId": 2157,
           "contract": "src/ClprService.sol:ClprService",
           "label": "chainId",
           "offset": 0,
@@ -825,7 +825,7 @@
           "type": "t_string_storage"
         },
         {
-          "astId": 2152,
+          "astId": 2159,
           "contract": "src/ClprService.sol:ClprService",
           "label": "serviceAddress",
           "offset": 0,
@@ -833,7 +833,7 @@
           "type": "t_bytes_storage"
         },
         {
-          "astId": 2155,
+          "astId": 2162,
           "contract": "src/ClprService.sol:ClprService",
           "label": "nanosSinceEpoch",
           "offset": 0,
@@ -841,15 +841,15 @@
           "type": "t_uint96"
         },
         {
-          "astId": 2158,
+          "astId": 2165,
           "contract": "src/ClprService.sol:ClprService",
           "label": "throttles",
           "offset": 0,
           "slot": "4",
-          "type": "t_struct(Throttles)2050_storage"
+          "type": "t_struct(Throttles)2057_storage"
         },
         {
-          "astId": 2161,
+          "astId": 2168,
           "contract": "src/ClprService.sol:ClprService",
           "label": "trustAnchor",
           "offset": 0,
@@ -857,7 +857,7 @@
           "type": "t_bytes_storage"
         },
         {
-          "astId": 2164,
+          "astId": 2171,
           "contract": "src/ClprService.sol:ClprService",
           "label": "trustAnchorId",
           "offset": 0,
@@ -897,13 +897,13 @@
         }
       ]
     },
-    "t_struct(Throttles)2050_storage": {
+    "t_struct(Throttles)2057_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.Throttles",
       "numberOfBytes": "64",
       "members": [
         {
-          "astId": 2037,
+          "astId": 2044,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxMessagesPerBundle",
           "offset": 0,
@@ -911,7 +911,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2039,
+          "astId": 2046,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxMessagePayloadBytes",
           "offset": 4,
@@ -919,7 +919,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 2041,
+          "astId": 2048,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxGasPerMessage",
           "offset": 12,
@@ -927,7 +927,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 2043,
+          "astId": 2050,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxQueueDepth",
           "offset": 20,
@@ -935,7 +935,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2045,
+          "astId": 2052,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxSyncBytes",
           "offset": 24,
@@ -943,7 +943,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 2047,
+          "astId": 2054,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxLocalEndpoints",
           "offset": 0,
@@ -951,7 +951,7 @@
           "type": "t_uint32"
         },
         {
-          "astId": 2049,
+          "astId": 2056,
           "contract": "src/ClprService.sol:ClprService",
           "label": "maxPeerEndpoints",
           "offset": 4,

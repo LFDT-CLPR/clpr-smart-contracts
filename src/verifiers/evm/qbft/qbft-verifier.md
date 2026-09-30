@@ -283,7 +283,7 @@ manifest commitment = slot 18                                     // _endpointMa
 | 2 | `cBase + 4` | `sentRunningHash` | `value` |
 | 3 | `cBase + 5` | `receivedRunningHash` | `value` |
 | 4 | `cBase + 16` | `endpointManifestVersion` | `uint64(value)` |
-| 5 (optional) | `msgBase + 1` | `MessageValue.runningHashAfterProcessing` of the last sent message | proven, not returned |
+| 5 (optional) | `msgBase + 1` | `MessageValue.runningHashAfterProcessing` of the last sent message | `lastMessageRunningHash = value` |
 
 Slot packing mirrors `ClprTypes.Channel` in `storage-layout.json`; a change to that struct needs a
 change to `ClprEvmBundleVerifier._buildQueueMetadata`.
@@ -328,6 +328,23 @@ Steps 3–5 (shaded purple) are mode-specific:
 
 Steps 6–9 are `QbftVerifierBase._verifyStorageAndContent` over the `ClprEvmBundleVerifier` helpers.
 
+The optional 6th entry proves the running hash of the bundle's last message:
+
+```
+qBase   = keccak256(abi.encode(channelId, 1))               // _messageQueues
+msgBase = keccak256(abi.encode(uint64(lastMessageId), qBase))
+slot    = msgBase + 1
+```
+
+`nextMessageId`/`sentRunningHash` are the sender's latest state, and a bundle may carry only a prefix
+of its queue. The verifier takes `lastMessageId` to be the id in `[ackedMessageId + messageCount,
+nextMessageId - 1]` whose slot matches the entry's label (`LastMessageSlotNotFound` if none does).
+Without the 6th entry, a message-bearing bundle is taken to end at the sender's latest message
+(`lastMessageId = nextMessageId - 1`, `lastMessageRunningHash = sentRunningHash`). The entry is
+ignored on a message-less bundle.
+
+The manifest commitment slot (7-item shape) is `keccak256(abi.encode(channelId, 18))`.
+
 ### 5.2 `verifyBundle` in the legacy verifier
 
 ```mermaid
@@ -354,10 +371,7 @@ flowchart TD
     C6(["channelContext · chainId · serviceAddress · peerConfigNanos ·<br/>throttles · initialTrustAnchor · initialTrustAnchorId · endpointManifest"])
 ```
 
----
-
 ## 6. Deep dives
-
 ### 6.1 Committed seals (`ClprQbftSeal`)
 
 `extraData` (header field 12) is a byte string wrapping an RLP list of exactly 5 items:

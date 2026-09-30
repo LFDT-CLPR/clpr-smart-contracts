@@ -73,44 +73,25 @@ library BundleLib {
     /// @dev Thrown when a bundle doesn't make any progress.
     error NoProgress();
 
-    /// @dev Checks if the bundle meets progress criteria to prevent no-op bundles (DoS protection).
-    ///      Reference: CLPR Specification §2.1.2 Bundle Progress Criteria
-    ///      A bundle makes progress if AT LEAST ONE of the following holds:
-    ///      1. New messages (messages with ID > channel.receivedMessageId)
-    ///      2. Trust anchor advancement
-    ///      3. Acknowledgement progress
-    ///      4. Channel state transition
-    ///      5. Endpoint manifest advancement (proven manifest version > stored version)
-    /// @param channel Current channel state
-    /// @param metadata Verified metadata from the bundle
-    /// @param newTrustAnchor New trust anchor (if any) from the bundle
+    /// @dev DoS guard: a bundle must make progress, or this reverts with NoProgress.
     /// @param manifestAdvances True when the verifier returned a manifest with a version strictly
-    ///        greater than the Channel's stored endpointManifestVersion (Criterion 5)
-    /// Reverts with NoProgress if none of the progress conditions hold
+    ///        greater than the Channel's stored endpointManifestVersion.
     function _checkBundleProgress(
         ClprTypes.Channel memory channel,
         ClprTypes.QueueMetadata memory metadata,
+        uint256 messageCount,
         bytes memory newTrustAnchor,
         bool manifestAdvances
     ) internal pure {
-        // Condition 1: New messages (messages with ID > channel.receivedMessageId).
-        // A bundle makes message progress iff nextMessageId > receivedMessageId + 1.
-        // Leading duplicate messages don't count as progress.
-        if (uint256(metadata.nextMessageId) > uint256(channel.receivedMessageId) + 1) return;
+        // Leading duplicates don't count: only a last message past receivedMessageId is new.
+        if (messageCount > 0 && metadata.lastMessageId > channel.receivedMessageId) return;
 
-        // Condition 2: Trust anchor advancement
         if (newTrustAnchor.length > 0) return;
-
-        // A manifest-only bundle is valid progress as well.
         if (manifestAdvances) return;
-
-        // Condition 3: Acknowledgement progress
         if (metadata.receivedMessageId > channel.ackedMessageId) return;
 
-        // Condition 4: the bundle drives a channel state transition.
-        //     Routed through the shared `_stepStatus` so this pre-check can never drift from
-        //     what `_applyStateMachine` actually does. The check runs before Step 6 commits
-        //     the new ack, so it looks ahead using max(channel.ackedMessageId, metadata.receivedMessageId).
+        // Looks ahead to the post-ack status: this runs before Step 6 commits the new ack, and
+        // routes through `_stepStatus` so it agrees with what `_applyStateMachine` does after it.
         uint64 effectiveAcked = channel.ackedMessageId;
         if (metadata.receivedMessageId > effectiveAcked) effectiveAcked = metadata.receivedMessageId;
 
@@ -119,13 +100,13 @@ library BundleLib {
                     channel.status,
                     metadata.state,
                     _allDataAcked(channel, effectiveAcked),
-                    _allOutboundAcked(channel, effectiveAcked)
+                    _allOutboundAcked(channel, effectiveAcked),
+                    _allInboundReceived(channel, metadata)
                 ) != channel.status
         ) {
             return;
         }
 
-        // Reject if NONE of the four conditions hold
         revert NoProgress();
     }
 
@@ -233,7 +214,11 @@ library BundleLib {
                 IClprVerifier(channel.verifier).verifyBundle(proofBytes, channel.trustAnchor, channel.channelContext);
 
             _checkBundleProgress(
-                channel, metadata, newTrustAnchor, newEndpointManifest.version > channel.endpointManifestVersion
+                channel,
+                metadata,
+                messagePayloads.length,
+                newTrustAnchor,
+                newEndpointManifest.version > channel.endpointManifestVersion
             );
 
             if (messagePayloads.length > params.config.throttles.maxMessagesPerBundle) {
@@ -270,23 +255,25 @@ library BundleLib {
         ctx.config = params.config;
 
         // ── Step 4: Replay defense ───────────────────────────────────
+        // The payloads are the contiguous run ending at lastMessageId. It may be a prefix of the
+        // sender's queue (lastMessageId < nextMessageId - 1) and may repeat already-received
+        // messages at its front, but must not skip past expectedFirstId.
         ctx.expectedFirstId = channel.receivedMessageId + 1;
-        {
-            int256 newMessageCount = int256(uint256(metadata.nextMessageId)) - int256(uint256(ctx.expectedFirstId));
-
-            // < 0: nextMessageId is behind our receivedMessageId — the sender is replaying old state.
-            // > length: metadata claims more new messages than the payload array can hold
-            // forge-lint: disable-next-line(unsafe-typecast)
-            if (newMessageCount < 0 || uint256(newMessageCount) > messagePayloads.length) {
+        if (metadata.nextMessageId < ctx.expectedFirstId) revert ClprTypes.ClprReplayDetected();
+        if (messagePayloads.length > 0) {
+            uint256 lastId = metadata.lastMessageId;
+            if (
+                lastId >= metadata.nextMessageId || lastId < messagePayloads.length
+                    || lastId < channel.receivedMessageId || lastId - channel.receivedMessageId > messagePayloads.length
+            ) {
                 revert ClprTypes.ClprReplayDetected();
             }
-
-            // newMessageCount is in [0, messagePayloads.length], which is bounded by maxMessagesPerBundle (uint16).
+            // Bounded by messagePayloads.length, which is bounded by maxMessagesPerBundle (uint32).
             // forge-lint: disable-next-line(unsafe-typecast)
-            ctx.expectedCount = uint64(uint256(newMessageCount));
+            ctx.expectedCount = uint64(lastId - channel.receivedMessageId);
             // Payloads[0 .. messageStartIndex-1] are leading duplicates; payloads[messageStartIndex .. length-1] are new.
             // forge-lint: disable-next-line(unsafe-typecast)
-            ctx.messageStartIndex = uint64(messagePayloads.length - uint256(newMessageCount));
+            ctx.messageStartIndex = uint64(messagePayloads.length - ctx.expectedCount);
         }
 
         // ── Step 5: Running hash verification ─────────────────────────
@@ -300,7 +287,10 @@ library BundleLib {
             bytes32 payloadHash = sha256(messagePayloads[i]);
             ctx.computedHash = sha256(abi.encodePacked(ctx.computedHash, payloadHash));
         }
-        if (ctx.computedHash != metadata.sentRunningHash) {
+        // A message-less bundle can only be checked when the sender has nothing we haven't received.
+        if (messagePayloads.length > 0) {
+            if (ctx.computedHash != metadata.lastMessageRunningHash) revert ClprTypes.ClprRunningHashMismatch();
+        } else if (metadata.nextMessageId == ctx.expectedFirstId && ctx.computedHash != metadata.sentRunningHash) {
             revert ClprTypes.ClprRunningHashMismatch();
         }
 
@@ -415,30 +405,42 @@ library BundleLib {
         return channel.nextMessageId == 1 || acked >= channel.nextMessageId - 1;
     }
 
-    /// @dev One §4.2 state-machine transition; returns `current` unchanged if no rule fires.
+    /// @dev True when every message in the peer's proven queue has been received. A bundle may
+    ///      carry only a prefix of that queue, so DRAINED -> CLOSED must wait for the rest.
+    function _allInboundReceived(ClprTypes.Channel memory channel, ClprTypes.QueueMetadata memory metadata)
+        private
+        pure
+        returns (bool)
+    {
+        return uint256(channel.receivedMessageId) + 1 >= metadata.nextMessageId;
+    }
+
+    /// @dev One state-machine transition; returns `current` unchanged if no rule fires.
     ///      SINGLE source of truth for the transition rules: `_applyStateMachine` applies and
     ///      emits each hop, while `_checkBundleProgress` only asks whether a transition would
     ///      fire. Routing both through here keeps them from drifting apart. `dataAcked` gates
-    ///      CLOSING -> DRAINED (DATA only); `allAcked` gates DRAINED -> CLOSED (DATA + Response).
-    function _stepStatus(ClprTypes.ChannelStatus current, ClprTypes.ChannelStatus peer, bool dataAcked, bool allAcked)
-        private
-        pure
-        returns (ClprTypes.ChannelStatus)
-    {
+    ///      CLOSING -> DRAINED (DATA only); `allAcked` and `inboundReceived` gate DRAINED -> CLOSED.
+    function _stepStatus(
+        ClprTypes.ChannelStatus current,
+        ClprTypes.ChannelStatus peer,
+        bool dataAcked,
+        bool allAcked,
+        bool inboundReceived
+    ) private pure returns (ClprTypes.ChannelStatus) {
         bool peerClosing = peer == ClprTypes.ChannelStatus.CLOSING || peer == ClprTypes.ChannelStatus.DRAINED
             || peer == ClprTypes.ChannelStatus.CLOSED;
         bool peerDone = peer == ClprTypes.ChannelStatus.DRAINED || peer == ClprTypes.ChannelStatus.CLOSED;
 
-        // ACTIVE || PAUSED -> CLOSING (§4.2 Step 5a)
+        // ACTIVE || PAUSED -> CLOSING
         if ((current == ClprTypes.ChannelStatus.ACTIVE || current == ClprTypes.ChannelStatus.PAUSED) && peerClosing) {
             return ClprTypes.ChannelStatus.CLOSING;
         }
-        // CLOSING -> DRAINED (§4.2 Step 5b sub-check 1): all DATA acked; responses may drain later.
+        // CLOSING -> DRAINED: all DATA acked; responses may drain later.
         if (current == ClprTypes.ChannelStatus.CLOSING && dataAcked) {
             return ClprTypes.ChannelStatus.DRAINED;
         }
-        // DRAINED -> CLOSED (§4.2 Step 5b sub-check 2): peer done AND all messages (incl. responses) acked.
-        if (current == ClprTypes.ChannelStatus.DRAINED && peerDone && allAcked) {
+        // DRAINED -> CLOSED: peer done, all our messages (incl. responses) acked, all of theirs received.
+        if (current == ClprTypes.ChannelStatus.DRAINED && peerDone && allAcked && inboundReceived) {
             return ClprTypes.ChannelStatus.CLOSED;
         }
         return current;
@@ -452,13 +454,14 @@ library BundleLib {
     ) internal {
         bool dataAcked = _allDataAcked(channel, newAckedMessageId);
         bool allAcked = _allOutboundAcked(channel, newAckedMessageId);
+        bool inboundReceived = _allInboundReceived(channel, metadata);
         // Walk to the settled status, emitting each hop. Transitions are monotonic
         // (ACTIVE -> CLOSING -> DRAINED -> CLOSED), so this terminates in <= 3 steps.
-        ClprTypes.ChannelStatus next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked);
+        ClprTypes.ChannelStatus next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked, inboundReceived);
         while (next != channel.status) {
             channel.status = next;
             emit ChannelStatusChanged(channelId, next);
-            next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked);
+            next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked, inboundReceived);
         }
     }
 

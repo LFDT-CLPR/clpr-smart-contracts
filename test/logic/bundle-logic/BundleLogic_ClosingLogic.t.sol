@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {ClprTypes, ChannelStatusChanged} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
+import {BundleLib} from "@hiero-ledger/clpr/libraries/service/BundleLib.sol";
 import {MockClprApplication} from "@test/mocks/MockClprApplication.sol";
 import {BundleLogicTestBase} from "@test/logic/bundle-logic/BundleLogicTestBase.sol";
 
@@ -58,7 +59,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: peerStatus,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: peerNextMsgId - 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -110,7 +113,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(drainMeta, noMsgs);
         verifier.setNewTrustAnchor(hex"01");
@@ -133,7 +138,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         uint64 replyMsgId = service.getChannel(channelId).nextMessageId;
@@ -162,7 +169,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED, // peer is CLOSED
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, noMsgs);
         verifier.setNewTrustAnchor(hex"AA");
@@ -210,7 +219,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -233,7 +244,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.CLOSED,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(closedMeta, noMsgs);
         verifier.setNewTrustAnchor(hex"BB");
@@ -285,7 +298,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
                 receivedMessageId: 1, // peer acked our DATA#1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hashA
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF");
@@ -308,7 +323,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
                 receivedMessageId: 2, // peer acked our DATA#2 (and implicitly #1)
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hashB
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF02");
@@ -334,7 +351,9 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, noMsgs);
         verifier.setNewTrustAnchor(hex"CC");
@@ -344,6 +363,76 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             uint8(service.getChannel(channelId).status),
             uint8(ClprTypes.ChannelStatus.DRAINED),
             "CLOSING->DRAINED must fire immediately when no DATA messages were ever sent"
+        );
+    }
+
+    // ── Test 4: DRAINED → CLOSED waits for the peer's whole queue ───────────
+
+    /// @dev Peer queue metadata proven for a DRAINED peer.
+    function _drainedPeerMeta(uint64 nextId, bytes32 sentHash, uint64 acked, uint64 lastId, bytes32 lastHash)
+        internal
+        pure
+        returns (ClprTypes.QueueMetadata memory)
+    {
+        return ClprTypes.QueueMetadata({
+            nextMessageId: nextId,
+            sentRunningHash: sentHash,
+            receivedMessageId: acked,
+            receivedRunningHash: bytes32(0),
+            state: ClprTypes.ChannelStatus.DRAINED,
+            endpointManifestVersion: 0,
+            lastMessageId: lastId,
+            lastMessageRunningHash: lastHash
+        });
+    }
+
+    /// @notice A partial bundle from a DRAINED peer must not close the channel while the
+    ///         peer's proven queue still holds messages beyond the bundle's last one.
+    ///         Scenario: our DATA#1 is acked and replied to, but the peer's queue also holds
+    ///         its DATA#2, which bundle A does not carry.
+    function test_drainedToClosed_waitsForPeerQueue_acrossPartialBundles() public {
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544131");
+        _adminClose();
+
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes memory data2 =
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes32 hash2 = sha256(abi.encodePacked(hash1, sha256(data2)));
+
+        // Bundle A: prefix of the peer's queue (message 1 of 2); our only message is acked.
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
+        verifier.setVerifyBundleResult(_drainedPeerMeta(3, hash2, 1, 1, hash1), msgs);
+        _submitBundle(hex"00FF");
+        assertEq(
+            uint8(service.getChannel(channelId).status),
+            uint8(ClprTypes.ChannelStatus.DRAINED),
+            "must stay DRAINED while peer message 2 is undelivered"
+        );
+
+        // A message-less bundle cannot close the channel either, so it makes no progress.
+        verifier.setVerifyBundleResult(_drainedPeerMeta(3, hash2, 1, 0, bytes32(0)), new bytes[](0));
+        vm.expectRevert(BundleLib.NoProgress.selector);
+        _submitBundle(hex"00FF01");
+
+        // Bundle B: the rest of the peer's queue. Our reply to DATA#2 is still unacked.
+        msgs[0] = data2;
+        verifier.setVerifyBundleResult(_drainedPeerMeta(3, hash2, 1, 2, hash2), msgs);
+        _submitBundle(hex"00FF02");
+        ClprTypes.Channel memory channel = service.getChannel(channelId);
+        assertEq(channel.receivedMessageId, 2, "peer queue fully received");
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.DRAINED), "our reply to DATA#2 is unacked");
+
+        // Bundle C: peer acks our reply → CLOSED.
+        verifier.setVerifyBundleResult(_drainedPeerMeta(3, hash2, 2, 0, bytes32(0)), new bytes[](0));
+        _submitBundle(hex"00FF03");
+        assertEq(
+            uint8(service.getChannel(channelId).status),
+            uint8(ClprTypes.ChannelStatus.CLOSED),
+            "must CLOSE once both queues are drained"
         );
     }
 

@@ -8,6 +8,7 @@ import {ClprTypes} from "../../../src/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "../../../src/libraries/codec/ClprProtobuf.sol";
 import {ClprProtobufHelpers as PB} from "../../../src/libraries/codec/ClprProtobufHelpers.sol";
 import {Sha384} from "../../../src/libraries/crypto/Sha384.sol";
+import {ClprStateProof} from "../../../src/libraries/proof/hiero/ClprStateProof.sol";
 
 /// @notice HieroVerifier endpoint-manifest leaf support: a `ClprEndpointManifest` state-item leaf
 ///         (StateValue field 64, tag 514) in the StateProof is authenticated against the signed
@@ -122,13 +123,38 @@ contract HieroManifestLeafTest is Test {
     function test_verifyBundle_noManifestLeaf_returnsAbsent() public view {
         // Second leaf is a message leaf (tag 498), not a manifest.
         bytes memory msgWire = PB.encodeBytesField(1, hex"010203"); // ClprMessageValue.payload
-        bytes memory proof = _stateProof(_stateItemLeaf(60, _channelWire(0)), _stateItemLeaf(62, msgWire));
+        // StateItem.key(2) = StateKey{62: ClprMessageKey{message_id(2) = 1}}; the verifier reads the id from it.
+        bytes memory msgKey = PB.encodeBytesField(2, PB.encodeBytesField(62, PB.encodeVarintField(2, 1)));
+        bytes memory proof =
+            _stateProof(_stateItemLeaf(60, _channelWire(0)), bytes.concat(msgKey, _stateItemLeaf(62, msgWire)));
 
         (ClprTypes.QueueMetadata memory metadata,,,, ClprTypes.ClprEndpointManifest memory newManifest) =
             verifier.verifyBundle(proof, "", _ctx());
 
         assertEq(newManifest.version, 0, "absent manifest is version 0");
         assertEq(metadata.endpointManifestVersion, 0, "field 20 absent decodes to 0");
+    }
+
+    function test_verifyBundle_lastMessageId_readFromMessageKey() public view {
+        bytes memory msgWire = abi.encodePacked(
+            PB.encodeBytesField(1, hex"010203"), PB.encodeBytesField(2, abi.encodePacked(bytes32(uint256(0xAB))))
+        );
+        bytes memory msgKey = PB.encodeBytesField(2, PB.encodeBytesField(62, PB.encodeVarintField(2, 7)));
+        bytes memory proof =
+            _stateProof(_stateItemLeaf(60, _channelWire(0)), bytes.concat(msgKey, _stateItemLeaf(62, msgWire)));
+
+        (ClprTypes.QueueMetadata memory metadata,,,,) = verifier.verifyBundle(proof, "", _ctx());
+
+        assertEq(metadata.lastMessageId, 7, "id from ClprMessageKey.message_id");
+        assertEq(metadata.lastMessageRunningHash, bytes32(uint256(0xAB)), "last leaf's runningHashAfterProcessing");
+    }
+
+    function test_verifyBundle_messageLeafWithoutKey_reverts() public {
+        bytes memory proof =
+            _stateProof(_stateItemLeaf(60, _channelWire(0)), _stateItemLeaf(62, PB.encodeBytesField(1, hex"010203")));
+
+        vm.expectRevert(ClprStateProof.StateProofMissingMessageKey.selector);
+        verifier.verifyBundle(proof, "", _ctx());
     }
 
     function test_verifyBundle_manifestServiceAddressMismatch_reverts() public {

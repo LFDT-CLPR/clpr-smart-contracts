@@ -19,6 +19,8 @@ export interface FerryResult {
 
 export {ChannelStatus, type QueueMetadata};
 
+const ZERO_HASH: Hex = `0x${"0".repeat(64)}`;
+
 /// Shared orchestration: read payloads, build bundle, submit, diagnose reverts.
 async function ferryCore(opts: {
     source: ChainClients;
@@ -142,26 +144,30 @@ async function ferryStub(opts: {
         endpointManifestVersion: bigint;
     };
 
-    const metadata: QueueMetadata = {
-        nextMessageId: conn.nextMessageId,
-        sentRunningHash: conn.sentRunningHash,
-        receivedMessageId: conn.receivedMessageId,
-        receivedRunningHash: conn.receivedRunningHash,
-        state: conn.status,
-        endpointManifestVersion: conn.endpointManifestVersion
-    };
-
     return ferryCore({
         ...opts,
         sourceClprService: sourceAddrs.clprService,
         destClprService: opts.destAddrs.clprService,
         label: "ferry",
-        buildBundle: (payloads) => encodeBundle({
-            clients: source,
-            bundleEncoderAddr: sourceAddrs.bundleEncoder,
-            metadata,
-            payloads
-        })
+        buildBundle: (payloads) => {
+            const hasMessages = payloads.length > 0;
+            const metadata: QueueMetadata = {
+                nextMessageId: conn.nextMessageId,
+                sentRunningHash: conn.sentRunningHash,
+                receivedMessageId: conn.receivedMessageId,
+                receivedRunningHash: conn.receivedRunningHash,
+                state: conn.status,
+                endpointManifestVersion: conn.endpointManifestVersion,
+                lastMessageId: hasMessages ? conn.nextMessageId - 1n : 0n,
+                lastMessageRunningHash: hasMessages ? conn.sentRunningHash : ZERO_HASH
+            };
+            return encodeBundle({
+                clients: source,
+                bundleEncoderAddr: sourceAddrs.bundleEncoder,
+                metadata,
+                payloads
+            });
+        }
     });
 }
 
@@ -177,14 +183,6 @@ export async function ferryQbft(opts: {
     const rpcUrl = opts.source.chain.rpcUrls.default.http[0];
     if (!rpcUrl) throw new Error("ferryQbft: missing source RPC URL");
 
-    const service = loadArtifact("ClprService");
-    const conn = (await opts.source.publicClient.readContract({
-        address: opts.sourceAddrs.clprService,
-        abi: service.abi as never,
-        functionName: "getChannel",
-        args: [opts.channelId]
-    })) as {nextMessageId: bigint};
-
     return ferryCore({
         ...opts,
         sourceClprService: opts.sourceAddrs.clprService,
@@ -195,7 +193,7 @@ export async function ferryQbft(opts: {
             serviceAddr: opts.sourceAddrs.clprService,
             channelId: opts.channelId,
             payloads,
-            lastMessageId: conn.nextMessageId - 1n
+            lastMessageId: payloads.length > 0 ? opts.range.throughId : undefined
         }).then((r) => r.proofBytes)
     });
 }
