@@ -533,6 +533,27 @@ contract ClprProtobufTest is Test {
         assertEq(channel.nextMessageId, 9, "decode must continue past service_address");
     }
 
+    function test_decodeChannelFromMemory_channelId() public view {
+        bytes32 cid = 0x1122334455667788990011223344556677889900112233445566778899001122;
+        bytes memory encoded = abi.encodePacked(
+            ClprProtobufHelpers.encodeBytesField(1, abi.encodePacked(cid)), // field 1 = channel_id
+            ClprProtobufHelpers.encodeVarintField(8, 4) // decode must continue past field 1
+        );
+        ClprTypes.Channel memory channel = harness.decodeChannelFromMemory(encoded);
+        assertEq(channel.channelId, cid, "field 1 must populate channelId");
+        assertEq(channel.nextMessageId, 4, "decode must continue past channel_id");
+    }
+
+    function test_decodeChannelFromMemory_channelId_wrongLength_staysZero() public view {
+        bytes memory encoded = abi.encodePacked(
+            ClprProtobufHelpers.encodeBytesField(1, hex"aabbcc"), // 3-byte channel_id
+            ClprProtobufHelpers.encodeVarintField(8, 4)
+        );
+        ClprTypes.Channel memory channel = harness.decodeChannelFromMemory(encoded);
+        assertEq(channel.channelId, bytes32(0), "non-32-byte channel_id must leave channelId zero");
+        assertEq(channel.nextMessageId, 4, "decode must continue past channel_id");
+    }
+
     /// @dev service_address absent → channel.peerServiceAddress defaults to empty.
     function test_decodeChannelFromMemory_serviceAddress_absent_isEmpty() public view {
         bytes memory encoded = ClprProtobufHelpers.encodeVarintField(8, 1); // only nextMessageId
@@ -584,10 +605,11 @@ contract ClprProtobufTest is Test {
         assertEq(channel.endpointManifestVersion, 12, "ClprChannel proto field 20");
     }
 
-    /// @dev Length-delimited field (wireType=2) that's not field 10 or 12 → skipped.
+    /// @dev Length-delimited field (wireType=2) that the decoder does not surface (not 1/3/10/12)
+    ///      → skipped. Field 2 (`chain_id`) is such a field.
     function test_decodeChannelFromMemory_skipUnknownLenField() public view {
         bytes memory encoded = abi.encodePacked(
-            ClprProtobufHelpers.encodeBytesField(1, hex"aabbcc"), // field 1 = unknown LEN → skipped
+            ClprProtobufHelpers.encodeBytesField(2, hex"aabbcc"), // field 2 = chain_id → skipped
             ClprProtobufHelpers.encodeVarintField(8, 7)
         );
         ClprTypes.Channel memory channel = harness.decodeChannelFromMemory(encoded);

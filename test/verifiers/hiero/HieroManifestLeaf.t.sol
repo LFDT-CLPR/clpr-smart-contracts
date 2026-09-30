@@ -39,6 +39,7 @@ contract HieroManifestLeafTest is Test {
     ///      (32-byte LEN); endpoint_manifest_version=20 (varint).
     function _channelWire(uint64 manifestVersion) internal pure returns (bytes memory) {
         return abi.encodePacked(
+            PB.encodeBytesField(1, abi.encodePacked(bytes32(uint256(1)))), // channel_id
             PB.encodeVarintField(7, uint64(uint8(ClprTypes.ChannelStatus.ACTIVE))),
             PB.encodeVarintField(8, uint64(2)), // nextMessageId
             PB.encodeBytesField(10, abi.encodePacked(bytes32(uint256(1)))), // sentRunningHash

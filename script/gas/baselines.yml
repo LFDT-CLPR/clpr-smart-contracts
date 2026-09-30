@@ -15,12 +15,16 @@ log_benchmarks:
     match_path: test/verifiers/hiero/GasUsage.t.sol
     metrics:
       # console.log label -> max allowed gas
-      "Protobuf decode": 177231
-      "Merkle path 1": 1407156
-      "Merkle path 2": 1194688
-      "hinTS BLS12-381": 902642
+      # Hiero decode/Merkle metrics raised by the #451 channel-binding fix: the ClprChannel
+      # leaf's channel_id (proto field 1) is now decoded and bound, and a MerklePath's content
+      # oneof is enforced; both the decode and the two Merkle walks in the breakdown test carry
+      # that cost, and the shared-memory growth ripples into the later gasleft() deltas.
+      "Protobuf decode": 177655
+      "Merkle path 1": 1407397
+      "Merkle path 2": 1194929
+      "hinTS BLS12-381": 902672
       "WRAPS Groth16+KZG": 2456774
-      "TOTAL": 6138491
+      "TOTAL": 6139427
 
   - name: Ethereum mainnet verifier (BLS / SSZ hot paths)
     match_path: test/verifiers/evm/ethereum/GasUsage.t.sol
@@ -46,12 +50,14 @@ gas_report_benchmarks:
   #    function: submitBundle
   #    column: min
   #    baseline: 6439188
+  # Raised by the #451 channel-binding fix: verifyBundle now decodes the ClprChannel leaf's
+  # channel_id and binds it to channelContext (ClprHieroChannelMismatch).
   - name: HieroVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/hiero/GasUsage.t.sol
     contract: HieroVerifier
     function: verifyBundle
     column: min
-    baseline: 6108407
+    baseline: 6110101
   - name: QbftHeaderModeVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier

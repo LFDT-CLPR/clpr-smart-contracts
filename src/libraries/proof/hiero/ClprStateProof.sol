@@ -45,6 +45,8 @@ library ClprStateProof {
     error StateProofPathInvalid();
     /// @notice The state proof contains no `ClprChannel` state-item leaf.
     error StateProofMissingChannel();
+    /// @notice A `MerklePath` populated more than one `content`.
+    error StateProofPathAmbiguousContent();
 
     struct StateProofDecoded {
         // TSS Signature
@@ -164,6 +166,13 @@ library ClprStateProof {
                 pos = PB.skipField(wire, pos, wireType);
             }
         }
+
+        uint256 contentArms;
+        if (path.explicitHash.length != 0) contentArms++;
+        if (path.stateItemLeaf.length != 0) contentArms++;
+        if (path.blockItemLeaf.length != 0) contentArms++;
+        if (path.timestampLeaf.length != 0) contentArms++;
+        if (contentArms > 1) revert StateProofPathAmbiguousContent();
 
         path.siblings = new SiblingNode[](siblingN);
         for (uint256 i = 0; i < siblingN; i++) {

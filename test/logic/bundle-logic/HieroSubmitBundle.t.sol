@@ -90,8 +90,12 @@ contract HieroSubmitBundleTest is ClprTestBase {
                 address(hieroVerifier),
                 abi.encodeWithSelector(IClprVerifier.verifyConfig.selector),
                 abi.encode(
+                    // channelId must match the fixture's proven ClprChannel leaf (field 1).
                     ClprTypes.encodeChannelContext(
-                        ClprTypes.ChannelContext({channelId: bytes32(0), remoteServiceAddress: peerServiceAddress})
+                        ClprTypes.ChannelContext({
+                            channelId: 0xe1022276af73c7a88c9fa00f7e844bbc4a8fda0cc6051d9c99926b74cf9c3d84,
+                            remoteServiceAddress: peerServiceAddress
+                        })
                     ),
                     "hiero:localnet",
                     peerServiceAddress,

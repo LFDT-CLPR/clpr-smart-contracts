@@ -101,7 +101,13 @@ contract HieroGasBenchmarkTest is Test {
         TSSVerifier tssVerifier = TSSVerifier(deployCode("TSSVerifier.sol:TSSVerifier", abi.encode(wraps)));
         HieroVerifier hieroVerifier =
             HieroVerifier(deployCode("HieroVerifier.sol:HieroVerifier", abi.encode(ledgerId, address(tssVerifier))));
-        hieroVerifier.verifyBundle(proof, trustAnchor, "");
+        // channelContext = channelId(32) || remoteServiceAddress: the verifier binds the proven
+        // ClprChannel leaf to this channel id.
+        bytes memory channelContext = abi.encodePacked(
+            bytes32(0xe1022276af73c7a88c9fa00f7e844bbc4a8fda0cc6051d9c99926b74cf9c3d84),
+            hex"ade986b5973ec38f3996f3a128f7d8c3e8ffcd9d"
+        );
+        hieroVerifier.verifyBundle(proof, trustAnchor, channelContext);
     }
 
     function _slice(bytes memory data, uint256 offset, uint256 length) internal pure returns (bytes memory out) {

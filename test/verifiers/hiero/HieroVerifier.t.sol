@@ -57,6 +57,10 @@ contract HieroVerifierTest is Test {
     bytes32 internal constant EXPECTED_RECV_RUNNING_HASH =
         0xfafa3f38458c8b54b86d393432de11d60420705a627f5183d26f18b5f03c6a28;
 
+    // channel_id (field 1) and service_address (field 3) proven in the fixture's ClprChannel leaf.
+    bytes32 internal constant EXPECTED_CHANNEL_ID = 0xe1022276af73c7a88c9fa00f7e844bbc4a8fda0cc6051d9c99926b74cf9c3d84;
+    bytes internal constant PEER_SERVICE_ADDRESS = hex"ade986b5973ec38f3996f3a128f7d8c3e8ffcd9d";
+
     function setUp() public {
         address permuteA = deployCode("PoseidonPermuteA.sol:PoseidonPermuteA");
         address permuteB = deployCode("PoseidonPermuteB.sol:PoseidonPermuteB");
@@ -75,6 +79,13 @@ contract HieroVerifierTest is Test {
 
     function _loadTrustAnchor() internal view returns (bytes memory) {
         return vm.readFileBinary("test/verifiers/hiero/fixtures/trustAnchor.bin");
+    }
+
+    /// @dev A channelContext bound to the fixture's proven channel id.
+    function _ctx() internal pure returns (bytes memory) {
+        return ClprTypes.encodeChannelContext(
+            ClprTypes.ChannelContext({channelId: EXPECTED_CHANNEL_ID, remoteServiceAddress: PEER_SERVICE_ADDRESS})
+        );
     }
 
     // ── Decode smoke: state-proof can be parsed and has 2 paths ─────────────
@@ -147,7 +158,7 @@ contract HieroVerifierTest is Test {
         bytes memory ta = _loadTrustAnchor();
 
         (ClprTypes.QueueMetadata memory meta, bytes[] memory payloads, bytes memory newTrustAnchor,,) =
-            hieroVerifier.verifyBundle(proof, ta, "");
+            hieroVerifier.verifyBundle(proof, ta, _ctx());
 
         // Structural checks
         assertEq(uint8(meta.state), uint8(ClprTypes.ChannelStatus.ACTIVE), "state must be ACTIVE");
@@ -165,6 +176,23 @@ contract HieroVerifierTest is Test {
         console.log("payload[0] length:", payloads[0].length);
         console.logBytes32(meta.sentRunningHash);
         console.logBytes32(meta.receivedRunningHash);
+    }
+
+    /// @notice A genuine, correctly-signed proof of one channel must not be accepted for a
+    ///         different local channel id (Finding 2: leaves not bound to the channel).
+    function test_verifyBundle_wrongChannelId_reverts() public {
+        bytes memory proof = _loadProof();
+        bytes memory ta = _loadTrustAnchor();
+
+        bytes memory foreignCtx = ClprTypes.encodeChannelContext(
+            ClprTypes.ChannelContext({
+                channelId: bytes32(uint256(0xBEEF)), // not the fixture's proven channel id
+                remoteServiceAddress: PEER_SERVICE_ADDRESS
+            })
+        );
+
+        vm.expectRevert(HieroVerifier.ClprHieroChannelMismatch.selector);
+        hieroVerifier.verifyBundle(proof, ta, foreignCtx);
     }
 
     // ── Negative tests ───────────────────────────────────────────────────────
@@ -335,15 +363,17 @@ contract HieroVerifierTest is Test {
         hieroVerifier.verifyBundle(new bytes(0), LEDGER_ID, "");
     }
 
-    function test_verifyBundle_shortBlockRoot_reverts() public {
+    function test_verifyBundle_ambiguousContentPath_reverts() public {
         bytes memory dummySig = hex"0102030405";
         bytes memory tssProof = PB.encodeBytesField(ClprStateProof.SBP_BLOCK_SIGNATURE, dummySig);
-        // Path has both MP_HASH (4 bytes) and MP_STATE_ITEM_LEAF set, plus TERMINATOR.
-        // findFirstPath(StateItemLeaf) matches (stateItemLeaf non-empty), but _baseHashOf
-        // checks explicitHash first → returns the 4-byte hash → length check fails at line 84.
+        // Path has both MP_HASH and MP_STATE_ITEM_LEAF set — the leaf-forgery shape:
+        // an explicit hash supplied *alongside* the leaf so authentication would use one
+        // field and extraction the other. _baseHashOf now rejects this ambiguity: a
+        // leaf-bearing path is authenticated by hashing the leaf that extraction consumes,
+        // never by a separately-supplied hash. See HieroLeafForgeryPoC for the exploit.
         bytes memory path = abi.encodePacked(
             PB.encodeVarintField(ClprStateProof.MP_NEXT_PATH_INDEX, uint64(type(uint32).max)), // TERMINATOR
-            PB.encodeBytesField(ClprStateProof.MP_HASH, hex"aabbccdd"), // 4-byte explicitHash
+            PB.encodeBytesField(ClprStateProof.MP_HASH, hex"aabbccdd"), // explicitHash alongside a leaf
             PB.encodeBytesField(ClprStateProof.MP_STATE_ITEM_LEAF, hex"abcd")
         );
         bytes memory stateProof = abi.encodePacked(
@@ -351,7 +381,7 @@ contract HieroVerifierTest is Test {
             PB.encodeBytesField(ClprStateProof.SP_SIGNED_BLOCK_PROOF, tssProof)
         );
 
-        vm.expectRevert(abi.encodeWithSelector(HieroVerifier.ClprHieroBlockHashLength.selector, uint256(4)));
+        vm.expectRevert(ClprStateProof.StateProofPathAmbiguousContent.selector);
         hieroVerifier.verifyBundle(stateProof, LEDGER_ID, "");
     }
 

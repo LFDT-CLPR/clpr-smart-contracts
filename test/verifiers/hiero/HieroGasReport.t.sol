@@ -50,10 +50,17 @@ contract HieroGasReportTest is Test {
     TSSVerifierHarness internal hintsH;
     bytes internal proof;
     bytes internal ledgerId;
+    /// @dev channelId(32) || remoteServiceAddress of the fixture's proven ClprChannel leaf; the verifier
+    ///      binds that leaf to this channel id.
+    bytes internal channelContext;
 
     function setUp() public {
         proof = vm.readFileBinary(STATE_PROOF_PATH);
         ledgerId = vm.readFileBinary(TRUST_ANCHOR_PATH);
+        channelContext = abi.encodePacked(
+            bytes32(0xe1022276af73c7a88c9fa00f7e844bbc4a8fda0cc6051d9c99926b74cf9c3d84),
+            hex"ade986b5973ec38f3996f3a128f7d8c3e8ffcd9d"
+        );
         address a = deployCode("PoseidonPermuteA.sol:PoseidonPermuteA");
         address b = deployCode("PoseidonPermuteB.sol:PoseidonPermuteB");
         address pos = deployCode("PoseidonBN254Contract.sol:PoseidonBN254Contract", abi.encode(a, b));
@@ -74,16 +81,16 @@ contract HieroGasReportTest is Test {
 
         // Full verifyBundle, anchor = ledgerId (as GasUsage.t.sol: Poseidon path).
         (ClprTypes.QueueMetadata memory md, bytes[] memory msgs, bytes memory newAnchor,,) =
-            hiero.verifyBundle(p, lid, "");
+            hiero.verifyBundle(p, lid, channelContext);
         console2.log("verifyBundle (anchor != keccak(vk), Poseidon)", vm.lastCallGas().gasTotalUsed);
         console2.log("  messages", msgs.length);
         console2.log("  state", uint256(md.state));
         console2.log("calldata gas anchor(keccak vk)", CalldataGas.eip2028(newAnchor));
 
         // Steady state: caller supplies the cached keccak256(hintsVk).
-        hiero.verifyBundle(p, newAnchor, "");
+        hiero.verifyBundle(p, newAnchor, channelContext);
         console2.log("verifyBundle (anchor == keccak(vk), Poseidon skipped)", vm.lastCallGas().gasTotalUsed);
-        hiero.verifyBundle(p, lid, "");
+        hiero.verifyBundle(p, lid, channelContext);
         console2.log("verifyBundle repeat (Poseidon, warm)", vm.lastCallGas().gasTotalUsed);
 
         // Components, each its own call frame.
@@ -122,7 +129,7 @@ contract HieroGasReportTest is Test {
     function test_steadyCold() public view {
         bytes memory p = proof;
         bytes memory vkHash = abi.encodePacked(keccak256(_slice(_sigOf(p), 0, 1096)));
-        hiero.verifyBundle(p, vkHash, "");
+        hiero.verifyBundle(p, vkHash, channelContext);
         console2.log("verifyBundle cold (anchor == keccak(vk))", vm.lastCallGas().gasTotalUsed);
     }
 

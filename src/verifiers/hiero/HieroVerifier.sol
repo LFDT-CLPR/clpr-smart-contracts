@@ -32,6 +32,9 @@ contract HieroVerifier is IClprVerifier {
     /// @dev The bundle must prove at least the channel's `StateValue` leaf
     ///      against the signed block root.
     error ClprHieroNoStateItemLeaf();
+    /// @notice The proven `ClprChannel` leaf's `channel_id` does not match the
+    ///         local channel identity in `channelContext`.
+    error ClprHieroChannelMismatch();
 
     /// @notice ConfigProof bytes were malformed (basic shape verification failed).
     error InvalidPayloadShape();
@@ -62,8 +65,6 @@ contract HieroVerifier is IClprVerifier {
     }
 
     /// @inheritdoc IClprVerifier
-    /// @dev channelContext is unused: the state proof directly authenticates the specific
-    ///      `ClprChannel` leaf's `service_address` field.
     function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
         external
         view
@@ -99,6 +100,14 @@ contract HieroVerifier is IClprVerifier {
         (ClprTypes.Channel memory channel, bytes[] memory payloads, bytes memory manifestWire) =
             ClprStateProof.extractDecodedQueueData(sp.paths, blockRootHash);
 
+        // Step 4b: bind the proven Channel to the local channel identity.
+        if (channelContext.length < 32) revert ClprHieroChannelMismatch();
+        bytes32 ctxChannelId;
+        assembly ("memory-safe") {
+            ctxChannelId := calldataload(channelContext.offset)
+        }
+        if (channel.channelId != ctxChannelId) revert ClprHieroChannelMismatch();
+
         // Step 5: synthesize the queue metadata from the proven Channel. `next_message_id`
         // is derived (acked + 1 + bundle size) so the receiver can sanity-check the bundle's
         // monotone-id invariant against the proven Channel state.
@@ -115,7 +124,8 @@ contract HieroVerifier is IClprVerifier {
         messagePayloads = payloads;
         newTrustAnchorId = "";
 
-        // Endpoint-manifest update.
+        // Endpoint-manifest update. Only here is the full context needed, to bind the manifest
+        // to the peer's service_address.
         if (manifestWire.length > 0) {
             ClprTypes.ChannelContext memory ctx = ClprTypes.decodeChannelContext(channelContext);
             newEndpointManifest = _decodeAndBindManifest(manifestWire, ctx.remoteServiceAddress);

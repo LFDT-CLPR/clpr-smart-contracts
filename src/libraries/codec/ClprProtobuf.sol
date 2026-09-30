@@ -631,7 +631,11 @@ library ClprProtobuf {
                     channel.endpointManifestVersion = v;
                 }
             } else if (wireType == 2) {
-                if (fieldNum == 3) {
+                if (fieldNum == 1) {
+                    bytes memory val;
+                    (val, pos) = PB.decodeLengthDelimited(data, pos);
+                    if (val.length == 32) channel.channelId = _bytes32From(val);
+                } else if (fieldNum == 3) {
                     (channel.peerServiceAddress, pos) = PB.decodeLengthDelimited(data, pos);
                 } else if (fieldNum == 10) {
                     bytes memory val;
@@ -643,7 +647,7 @@ library ClprProtobuf {
                     if (val.length == 32) channel.receivedRunningHash = _bytes32From(val);
                 } else {
                     // Skip every other length-delimited field without copying
-                    // its body — channel_id, chain_id, verifier_contract,
+                    // its body — chain_id, verifier_contract,
                     // verifier_fingerprint, the two Timestamps,
                     // ownership_commitment, trust_anchor.
                     pos = PB.skipField(data, pos, wireType);
