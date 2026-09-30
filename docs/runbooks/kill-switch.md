@@ -17,7 +17,7 @@ If you have already decided (see [Triggers](#triggers)) that halting is the righ
 **What you need first** (the `<…>` values used throughout this runbook):
 
 - `<CLPR_SERVICE>` — the `ClprService` address. Find it in the "Owned contract"
-  row of [`docs/safe-runbook.md`](../safe-runbook.md) §1, or in the deploy's
+  row of [`docs/safe-runbook.md`](../safe-runbook.md) section 1, or in the deploy's
   address output (`CLPR_SERVICE` key).
 - `<RPC_URL>` — an RPC endpoint for the target network.
 - Access to the Safe's signers to reach the signing threshold.
@@ -30,7 +30,7 @@ cast calldata "setClprEnabled(bool)" false
 
 # 2. Sign + execute as a Safe transaction targeting ClprService.
 #    Mechanics (hashing, collecting threshold signatures, executing) live in
-#    docs/safe-runbook.md §3 "Routine owner-only operations".
+#    docs/safe-runbook.md section 3 "Routine owner-only operations".
 
 # 3. VERIFY the flag actually changed (see "Verify it took effect" below).
 #    A Safe tx with status 1 does NOT prove the halt landed.
@@ -55,7 +55,7 @@ alone** — page co-signers early (see [Paging tree](#paging-tree)).
   |------|------------------|
   | Channels | `registerChannel`, `completeChannel`, `closeChannel` |
   | Connectors | `registerConnector`, `completeConnector`, `removeConnector`, `topUpConnectorStake` |
-  | Endpoints | `registerEndpoint`, `removeEndpoint`, `evictEndpoint`, `topUpBond` |
+  | Endpoints | `registerEndpoint`, `addEndpoint`, `removeEndpoint`, `updateEndpointManifest` |
   | Messaging | `sendMessage`, `redactMessage` |
   | Bundles | `submitBundle` |
   | Configuration | `updateLedgerConfiguration`, `updateEconomicConfiguration` |
@@ -114,12 +114,12 @@ cast calldata "setClprEnabled(bool)" false
 Submit that calldata as a Safe transaction to the `ClprService` address, collect
 the Safe's `<threshold>` signatures, and execute. The full signing procedure —
 computing the hash, gathering signatures, executing — is in
-[`docs/safe-runbook.md`](../safe-runbook.md) §3. The call reaches `AdminLogic`
-via delegatecall and runs against the head's storage, where the owner check sees
-the Safe.
+[`docs/safe-runbook.md`](../safe-runbook.md) section 3. `ClprService`'s `onlyOwner`
+checks the Safe before the call is delegated to `AdminLogic`, which then runs
+against the router's storage.
 
 Two mechanical traps in that procedure are worth knowing before you start. Both
-are covered in §3:
+are covered in section 3:
 
 - **Signatures must be concatenated in ascending signer-address order.** The
   correct number of individually-valid signatures in the wrong order fails with
@@ -179,7 +179,7 @@ cast call <CLPR_SERVICE> "registerEndpoint()" --rpc-url <RPC_URL>
 ```
 
 Record the execution tx hash in the [post-mortem](#post-mortem-template) and in
-the Safe change log (`docs/safe-runbook.md` §5).
+the Safe change log (`docs/safe-runbook.md` section 5).
 
 ---
 
@@ -228,7 +228,7 @@ execution receipt.
 | Level | Role | When to page | Contact |
 |-------|------|-------------|---------|
 | 0 | On-call engineer (you) | You are already here. | — |
-| 1 | Safe co-signers | Immediately — you need the threshold to sign anything. | `<Safe signers — see docs/safe-runbook.md §1>` |
+| 1 | Safe co-signers | Immediately — you need the threshold to sign anything. | `<Safe signers — see docs/safe-runbook.md section 1>` |
 | 2 | Protocol / Operations lead | On any confirmed trigger, in parallel with signing. | `<name / channel / schedule>` |
 | 3 | Security lead / team | Verifier compromise, key compromise, or anything you suspect is an attack. | `<name / channel / schedule>` |
 

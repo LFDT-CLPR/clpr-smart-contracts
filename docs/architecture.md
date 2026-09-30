@@ -7,138 +7,260 @@ Pairs with `CLPR.md`.
 
 `ClprService` is the only contract anyone interacts with. It declares the
 storage and the public ABI but contains no business logic. Each external
-function is a tiny stub that DELEGATECALLs into one of four logic contracts:
+function is a stub that DELEGATECALLs into one of five logic contracts:
 
 ```
-                   ClprService  (router; state lives here)
-                        │
-       ┌────────────────┼────────────────┬────────────────┐
-       │ DELEGATECALL   │                │                │
-       ▼                ▼                ▼                ▼
-  ChannelLogic  MessagingLogic  ConnectorLogic    AdminLogic
+                          ClprService  (router; state lives here)
+                               │ DELEGATECALL
+   ┌─────────────┬─────────────┼─────────────┬──────────────┐
+   ▼             ▼             ▼             ▼              ▼
+ChannelLogic MessagingLogic BundleLogic ConnectorLogic  AdminLogic
 ```
 
-- Logic contract addresses are `immutable`, set in the router constructor.
-- The system is **not upgradeable**.
-- The split exists to fit under the EIP-170 24KB code size limit and to
-  organise concerns; it is not a proxy/upgrade pattern.
+- Each logic contract and the `BundleDecodeHelper` is deployed on its own
+  (`script/deploy/deployCore.ts` `deployClprModules`) and passed to the router
+  constructor `constructor(initialOwner, protocolVersion, chainId, channelLogic,
+  messagingLogic, bundleLogic, connectorLogic, adminLogic, bundleDecodeHelper)`.
+  Every address must be non-zero (`ClprService.ZeroLogicAddress`) and have code
+  (`ClprModuleNotDeployed`). The router creates no child contracts.
+- The five logic addresses are `immutable` on the router. `bundleDecodeHelper`
+  is not: it is written once to the `_bundleDecodeHelper` storage variable.
+- `BundleLogic` holds only `submitBundle`; it is separate from `MessagingLogic`
+  to keep both under the EIP-170 24 KB runtime limit (`BundleLogic` NatSpec).
+- The system is **not upgradeable**. The split organises concerns and fits the
+  contract-size limits; it is not a proxy/upgrade pattern.
 - `deriveConnectorId` is the one function dispatched via STATICCALL
-  (`_staticDelegate`) because it is `pure`.
+  (`_staticDelegate`), because it reads no router storage. `deriveChannelId`
+  reads `_config.chainId`, so it goes through `_delegate` like the rest.
+- The constructor fixes `_config.protocolVersion` and `_config.chainId` (no
+  setter changes them), seeds the local endpoint manifest at version 1 with its
+  commitment (`ManifestLib.syncCommitment`), and sets `_authorizedService =
+  address(this)`. `_clprEnabled` stays `false`: the service is inert until the
+  owner runs `initialize(...)` and then `setClprEnabled(true)`.
 
-The router and every logic contract inherit `ClprServiceStorage` in the same
-position so storage slots line up under DELEGATECALL.
+The router and every logic contract inherit `ClprServiceStorage` (the logic
+contracts through `LogicModuleBase`) in the same position, so storage slots line
+up under DELEGATECALL.
 
-### Service Authorization (onlyService modifier)
+### Module guards (`LogicModuleBase`)
 
-All state-changing methods in logic contracts are protected by the `onlyService`
-modifier. This checks `address(this) == _authorizedService` to ensure the method
-is called via DELEGATECALL from ClprService, not directly on the logic module.
+`LogicModuleBase` is the base of all five logic contracts. It defines three
+modifiers:
 
-- **Direct call**: `address(this)` = logic module's address ≠ `_authorizedService` → reverts
-- **DELEGATECALL**: `address(this)` = ClprService's address == `_authorizedService` → succeeds
+- `onlyService` — `address(this) == _authorizedService`, else
+  `UnauthorizedCaller`. Under DELEGATECALL `address(this)` is the router, so the
+  check passes; a direct call to the module's own address fails.
+  `_authorizedService` is shared storage, set once in the `ClprService`
+  constructor.
+- `whenEnabled` — reverts `ClprDisabled` while the kill switch `_clprEnabled`
+  is `false`.
+- `whenInitialized` — reverts `ClprNotInitialized` until `initialize(...)` has
+  run.
 
-The `_authorizedService` field is shared across all contracts via `ClprServiceStorage`
-inheritance and is set once during ClprService initialization.
+Owner checks (`onlyOwner`) are on the router stubs in `ClprService`, not in the
+modules. Two module functions do not use `onlyService`:
+`ConnectorLogic.removeConnector` (the caller must be the connector's `admin`,
+checked in `ConnectorLib.deregister`) and `AdminLogic.collectPending` (pays
+`msg.sender` from its own `_pendingWithdrawals` entry). Called directly on the
+module address, both run against the module's own empty storage and revert.
 
 ### Why functions aren't `view`
 
-Solidity 0.8 forbids `delegatecall` inside `view`. So almost every read
-function on `IClprService` is non-view at the ABI level. Off-chain callers
-use `eth_call` (a STATICCALL) and pay no gas; on-chain callers must accept the
-non-view signature. `IClprService` documents this; don't "fix" it.
+Solidity 0.8 forbids `delegatecall` inside `view`. So every storage-reading
+function on `IClprService` is non-view at the ABI level; only
+`deriveConnectorId` is `view`. Off-chain callers use `eth_call` (a STATICCALL)
+and pay no gas; on-chain callers must accept the non-view signature.
+`IClprService` documents this; don't "fix" it.
 
-### Logic contract constructors
+### Logic contract constructors and owner reads
 
-Logic contracts are stateless code fragments executed only via DELEGATECALL.
-Their constructors are empty (no initialization needed). `ClprServiceStorage`
-inherits from `OwnerAccessible`, which defines a virtual `_getOwner()` function.
-Only `ClprService` overrides this to return `owner()` (via `Ownable`); logic
-contracts inherit the base implementation. Ownership is centralized in ClprService.
+Logic contracts are stateless code executed only via DELEGATECALL. Their
+constructors are empty, and they do **not** inherit `Ownable` — only
+`ClprService` does (`ClprService is ClprServiceStorage, Ownable, IClprService`).
+
+Because `Ownable` comes after `ClprServiceStorage` in that list, `Ownable._owner`
+takes the first sequential slot after `economicConfig`: slot **38** in
+`storage-layout.json`. Modules read it with `ClprServiceStorage._getOwner()`,
+which `sload`s slot 38 directly. `_getOwner()` is the fallback recipient for
+charge and slash proceeds (`BundleLogic.submitBundle` passes it as
+`fallbackRecipient`) and authorises owner removal in `AdminLogic.removeEndpoint`.
+
+The slot number moves whenever the layout above it changes.
+`ClprStorageLayoutGuardTest` (`test/invariants/ClprStorageLayoutGuard.t.sol`)
+checks the test-side constant `ClprServiceStorageSlots.OWNER_SLOT` against the
+`_owner` slot in `storage-layout.json`; the literal in `_getOwner()` must be kept
+equal to that constant by hand.
 
 ## Public ABI dispatch table
 
-| `IClprService` function | Logic contract | Authorization | Notes |
+Every external function on `ClprService`. `IClprService` declares most of them
+but omits `closeChannel`, `redactMessage`, the two configuration updates, the
+counters (`channelCount`, `connectorCount`, `endpointCount`),
+`pendingCommitments`, `pendingConnectorCommitments`, `pendingWithdrawals` and
+`collectPending`.
+
+| `ClprService` function | Logic contract | Guards | Notes |
 |---|---|---|---|
-| `registerChannel(channelId, commitment)`, `completeChannel`, `deriveChannelId`, `getChannel`, `pendingCommitments`, `channelCount` | `ChannelLogic` | User-initiated | — |
-| `closeChannel` | `ChannelLogic` | Owner-only (`onlyOwner` + `onlyService`) | Visits pending commitments via reverse index as well as active channels |
-| `sendMessage` | `MessagingLogic` | User-initiated (`onlyService`) | — |
-| `submitBundle` | `MessagingLogic` | Endpoint-gated (`onlyService`) | Caller must be registered endpoint |
-| `redactMessage` | `MessagingLogic` | Owner-only (`onlyOwner` + `onlyService`) | — |
-| `getMessage` | `MessagingLogic` | None (view) | — |
-| `registerConnector`, `completeConnector` (payable), `removeConnector`, `topUpConnectorStake` (payable) | `ConnectorLogic` | User-initiated (`onlyService`) | — |
-| `getConnector`, `hasConnector`, `deriveConnectorId` (STATICCALL), `pendingConnectorCommitments`, `connectorCount` | `ConnectorLogic` | None (view) | — |
-| `setClprEnabled(bool)` | `AdminLogic` | Owner-only (`onlyOwner` + `onlyService`) | Never gated by kill switch so owner can always re-enable; `enabled = true` reverts (`ClprNotInitialized`) unless `initialize()` has already run |
-| `initialize(...)` | `AdminLogic` | Owner-only (`onlyOwner` + `onlyService`) | One-time bootstrap: applies ledger + economic config atomically while still disabled. Not gated by the kill switch. Reverts (`ClprAlreadyInitialized`) if called more than once |
-| `updateLedgerConfiguration`, `updateEconomicConfiguration` | `AdminLogic` | Owner-only (`onlyOwner` + `onlyService`) | Gated by kill switch — for reconfiguring an already-running service, not initial bootstrap (see `initialize`) |
-| `registerEndpoint` (payable), `removeEndpoint`, `topUpBond` (payable) | `AdminLogic` | User-initiated (`onlyService`) | — |
-| `isRegistered`, `getEndpoint`, `getLedgerConfiguration`, `getEconomicConfig`, `pendingWithdrawals`, `collectPending`, `endpointCount` | `AdminLogic` | None (view) | `collectPending` is pull-payment, non-reentrant |
-| `receive() payable {}` | router | None | Only on-router-direct logic |
+| `registerChannel(channelId, commitment)`, `completeChannel` | `ChannelLogic` | `onlyService` + `whenEnabled` | Permissionless commit-reveal; see `lifecycle.md` |
+| `deriveChannelId`, `getChannel`, `getPeerEndpointManifest`, `getPeerEndpointRoster`, `pendingCommitments`, `channelCount` | `ChannelLogic` | None (read) | `getPeerEndpointRoster` is a derived view built on the fly from the cached peer manifest (nothing is stored in that shape); prefer `getPeerEndpointManifest` |
+| `closeChannel` | `ChannelLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | ACTIVE/PAUSED → CLOSING, DRAINED → CLOSED, or purges a pending commitment through the reverse index |
+| `sendMessage` | `MessagingLogic` | `nonReentrant` + `onlyService` + `whenEnabled` | Authorised by the source connector (`IClprConnector.authorizeOutboundMessage`); stamps `msg.sender` as the sender |
+| `redactMessage` | `MessagingLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | DATA messages in the window `(ackedMessageId, nextMessageId)` only |
+| `getMessage`, `getQueueDepth` | `MessagingLogic` | None (read) | `getQueueDepth` returns `{queueDepth, maxQueueDepth}` with depth = `nextMessageId − ackedMessageId − 1` |
+| `submitBundle` | `BundleLogic` | `nonReentrant` + `onlyService` + `whenEnabled` | **Permissionless.** `msg.sender` is the bundle submitter and receives connector charges and slash proceeds. Endpoint registration does not gate it |
+| `registerConnector`, `completeConnector` (payable), `topUpConnectorStake` (payable) | `ConnectorLogic` | `onlyService` + `whenEnabled` | — |
+| `removeConnector` | `ConnectorLogic` | `nonReentrant` + `whenEnabled` | No `onlyService`; the caller must be the connector's `admin` |
+| `getConnector`, `hasConnector`, `pendingConnectorCommitments`, `connectorCount`, `deriveConnectorId` (STATICCALL) | `ConnectorLogic` | None (read) | — |
+| `setClprEnabled(bool)` | `AdminLogic` | Router `onlyOwner`; module `onlyService` + `whenInitialized` | Not gated by the kill switch, so the owner can always re-enable. Any call, `true` or `false`, reverts `ClprNotInitialized` until `initialize` has run |
+| `initialize(...)` | `AdminLogic` | Router `onlyOwner`; module `onlyService` | One-time bootstrap: applies ledger + economic config while still disabled. A second call reverts `ClprAlreadyInitialized`. Does not enable the service |
+| `updateLedgerConfiguration`, `updateEconomicConfiguration` | `AdminLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | Reconfigure a running service. A ledger update stamps `_config.nanosSinceEpoch` with `block.timestamp` in nanoseconds; each channel whose `lastConfigTimestamp` is older then enqueues a CONTROL message on its next send or bundle |
+| `registerEndpoint` (payable) | `AdminLogic` | `onlyService` + `whenEnabled` | Permissionless. Creates a **PENDING** manifest entry for the caller, escrowing `msg.value ≥ minEndpointBond`; not advertised until admitted. There is no bond top-up |
+| `addEndpoint`, `updateEndpointManifest` | `AdminLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | Admit a PENDING registration or direct-add. Capped by `throttles.maxLocalEndpoints` (`ClprEndpointManifestFull`) |
+| `removeEndpoint` | `AdminLogic` | `onlyService` + `whenEnabled` | Registrant **or** owner, else `ClprEndpointUnauthorized`. Bond credited in full to `_pendingWithdrawals`; endpoint bonds are never slashed |
+| `getEndpointManifest`, `getEndpointEntry`, `getLedgerConfiguration`, `getLedgerConfigurationHash`, `getChannelPeerConfigHash`, `getEconomicConfig`, `pendingWithdrawals`, `endpointCount` | `AdminLogic` | None (read) | `endpointCount` is the LIVE manifest size, excluding PENDING registrations |
+| `collectPending` | `AdminLogic` | `nonReentrant` | Pull payment of the caller's `_pendingWithdrawals`. Not `onlyService` and not gated by the kill switch |
+| `receive() payable {}` | router | None | Accepts ETH sent to the router, including `IClprConnector.payForExecution` payments |
 
 ## Outward-bound interfaces (the protocol calls these)
 
 | Interface | Methods | Called from |
 |---|---|---|
-| `IClprVerifier` | `verifyConfig` (during completeChannel), `verifyBundle` (during submitBundle) | `ChannelLogic._createChannel`, `BundleLib.processBundle` |
-| `IClprApplication` | `onClprMessage` (gas-bounded, return value becomes REPLY payload), `onClprResponse` (best-effort) | `BundleLib._processDataMessage`, `BundleLib._processReplyMessage` |
-| `IClprConnector` | `authorizeOutboundMessage` (during sendMessage), `payForExecution` (pull-payment during inbound DATA), `onInboundMessage` (best-effort) | `MessagingLogic._authorizeConnector`, `ConnectorLib.charge`, `BundleLib._processDataMessage` |
+| `IClprVerifier` | `verifyConfig(configProof, channelId, endpointManifestProof)` → `(channelContext, chainId, serviceAddress, peerConfigNanos, throttles, initialTrustAnchor, initialTrustAnchorId, endpointManifest)` during `completeChannel`; `verifyBundle(proofBytes, trustAnchor, channelContext)` → `(metadata, messagePayloads, newTrustAnchor, newTrustAnchorId, newEndpointManifest)` during `submitBundle`. Both are `view`, so they run as STATICCALLs | `ChannelLogic._createChannel`, `BundleLib._validateAndPrepare` |
+| `IClprApplication` | `onClprMessage` (gas-bounded; return value becomes the REPLY payload), `onClprResponse` (best-effort, gas `throttles.maxGasPerMessage`) | `BundleLib._processDataMessageDecoded`, `BundleLib._processReplyMessageDecoded` |
+| `IClprConnector` | `authorizeOutboundMessage` (during `sendMessage`), `payForExecution` (pull payment for inbound DATA), `onInboundMessage` (best-effort, gas `economicConfig.connectorInboundGasStipend`) | `MessagingLogic._authorizeConnector`, `ConnectorLib.charge`, `BundleLib._notifyConnectorInbound` |
 
 ## Storage (`ClprServiceStorage.sol`)
 
 **Hard rule:** order, names, and types here are part of the deployment ABI in
 the storage sense. Reordering breaks every existing deployment. New fields
-must be appended at the end. See `quirks.md` for why the OZ ReentrancyGuard
-namespaced slot does not interfere.
+must be appended at the end. The base `ReentrancyGuardTransient` keeps its flag
+in EIP-1153 transient storage and claims no sequential slot, so protocol fields
+start at slot 0.
 
-| Field | Type | Purpose |
-|---|---|---|
-| `_authorizedService` | address | Shared authorization field: set to ClprService address; checked by all logic module state-changing methods via `onlyService` modifier to prevent direct calls |
-| `_owner` (Ownable) | address | router owner; admin authority |
-| `_config` | `LedgerConfiguration` | protocolVersion, local chainId, serviceAddress, timestamp, throttles, seedEndpoints[] |
-| `economicConfig` | `EconomicConfig` | execution costs, margins, stake/bond minima, penalty params, gas stipend, max counts |
-| `_channels` | `mapping(bytes32 ⇒ Channel)` | keyed by channelId |
-| `_channelExists` | `mapping(bytes32 ⇒ bool)` | existence flag |
-| `_pendingCommitments` | `mapping(bytes32 ⇒ bool)` | commit-phase set; key = `keccak256(channelId‖pubKey)` |
-| `_messageQueues` | `mapping(bytes32 ⇒ mapping(uint64 ⇒ MessageValue))` | per-channel queue keyed by messageId |
-| `_connectors` | `mapping(bytes32 ⇒ Connector)` | key = `keccak256(channelId‖connectorId)` (channel-scoped!) |
-| `_connectorExists` | `mapping(bytes32 ⇒ bool)` | |
-| `_pendingConnectorCommitments` | `mapping(bytes32 ⇒ bool)` | key = `keccak256(connectorId‖pubKey)` |
-| `_connectorInflightCount` | `mapping(bytes32 ⇒ uint256)` | inner key = `keccak256(channelId‖connectorId)`; gates `removeConnector` |
-| `_connectorQueueCounts` | `mapping(bytes32 ⇒ mapping(bytes32 ⇒ uint32))` | `[channelId][keccak256(connectorId)]`; per-connector quota |
-| `_endpoints`, `_endpointExists` | `mapping(address ⇒ …)` | bonded endpoint operators |
-| `_endpointCount`, `_channelCount`, `_connectorCount` | `uint256` | counters for caps and views |
-| `_pendingWithdrawals` | `mapping(address ⇒ uint256)` | pull-payment fallback when push transfer fails |
-| `_bundleDecodeHelper` | `address` | immutable helper contract for `try/catch` around protobuf decode in BundleLib |
-| `_clprEnabled` | `bool` | global kill switch; initialized `false`; toggled by `setClprEnabled(bool)` (owner-only); enabling reverts unless `_isInitialized` is already `true` |
-| `_isInitialized` | `bool` | one-time bootstrap flag; initialized `false`; set `true` by `initialize(...)` (owner-only, once) |
-| `_channelIdToCommitment` | `mapping(bytes32 ⇒ bytes32)` | reverse index: `channelId → commitment`; populated at `registerChannel`; deleted at `completeChannel` or `closeChannel`; enables `closeChannel` to purge pending commitments |
+Listed in **slot order**, as `storage-layout.json` pins them:
+
+| Slot | Field | Type | Purpose |
+|---|---|---|---|
+| 0 | `_authorizedService` | `address` | Router address, set in the constructor; checked by `onlyService` |
+| 1 | `_messageQueues` | `mapping(bytes32 ⇒ mapping(uint64 ⇒ MessageValue))` | Per-channel outbound queue keyed by messageId. EVM verifiers prove the last message's `runningHashAfterProcessing` (`ClprEvmBundleVerifier._lastMessageRunningHashSlot`) |
+| 2 | `_bundleDecodeHelper` (offset 0), `_clprEnabled` (20), `_isInitialized` (21) | `address`, `bool`, `bool` (packed) | Decode-helper contract for `try/catch` around protobuf decode; global kill switch (starts `false`); one-time bootstrap latch |
+| 3 | `_channelCount` | `uint256` | Completed channels; checked against `economicConfig.maxChannels` |
+| 4 | `_connectorCount` | `uint256` | Live connectors; checked against `economicConfig.maxConnectors`. `BundleLib.processBundle` subtracts connectors banned during a bundle by writing this slot directly |
+| 5 | `_channelExists` | `mapping(bytes32 ⇒ bool)` | Set at `completeChannel` |
+| 6 | `_pendingCommitments` | `mapping(bytes32 ⇒ bool)` | Channel commit phase; key `keccak256(channelId ‖ pubKey)` |
+| 7 | `_connectorExists` | `mapping(bytes32 ⇒ bool)` | Key `keccak256(channelId ‖ connectorId)` |
+| 8 | `_pendingConnectorCommitments` | `mapping(bytes32 ⇒ bool)` | Connector commit phase; key `keccak256(connectorId ‖ pubKey)` |
+| 9 | `_connectorInflightCount` | `mapping(bytes32 ⇒ uint256)` | Key `keccak256(channelId ‖ connectorId)`; outbound DATA awaiting a REPLY; gates `removeConnector` |
+| 10 | `_connectorQueueCounts` | `mapping(bytes32 ⇒ mapping(bytes32 ⇒ uint32))` | `[channelId][keccak256(connectorId)]`; per-connector queue quota |
+| 11 | `_pendingWithdrawals` | `mapping(address ⇒ uint256)` | Pull-payment balances |
+| 12 | `_channelIdToCommitment` | `mapping(bytes32 ⇒ bytes32)` | Reverse index `channelId → commitment`; set at `registerChannel`, deleted at `completeChannel` or `closeChannel` |
+| 13, 14 | `_deprecatedPeerEndpointCount`, `_deprecatedPeerEndpointAccounts` | mappings | **Reserved.** Never read or written; they keep `_channels` at slot 15 |
+| 15 | `_channels` | `mapping(bytes32 ⇒ Channel)` | Keyed by channelId. EVM verifiers and relay tooling derive this base slot (`ClprEvmBundleVerifier.CHANNELS_BASE_SLOT`) |
+| 16 | `_connectors` | `mapping(bytes32 ⇒ Connector)` | Key `keccak256(channelId ‖ connectorId)` (channel-scoped!) |
+| 17–21 | `_endpointManifest` | `EndpointManifestState` | Local endpoint registry: `version` (17), `commitment` (18), `entries`, `liveAccounts`, `liveCounter`. `ManifestLib` operates on it. EVM verifiers prove slot 18 (`ClprEvmBundleVerifier.ENDPOINT_MANIFEST_COMMITMENT_SLOT`) |
+| 22 | `_peerEndpointManifests` | `mapping(bytes32 ⇒ ClprEndpointManifest)` | Cached peer manifest per channel; set at `completeChannel`, refreshed by BundleLib Step 1b; truncated to `throttles.maxPeerEndpoints` |
+| 23–30 | `_config` | `LedgerConfiguration` | `protocolVersion`, local `chainId`, `serviceAddress`, `nanosSinceEpoch`, `throttles`, `trustAnchor`, `trustAnchorId` |
+| 31–37 | `economicConfig` | `EconomicConfig` | Execution cost, margin, stake/bond minima, penalty params, queue quota, inbound gas stipend, channel/connector caps |
+| 38 | `_owner` | `address` | `Ownable` owner (router only); read by `_getOwner()` |
 
 > ⚠ Two distinct hashes for connector lookup coexist. The `Connector` record
-> key is `keccak256(channelId‖connectorId)`. The inner key for
-> `_connectorQueueCounts` is `keccak256(connectorId)` *only* (the outer
-> mapping already keys by channelId). Mixing them up silently corrupts
-> accounting.
+> key (and the `_connectorInflightCount` key) is `keccak256(channelId‖connectorId)`.
+> The inner key for `_connectorQueueCounts` is `keccak256(connectorId)` *only*
+> (the outer mapping already keys by channelId). Mixing them up silently
+> corrupts accounting.
 
 ## Key data structures (in `ClprTypes.sol`)
 
-- **`Channel`** — slot-packed: `channelId`(s0), `verifier+status+nextMessageId`(s1), two `uint64` counters (`ackedMessageId`, `receivedMessageId`) and two `uint96` nanos timestamps (`peerConfigTimestamp`, `lastConfigTimestamp`)(s2), three `bytes32` (`sentRunningHash`, `receivedRunningHash`, `ownershipCommitment`)(s3-5), `salt`, then dynamic `chainId` (peer chain), `peerServiceAddress`, `peerThrottles` (populated at `completeChannel` from `IClprVerifier.verifyConfig`; also updated when an inbound CONTROL message carries a new peer config — see `BundleLib._processControlMessage`), `trustAnchor` (populated from verifier at `completeChannel`; updated on trust-anchor rotation by `verifyBundle`). Lifecycle and status semantics are normative — see spec §2.1.1. **Public-key encoding:** 64-byte uncompressed secp256k1 (X‖Y, no 0x04 prefix) — see `quirks.md` "EVM pubkey encoding" for why 33-byte compressed is not supported on EVM in v1.
-- **`Connector`** — `connectorId`, `connectorContract`, `admin`, `lockedStake`, `slashCount`. Operating funds for execution charges live as native balance on `connectorContract`; `lockedStake` is the slashable bond held in the router.
-- **`MessageValue`** — protobuf payload + `runningHashAfterProcessing`. Redaction zeros the payload while keeping the slot (so subsequent running-hash continuity holds).
-- **`Endpoint` vs `RegisteredEndpoint`** — the former is the off-chain seed-list entry embedded in `LedgerConfiguration`; the latter is the on-chain bonded operator (with bond and slashCount).
-- **`QueueMetadata`** — return shape from `IClprVerifier.verifyBundle`. Enum value order is wire-compatible with the on-chain encoder; the canonical proto enum for `ChannelStatus` is not yet pinned in the spec (see clpr-spec issue tracking S-1) — the EVM service uses the ordering defined in `ClprTypes.ChannelStatus`.
+- **`Channel`** — the stored per-channel record in `_channels`, returned as-is
+  by `getChannel`. Member slots, from `storage-layout.json`:
+
+  | Slot | Members | Notes |
+  |---|---|---|
+  | +0 | `channelId` | |
+  | +1 | `verifier` (offset 0), `status` (20), `nextMessageId` (21) | `nextMessageId` is the next outbound id; starts at 1 |
+  | +2 | `ackedMessageId` (0), `receivedMessageId` (8), `nextExpectedReplyId` (16) | Highest outbound id the peer acked; highest inbound id processed; oldest outbound DATA id still owed a REPLY (cross-bundle response ordering) |
+  | +3 | `peerConfigTimestamp` (0), `lastConfigTimestamp` (12) | `uint96` nanoseconds. Peer config timestamp: from `verifyConfig`, then from each accepted inbound CONTROL. Local config timestamp the channel is current with: completion time, then each CONTROL it enqueues |
+  | +4, +5 | `sentRunningHash`, `receivedRunningHash` | Outbound and inbound SHA-256 chains |
+  | +6, +7 | `ownershipCommitment`, `salt` | From the commit-reveal |
+  | +8 … +12 | `chainId` (peer), `peerServiceAddress`, `peerThrottles` (2 slots), `trustAnchor` | Set from `IClprVerifier.verifyConfig` at `completeChannel`. `peerThrottles` is updated by inbound CONTROL (`BundleLib._processControlMessageDecoded`); `trustAnchor` is rotated by `verifyBundle` |
+  | +13 | `lastDataMessageId` | Highest outbound DATA id; gates CLOSING → DRAINED |
+  | +14, +15 | `trustAnchorId`, `channelContext` | `channelContext` is the opaque `ChannelContext{channelId, remoteServiceAddress}` from `verifyConfig`, passed to every `verifyBundle` |
+  | +16 | `endpointManifestVersion` | Version of the cached peer manifest in `_peerEndpointManifests`; `0` = no manifest cached |
+
+  `ClprEvmBundleVerifier._channelMetadataSlots` proves members +1, +2, +4, +5
+  and +16 of a peer's `Channel`. Moving any of those fields breaks every EVM
+  verifier that reads this layout. Status semantics are in `lifecycle.md`.
+  **Public-key encoding:** 64-byte uncompressed secp256k1 (X‖Y, no 0x04
+  prefix) — see `quirks.md` "EVM pubkey encoding is 64-byte uncompressed".
+- **`Connector`** — `connectorId`, `connectorContract`, `admin`, `lockedStake`,
+  `slashCount`. Operating funds for execution charges live as native balance on
+  `connectorContract`; `lockedStake` is the slashable bond held in the router.
+- **`MessageValue`** — protobuf `payload`, `runningHashAfterProcessing`, and
+  `connectorIdForReply` (the connectorId of an outbound DATA message, so REPLY
+  processing can decrement counters and slash source-side even after redaction;
+  `bytes32(0)` for CONTROL/REPLY). Redaction replaces the payload with
+  `ClprRedactedMessage { message_hash: sha256(original) }` and keeps the slot,
+  its id and its `runningHashAfterProcessing`.
+- **`QueueMetadata`** — `{nextMessageId, sentRunningHash, receivedMessageId,
+  receivedRunningHash, state, endpointManifestVersion}`, the peer's view of the
+  channel as returned by `verifyBundle`. `BundleLib` reads `nextMessageId`
+  (one past the bundle's last message), `sentRunningHash` (the chain through
+  that message), `receivedMessageId` (the peer's ack of our messages) and
+  `state` (the peer's status). For an EVM peer,
+  `ClprEvmBundleVerifier._buildQueueMetadata` decodes all six from the peer's
+  proven `Channel` slots. `ClprTypes.ChannelStatus` values match the proto
+  `ClprChannelStatus` enum; the spec does not define that enum
+  (DRIFT-REVIEW S-1).
+- **`Endpoint` / `EndpointManifestEntry` / `ClprEndpointManifest`** —
+  `Endpoint {ipAddress, port, tlsCertificate, accountId}` is the discovery
+  record advertised in a manifest. `EndpointManifestEntry {endpoint, bond,
+  status}` is a local registration, `status` ∈ `EndpointStatus.{NONE, PENDING,
+  LIVE}`. `ClprEndpointManifest {version, serviceAddress, endpoints[]}` is the
+  published, provable set; `version ≥ 1`, with `0` as the "absent" sentinel.
+  `EndpointManifestState` holds the local entries plus the ordered
+  `liveAccounts` and the `commitment`. `ManifestUpdateEntry` is one addition in
+  an `updateEndpointManifest` batch. `PeerEndpoint` is the derived view shape
+  returned by `getPeerEndpointRoster`.
+- **`LedgerConfiguration`** — the local config sent to peers in CONTROL
+  messages. It carries no endpoints; the endpoint set lives in
+  `_endpointManifest`.
+- **`EconomicConfig`** — `messageExecutionCost` is stored but no contract in
+  `src/` reads it; inbound execution is charged by measured gas (see
+  `bundle-flow.md`).
 
 ## Library responsibilities
 
 | Library | Responsibility | Takes storage refs? |
 |---|---|---|
-| `BundleLib` | Bundle processing pipeline (spec §4.2 + §4.5) | yes — heavy |
-| `ConnectorLib` | Connector commit-reveal, charge, slash, pull-payment fallback | yes |
-| `EndpointLib` | Endpoint bond accounting | yes |
-| `ClprProtobuf` + `…Helpers` | Hand-rolled proto codec for DATA / REPLY / CONTROL / BundleContent | no (pure) |
-| `ClprTypes` | Enums, structs, custom errors, and *file-scope events* `ChannelStatusChanged` and `MessageQueued` (declared at file scope so router and libs share one ABI selector) | no |
+| `BundleLib` | `libraries/service/` — bundle processing pipeline (`bundle-flow.md`) | yes — heavy |
+| `ConnectorLib` | `libraries/service/` — connector reveal, charge, slash, `_transferWithFallback` | yes |
+| `ManifestLib` | `libraries/service/` — local endpoint manifest: register / admit / remove / batch update, version bump, commitment sync | yes (`EndpointManifestState`) |
+| `EndpointValidation` | `libraries/service/` — validation of endpoint IP addresses and DER TLS certificates | no (pure) |
+| `ClprProtobuf` + `ClprProtobufHelpers` | `libraries/codec/` — hand-rolled proto codec for DATA / REPLY / CONTROL / REDACTED, `ClprBundleContent`, and the endpoint manifest. Decoders revert `TruncatedInput` / `VarintOverflow` on malformed input and `ClprUnknownWireField` on unknown fields | no (pure) |
+| `ClprConfigHash` | `libraries/codec/` — digests behind `getLedgerConfigurationHash` and `getChannelPeerConfigHash` | no (pure) |
+| `BundleDecodeHelper` | `libraries/codec/` — a deployed **contract**, not a library: exposes `decodeData` / `decodeReply` / `decodeControl` as external calls so `BundleLib._dispatchMessages` can `try/catch` a decode | n/a |
+| `ECDSA` | `libraries/crypto/` — EIP-191 `ecrecover` check against the `keccak256(pubKey)`-derived address, for channel and connector reveals | no |
+| `ClprTypes` | `libraries/` — enums, structs, custom errors, and *file-scope events* `ChannelStatusChanged` and `MessageQueued` (declared at file scope so router and libs share one ABI selector) | no |
+
+The proof libraries under `libraries/proof/` serve the verifiers, not the
+service.
 
 ## Native-token (ETH) flows
 
-- **In:** `registerEndpoint` / `topUpBond` (endpoint bond), `completeConnector` / `topUpConnectorStake` (connector stake), and `payForExecution` (pull-payment from connector contract during inbound DATA).
-- **Out:** slash / charge proceeds → bundle submitter (or `_fallbackRecipient = owner`, then `_pendingWithdrawals` if both reject); `removeConnector` returns remaining stake; `removeEndpoint` returns remaining bond.
-- **Charge verification** is by router-balance delta in `ConnectorLib.charge`: after `payForExecution(amount)` the router must have gained exactly `amount`. If not, the connector is slashed.
-- **`_pendingWithdrawals`** is the safety net: if a push transfer reverts (recipient is a contract that rejects), the amount is credited to a pull queue claimable via `collectPending()`.
+- **In:** `registerEndpoint` (endpoint bond, once per registration),
+  `completeConnector` / `topUpConnectorStake` (connector stake), and
+  `payForExecution` (pull payment from the connector contract during inbound
+  DATA, received by `receive()`).
+- **Out:** charge and slash proceeds → bundle submitter, else the fallback
+  recipient `_getOwner()`, else credited to the submitter's `_pendingWithdrawals`
+  (`ConnectorLib._transferWithFallback`). `removeConnector` **pushes** the
+  remaining stake to `recipient` and reverts `ClprTransferFailed` if the push
+  fails. `removeEndpoint` and the removals in `updateEndpointManifest`
+  **credit** the bond to `_pendingWithdrawals[registrant]` — never a push, so a
+  rejecting contract cannot block its removal. `collectPending` pays out a
+  `_pendingWithdrawals` balance.
+- **Charge verification** is by router-balance delta in `ConnectorLib.charge`:
+  after `payForExecution(amount)` the router must have gained exactly `amount`.
+  If not, the charge fails and the connector is slashed.
+- **`_pendingWithdrawals`** is the safety net: when both push transfers reject,
+  the amount is credited to a pull balance claimable via `collectPending()`.

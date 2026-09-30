@@ -27,7 +27,7 @@ clpr-smart-contracts-<version>/
 
 Packaged contracts: `ClprService`, the five logic modules (`ChannelLogic`,
 `MessagingLogic`, `BundleLogic`, `ConnectorLogic`, `AdminLogic`), `BundleDecodeHelper`,
-and the production verifiers (`QBFTVerifier` together with the two mode verifiers it routes to,
+and the production verifiers (the legacy `QBFTVerifier` and the two QBFT mode verifiers,
 `QbftHeaderModeVerifier` and `QbftContractModeVerifier`; `HieroVerifier`, `TSSVerifier`,
 `EthMainnetVerifier`, `SeiCometBftVerifier`, `Ed25519Verifier`).
 

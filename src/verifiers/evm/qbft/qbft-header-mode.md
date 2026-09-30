@@ -1,8 +1,8 @@
 # QBFT validators - Header mode
 
-A QBFT chain in header mode lists its validator set in every block header. The Header-mode QBFT
-verifier reads the validator set from `extraData` of the header. Nothing else is needed to know who
-may seal a block.
+A QBFT chain in header mode lists its validator set in every block header.
+`QbftHeaderModeVerifier` reads the validator set from the header's `extraData`. Nothing else is
+needed to know who may seal a block.
 
 The verifier supports:
 
@@ -12,7 +12,8 @@ The verifier supports:
   member, and must be sealed by (almost) a quorum of the set the verifier already trusts.
 
 One channel keeps one mode for its full life. The trust anchor starts with a mode byte; Header mode
-is mode `0`.
+is mode `0`. The shared payload, storage proof and revert catalogue are in
+[qbft-verifier.md](qbft-verifier.md).
 
 ## 1. How this mode works
 
@@ -24,21 +25,24 @@ extraData = RLP([vanity(32), validators[], vote, round, committedSeals[]])
 
 Two fields matter:
 
-- `validators[]` — the set of **this** block. Besu uses it to seal it.
-- `committedSeals[]` — the seals of **this** block, made by the set that was current before it.
+- `validators[]` — the validator set this header lists.
+- `committedSeals[]` — the validators' seals over this header.
+
+A **rotation** is a vote that adds or removes a member. Besu applies at most **one** change per
+block. So two neighbouring headers list sets that differ by at most one member. The **change block**
+is the first header whose `validators[]` lists the new set.
 
 ```mermaid
 flowchart LR
-  A["block N-1<br/>validators[] = S_old<br/>seals by: S_old"] --> B["block N<br/>vote applied<br/>validators[] = S_old<br/>seals by: S_old"]
-  B --> C["block N+1 (change block)<br/>validators[] = S_new<br/>seals by: S_new"]
+  A["block N-1<br/>validators[] = S_old<br/>sealed by S_old"] --> B["block N (change block)<br/>validators[] = S_new<br/>its seals must link S_old to S_new<br/>(the rule for a header, below)"]
+  B --> C["block N+1<br/>validators[] = S_new<br/>sealed by S_new"]
 ```
 
-A **rotation** is a vote that adds or removes a member. Besu applies at most **one** change per
-block. So two neighbouring headers list sets that differ by at most one member.
-
 The verifier does not check every block. It checks the headers the relay sends: the **hops** and
-the **current block**. So the relay must send one hop for every change block: each accepted header
-may move the trusted set by one member, and it must be sealed by the set that was trusted before it.
+the **current block**. Each accepted header may move the trusted set by one member, and it must be
+sealed by the set that was trusted before it. So the relay sends one hop for every change block
+between the anchor block and the current block. The current header may itself be the one change
+block.
 
 ## 2. The rule for a header
 
@@ -108,13 +112,18 @@ flowchart LR
 | 10 | 7 | 6 |
 | 21 | 14 | 13 |
 
-A set of one, two or three has no fault tolerance: one old key is enough to move it. QBFT itself
-gives such sets no fault tolerance either.
+A set of one or two has no fault tolerance: one old key is enough to move it (with the newcomer's
+key, for an addition). A set of three needs two signers for any change, and two is already its full
+quorum. QBFT itself gives sets of this size no fault tolerance either.
+
+`ClprQbftQuorum.verifyRotationStep` applies the three rules, and `trustLinkRequired` gives the rule 2
+threshold.
 
 ## 3. Who builds what
 
 The relay builds the **proof bytes** for each bundle. The relay also builds the **config proof** one
-time, at channel setup. The verifier builds and stores the **trust anchor**.
+time, at channel setup. The verifier builds the **trust anchor**, and `ClprService` stores it on the
+channel.
 
 ```mermaid
 sequenceDiagram
@@ -135,16 +144,22 @@ sequenceDiagram
   S->>S: store the new anchor
 ```
 
-**Relay rule:** track two things. First, the anchor **id** (`newTrustAnchorId`): a **block number**
-(8 bytes, big-endian). Use it as a cut-off when you select change blocks for the next proof.
-Second, the **member list at that block**: the anchor stores only a hash of it, and every bundle
-must carry the full list. Read the list from `extraData.validators` of the anchor block header.
+`verifyBundle` returns a new anchor only when the set changed or the bundle crossed hops; otherwise
+`newTrustAnchor` and `newTrustAnchorId` are empty and `ClprService` keeps the stored anchor.
 
-## 4. The trust anchor (the verifier remembers this)
+**Relay rule:** track two things. First, the anchor **id** (`newTrustAnchorId`): a **block number**
+(8 bytes, big-endian). Use it as a cut-off when you select change blocks for the next proof. Every
+hop and the current block must be after it. Second, the **member list at that block**: the anchor
+stores only a hash of it, and a bundle carries the full list unless it uses the empty-list shortcut
+(see [Field 1](#field-1-the-trusted-set-and-the-hops)). Read the list from `extraData.validators` of
+the anchor block header.
+
+## 4. The trust anchor (ClprService stores this)
 
 The anchor is an `abi.encode` value. Word 0 is always the mode. The anchor stores **one hash of the
 trusted set**, not the list. A list of tens of validators in storage would be too expensive. The
-**relay sends the full list in every bundle**, and the verifier compares its hash with the anchor.
+**relay sends the full list in the bundle**, or an empty list when the current header lists the same
+set, and the verifier compares the list's hash with the anchor.
 
 ```mermaid
 flowchart LR
@@ -172,12 +187,13 @@ full list always present, one hash is cheaper than member proofs.
 | 2 | codeHash | bytes32 | the CLPR service code hash. Pins the account |
 | 3 | anchorBlockNumber | uint64 | the block whose header listed this set |
 
-Encoded as `abi.encode(uint8, bytes32, bytes32, uint64)`, 128 bytes. The anchor has a fixed size,
-for any set size.
+Encoded as `abi.encode(uint8, bytes32, bytes32, uint64)`, 128 bytes (`_encodeHeaderAnchor`). The
+anchor has a fixed size, for any set size. `_decodeTrustAnchor` reverts `InvalidTrustAnchor` on any
+other length and `UnknownValidatorMode(mode)` when word 0 is not `0`.
 
 ## 5. The bundle proof bytes (the relay builds this)
 
-The bundle proof is one RLP list. It has 7 fields.
+The bundle proof is one RLP list of 5 fields, or 7 when it carries an endpoint-manifest update.
 
 ```mermaid
 flowchart TB
@@ -206,11 +222,13 @@ Field 1 is an RLP list of 2 items.
 
 | Item | Name | What it holds |
 |------|------|---------------|
-| 0 | trusted set | the full member list behind the anchor's `setCommitment` (sort + dedup, the hash must equal it). An RLP list of non-zero 20-byte address items, each the fixed 21-byte item Besu writes. **May be an empty list** when no rotation is crossed, see below |
+| 0 | trusted set | the full member list behind the anchor's `setCommitment` (sort + dedup, the hash must equal it). An RLP list of at most 256 non-zero 20-byte address items, each the fixed 21-byte item Besu writes. **May be an empty list** when the current header lists the anchor's set, see below |
 | 1 | hops | a list of block headers. Empty when no rotation occurred |
 
-A **hop** is one block header. Nothing else. The header's `extraData` holds both the new set
-(`validators[]`) and the seals that prove it.
+Any other item count in field 1 reverts `InvalidPayloadShape`.
+
+A **hop** is one block header (at least 15 fields). Nothing else. The header's `extraData` holds
+both the new set (`validators[]`) and the seals that prove it.
 
 ```mermaid
 flowchart TB
@@ -222,11 +240,12 @@ flowchart TB
 
 **Skipping the trusted set.** When no rotation is crossed, the current header already lists the
 trusted set in its own `extraData.validators`. The relay may then send item 0 as an **empty list**
-(`0xc0`) and save the calldata. The verifier takes the current header's list instead, sorts it, and
-checks its hash against the anchor exactly as it would check a submitted list. If the header lists a
-different set, the hash does not match and the bundle reverts `WrongSetCommitment`. So the shortcut
-is only valid with an empty hop list: a bundle with hops has a current header that lists the set
-**after** the rotation, and that set never hashes to the anchor.
+(`0xc0`) and save the calldata (`_trustedSet`). The verifier takes the current header's list
+instead, sorts it, and checks its hash against the anchor exactly as it would check a submitted
+list. If the header lists a different set, the hash does not match and the bundle reverts
+`WrongSetCommitment`. So the shortcut works only when the current header lists the anchor's set:
+in practice, a bundle with no hops whose current header is not a change block. `GAS_REPORT.md`
+measures the saving.
 
 ```mermaid
 flowchart LR
@@ -243,27 +262,29 @@ An empty **byte string** (`0x80`) is not the shortcut: it is a malformed list an
 
 **Rules for the hops:**
 
-1. Put the hops in ascending block order. No repeats.
+1. Put the hops in ascending block order. No repeats (`HandoffHeaderNotAscending`).
 2. Include only hops with a block number after the anchor id.
-3. Each hop must pass the rule of §2 against the set trusted at that point.
-4. Include a hop for **every** change block. A hop moves the trusted set by one member at most, so
-   two changes need two hops. A header that lists the trusted set again is a valid hop too; it only
-   advances the anchor block.
+3. Each hop must pass [the rule for a header](#2-the-rule-for-a-header) against the set trusted at
+   that point.
+4. Include a hop for **every** change block after the anchor block and before the current block. A
+   hop moves the trusted set by one member at most, so two changes need two hops. A header that lists
+   the trusted set again is a valid hop too; it only advances the anchor block. The current header
+   may carry one more change itself, with no hop.
 5. If no change occurred, send an empty hop list. This is the normal case. You may then also send
    the trusted set as an empty list (see above).
+6. The current block must be after the last hop (`CurrentHeaderBehindWalk`).
 
 **How to detect a change.** Compare `extraData.validators` of two consecutive headers. When they
 differ, the later block is a change block. `eth_getBlockByNumber` returns the header; Besu also
 offers `qbft_getValidatorsByBlockNumber`.
 
 **Which header to send for a change.** Send the header whose `validators[]` already lists the new
-set: the change block `N` itself. Its seals come from the set around the change, so rule 2 is
-satisfied by the previous set (`q − 1` of it, plus the newcomer when one joined), and rule 3 counts
-the new list.
+set: the change block `N` itself. Rule 2 counts its signers against the previous set (`q − 1` of
+it, plus the newcomer when one joined), and rule 3 counts them against the new list.
 
 ```mermaid
 flowchart LR
-  T["trusted set T"] -->|"rule 1: V_N = T ± one member<br/>rule 2: q − 1 of T sealed N"| N["change block N<br/>validators[] = V_N"]
+  T["trusted set T"] -->|"rule 1: V_N = T ± one member<br/>rule 2: q − 1 (or q) of T sealed N"| N["change block N<br/>validators[] = V_N"]
   N -->|"rule 3: 2/3 of V_N sealed N"| T2["trusted set := V_N"]
 ```
 
@@ -279,7 +300,7 @@ flowchart TB
   CP --> F2["2: peer config nanos"]
   CP --> F3["3: throttles (list of 5 or 7)"]
   CP --> F4["4: trust anchor descriptor (byte string)"]
-  CP --> F5["5: block header (list of 15-22)"]
+  CP --> F5["5: block header (list of 15 or more)"]
 ```
 
 ### 6.1 Top-level fields
@@ -288,12 +309,12 @@ flowchart TB
 |-------|------|----------|------|-------|
 | 0 | service address | byte string | 20 bytes | the peer CLPR service address |
 | 1 | chain id | byte string | any | UTF-8, for example `eip155:1` |
-| 2 | peer config nanos | scalar | ≤ 12 bytes (uint96) | the config time |
-| 3 | throttles | list | 5 or 7 scalars | see 6.2 |
-| 4 | trust anchor descriptor | byte string | any | wraps the RLP list of 6.3 |
-| 5 | block header | list | 15 to 22 items | see 6.4 |
+| 2 | peer config nanos | scalar | ≤ 32 bytes, truncated to `uint96` | the config time |
+| 3 | throttles | list | 5 or 7 scalars | see the throttles table below |
+| 4 | trust anchor descriptor | byte string | any | wraps the descriptor list below |
+| 5 | block header | list | 15 items or more | see the block header table below |
 
-Any other count reverts `InvalidProofPayloadShape`.
+Any other count reverts `InvalidProofPayloadShape`; empty config bytes revert `InvalidPayloadShape`.
 
 ### 6.2 Field 3: throttles
 
@@ -326,7 +347,8 @@ Any other item count reverts `InvalidTrustAnchorFields`.
 
 ### 6.4 Field 5: the block header
 
-A Besu block header as the node returns it: an RLP list of 15 to 22 items. The verifier reads three
+A Besu block header as the node returns it: an RLP list of at least 15 items (`InvalidConfigHeader`
+otherwise; `verifyConfig` sets no upper bound). The verifier reads three
 of them.
 
 | Index | Name | Used for |
@@ -363,14 +385,14 @@ is self-consistent: the set it lists did seal it.
 
 | Output | Value |
 |--------|-------|
-| channelContext | `abi.encode(channelId, serviceAddress)` |
+| channelContext | `channelId ‖ serviceAddress` (`ClprTypes.encodeChannelContext`, `abi.encodePacked`) |
 | chainId | field 1 as a string |
 | serviceAddress | field 0 |
 | peerConfigNanos | field 2 |
 | throttles | field 3 decoded |
-| initialTrustAnchor | 128 bytes, see §4: mode 0, hash of the sorted set, codeHash, header number |
+| initialTrustAnchor | 128 bytes, the [trust anchor](#4-the-trust-anchor-clprservice-stores-this): mode 0, hash of the sorted set, codeHash, header number |
 | initialTrustAnchorId | header number, 8 bytes big-endian |
-| endpointManifest | from `endpointManifestProofBytes`, see 6.6 |
+| endpointManifest | from `endpointManifestProofBytes`, see below |
 
 ### 6.6 The endpoint manifest proof (second argument)
 
@@ -382,61 +404,77 @@ RLP([blockHeader, accountProof, manifestStorageProof, manifestPreimage])
 
 | Item | Name | Value |
 |------|------|-------|
-| 0 | blockHeader | a header sealed by a quorum of the initial set (rule 3 of §2 only, with `V_H` = the set listed in field 5) |
-| 1 | accountProof | the peer service account under `blockHeader.stateRoot` |
-| 2 | manifestStorageProof | one entry: the manifest commitment slot |
+| 0 | blockHeader | a header of at least 15 fields, sealed by a quorum of the initial set (the set listed in field 5). Its own `validators[]` is not read |
+| 1 | accountProof | the peer service account under `blockHeader.stateRoot`; no code-hash pin at config time |
+| 2 | manifestStorageProof | storage proof of the manifest commitment slot (slot 18) |
 | 3 | manifestPreimage | the `ClprEndpointManifest` protobuf; its `keccak256` must equal the proven slot |
 
 ## 7. How the verifier checks a bundle
 
+`QbftHeaderModeVerifier.verifyBundle`, with the walk in `_walkHeaders`:
+
 ```mermaid
 flowchart TB
-  A["decode anchor<br/>setCommitment, codeHash, anchorBlockNumber"] --> A2["open the commitment:<br/>sort + hash the submitted list<br/>(or the current header's list when item 0 is empty),<br/>must equal setCommitment"]
+  A["decode anchor<br/>setCommitment, codeHash, anchorBlockNumber"] --> A1["decode the current header's extraData once:<br/>its validators[] (sorted) and its seals"]
+  A1 --> A2["open the commitment:<br/>sort + hash the submitted list<br/>(or the current header's list when item 0 is empty),<br/>must equal setCommitment"]
   A2 --> B["for each hop:<br/>block number must ascend past the anchor,<br/>one change at most (rule 1),<br/>q − 1 or q of the trusted set (rule 2),<br/>2/3 of the hop's own list (rule 3),<br/>trusted set := the hop's list"]
-  B --> C["current block:<br/>the same rule against the final trusted set"]
-  C --> D["read the set from the current header:<br/>validators[] in extraData"]
-  D --> E["verify the service account<br/>pin the codeHash -> storage root"]
+  B --> C["current block:<br/>after the last hop,<br/>the same rule against the final trusted set"]
+  C --> E["verify the service account<br/>pin the codeHash -> storage root"]
   E --> F["verify the channel slots,<br/>decode the bundle content"]
-  F --> G["rotate: if validators[] differs from the anchor,<br/>store it, id = current block number"]
+  F --> G["new anchor if the current list differs from the<br/>anchor's set, or any hop was crossed:<br/>id = current block number"]
 ```
 
-**Quorum** means: recover every seal, keep the signers that are in the set, and count the distinct
-ones. The count must be at least `ceil(2N/3)`. This matches Besu.
+**Quorum** means: recover the seals in order, keep the signers that are in the set, and count the
+distinct ones. The count must be at least `ceil(2N/3)`. This matches Besu. The loop stops once the
+count is reached, so later seals are not recovered.
 
 **The change** is found by one merge pass over the two sorted lists: members only in the header's
 list were added, members only in the trusted set were removed. More than one in total reverts
 before any seal is recovered.
 
-**Recover once, count twice.** Each seal is one `ecrecover`. Recover every seal once, then count the
-recovered addresses against both sets, and note whether the added member is among them. Rules 2
-and 3 must not pay for the seals twice. When the lists are equal, only one set is counted.
+**Recover once, count twice.** Each seal is one `ecrecover`. `_countSealers` recovers each seal
+once, counts the recovered address against both sets, and notes whether it is the added member.
+Rules 2 and 3 do not pay for the seals twice. It stops once both sets have a full quorum of signers.
+When the lists are equal, only one set is counted.
 
-The current header's `validators[]` becomes the new trusted set whenever it differs from the anchor.
-One bundle can cross many rotations, one hop for each change block.
+**Decode once.** `ClprQbftSeal.decodeHeader` decodes each header's `extraData` once and returns the
+validator list, the seals and the sealing digest together.
+
+The current header's `validators[]` becomes the new trusted set whenever it differs from the
+anchor's set. A bundle that crossed hops returns a new anchor even when the set nets to the anchor's
+set: the commitment stays, and the anchor block moves to the current block, so the hops cannot be
+replayed. With no change and no hops, `newTrustAnchor` and `newTrustAnchorId` are empty. One bundle
+can cross many rotations, one hop for each change block.
 
 ## 8. What can go wrong
 
 | Selector | Cause |
 |---|---|
-| `WrongSetCommitment(got, expected)` | the submitted list does not hash to the anchor; or item 0 was empty and the current header's list does not (a rotation was crossed without hops, or with hops but without the trusted set) |
+| `WrongSetCommitment(got, expected)` | the submitted list does not hash to the anchor; or item 0 was empty and the current header lists another set (it is a change block, or the bundle crossed hops) |
 | `TooManySetChanges(added, removed)` | rule 1 failed: the header's list differs from the trusted set by more than one member |
 | `TrustLinkNotReached(got, required)` | rule 2 failed: too few members of the trusted set sealed the header |
-| `QuorumNotReached(got, required)` | rule 3 failed on a hop or on the current block |
+| `QuorumNotReached(got, required)` | rule 3 failed on a hop or on the current block, or the plain quorum check failed (list equal to the trusted set, the config header, the manifest header) |
 | `HandoffHeaderNotAscending(got, lastSeen)` | hops out of order, or a hop at or before the anchor block |
-| `CurrentHeaderBehindWalk(got, lastSeen)` | the current block is not after the last hop |
+| `CurrentHeaderBehindWalk(got, lastSeen)` | the current block is not after the last hop, or after the anchor block when there are no hops |
 | `EmptyValidatorSet()` | a header lists no validators |
-| `InvalidHeader()` | a header's `validators[]` item is not a list of 20-byte addresses |
-| `InvalidTrustedSet()` | bundle field 1 item 0 is not a list of 20-byte addresses (an empty byte string included) |
-| `InvalidPayloadShape()` | bundle field 1 is not a list of 2 items, or a hop is not a header |
+| `ValidatorSetTooLarge(n)` | a header or the trusted list has more than 256 members |
+| `EmptySeals()` | a header carries no committed seals |
+| `InvalidHeader()` | a header's `validators[]` item is not a list of non-zero 21-byte address items; the current header is outside [15, 22] fields; a hop has fewer than 15 fields |
+| `InvalidTrustedSet()` | bundle field 1 item 0 is not a list of non-zero 21-byte address items (an empty byte string `0x80` included) |
+| `InvalidPayloadShape()` | the payload is not 5 or 7 fields; bundle field 1 is not a list of 2 items; empty config bytes |
+| `InvalidTrustAnchor()` / `UnknownValidatorMode(mode)` | the anchor is not 128 bytes, or word 0 is not `0`; also a descriptor mode other than `0` |
+| `InvalidProofPayloadShape()` | the config proof is not 6 fields, or the manifest proof is not 4 items |
+| `InvalidConfigHeader()` / `InvalidConfigThrottleFieldCount()` / `InvalidTrustAnchorFields()` | config or manifest header below 15 fields; throttles not 5 or 7 items; descriptor not 2 items |
 
 Errors from the seal parser, the service account proof and the channel proof are listed in
-`qbft-verifier.md`.
+[qbft-verifier.md](qbft-verifier.md#7-reverts).
 
 ## 9. A mode change on the chain is not supported
 
 A chain can move between header mode and a validator contract at some block. Besu calls this a
-transition. There is no on-chain proof of a transition. **A channel never changes its verifier.**
-If the chain makes a transition:
+transition. There is no on-chain proof of a transition. **A channel never changes its verifier**:
+`completeChannel` sets `Channel.verifier` once, and only `verifyConfig` and `verifyBundle` results
+ever write `Channel.trustAnchor`. If the chain makes a transition:
 
 1. Stop the bundles on the old channel.
 2. Establish a new channel, with a config proof for the new mode.

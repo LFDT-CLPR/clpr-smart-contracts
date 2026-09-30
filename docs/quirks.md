@@ -5,27 +5,56 @@ when something looks weird and you're tempted to "clean it up."
 
 ## DELEGATECALL router with shared layout
 
-- `ClprService` has no logic of its own. All four `logic/*` contracts inherit
-  `ClprServiceStorage` in identical position so storage slots line up.
-- Logic contracts' own `Ownable._owner` slot is **dead** — they're only ever
-  DELEGATECALL'd; the only state that matters is the router's. Don't try to
-  set or use logic-contract owners.
-- The system is **not upgradeable**. Logic addresses are `immutable`.
-- Reason: EIP-170 24KB code size limit. Not a proxy pattern.
+- `ClprService` has no protocol logic of its own. All five `logic/*` contracts
+  (`ChannelLogic`, `MessagingLogic`, `BundleLogic`, `ConnectorLogic`,
+  `AdminLogic`) inherit `ClprServiceStorage` through `logic/base/LogicModuleBase.sol`,
+  so every contract sees identical storage slots.
+- Logic contracts do **not** inherit `Ownable` — only the router does. Owner
+  checks are the router's `onlyOwner` modifier, evaluated before it delegates.
+  Code running inside a module that needs the owner (`AdminLogic.removeEndpoint`,
+  the `fallbackRecipient` in `BundleLogic.submitBundle`) calls
+  `ClprServiceStorage._getOwner()`, which `sload`s a hard-coded slot and is
+  meaningful only in the router's storage context.
+- The system is **not upgradeable**. The five logic addresses are `immutable` on
+  the router. `_bundleDecodeHelper` is a storage variable instead (slot 2),
+  written once in the constructor with no setter: `BundleLogic` reads it under
+  DELEGATECALL, and module code cannot see the router's immutables.
+- Reason: contract-size limits. EIP-170's 24KB runtime cap drives the module
+  split, and EIP-3860's 49152-byte initcode cap is why the modules and
+  `BundleDecodeHelper` are deployed separately and passed into the nine-argument
+  constructor instead of being created by it (see the `foundry.toml` comment on
+  `evm_version`). Not a proxy pattern.
 
 ## No `view` annotations on read functions
 
-Solidity 0.8 forbids `delegatecall` inside `view`. So `getChannel`,
-`getMessage`, etc. are non-view at the ABI level. Off-chain readers via
-`eth_call` pay nothing. Don't "fix" this. `deriveConnectorId` is the
-exception (uses STATICCALL via `_staticDelegate`) because it's truly `pure`.
+Solidity 0.8 forbids `delegatecall` inside `view`. So the router's
+`getChannel`, `getMessage`, `getLedgerConfiguration`, etc. are non-view at the
+ABI level, even though the module functions they dispatch to are `view`.
+Off-chain readers via `eth_call` pay nothing. Don't "fix" this.
+`deriveConnectorId` is the exception: it keeps `view` on the router and is
+dispatched with STATICCALL via `_staticDelegate`, because
+`ConnectorLogic.deriveConnectorId` is `pure` and reads no router storage.
 
-## OZ `ReentrancyGuard` namespaced storage
+## Storage layout: slot 0 is protocol state, `_owner` is slot 38
 
-`ReentrancyGuard` (OZ v5) uses ERC-7201 namespaced storage, so it does NOT
-occupy a sequential slot. That's why the storage layout in
-`ClprServiceStorage` starts cleanly after `Ownable._owner` (slot 0) without
-a gap. Don't add explicit gap variables.
+`ClprServiceStorage` inherits OZ v5 `ReentrancyGuardTransient`, which keeps its
+flag in EIP-1153 **transient** storage at a hash-derived slot, so it claims no
+sequential slot. Protocol state starts at slot 0 (`_authorizedService`) with no
+gap. Don't add explicit gap variables.
+
+`Ownable._owner` is **not** slot 0. `ClprService is ClprServiceStorage, Ownable`,
+so `_owner` lands immediately after `ClprServiceStorage`'s last variable
+(`economicConfig`), at sequential slot **38**. `ClprServiceStorage._getOwner()`
+hard-codes that number, and `ClprStorageLayoutGuardTest`
+(`test/invariants/ClprStorageLayoutGuard.t.sol`) pins it against
+`storage-layout.json`. The number moves whenever state is appended above it.
+
+Slots 13 and 14 (`_deprecatedPeerEndpointCount`, `_deprecatedPeerEndpointAccounts`)
+are unused but must stay: they hold `_channels` at slot 15, which
+`ClprEvmBundleVerifier.CHANNELS_BASE_SLOT` hard-codes, as it does the endpoint
+manifest commitment at slot 18 (`ENDPOINT_MANIFEST_COMMITMENT_SLOT`). A peer
+chain's verifier proves those slots of this contract, so removing the
+placeholders breaks every deployed EVM verifier that points at it.
 
 ## File-scope events
 
@@ -41,58 +70,91 @@ contract.
   already keys by `channelId`)
 - **In-flight counter** key: same as connector record key
 
-These are **not interchangeable**. `_connectorKey` and "connectorQueueKey"
-look similar in code; mixing them silently corrupts accounting.
+These are **not interchangeable**. `ConnectorLib._connectorKey` produces the
+record key; the in-flight key is the same hash but inlined, and the quota key
+has no named helper. Both are inlined in `MessagingLogic` (`sendMessage` /
+`_enqueueDataMessage`, `redactMessage`) and `BundleLib._processReplyMessageDecoded`.
+The trap: in `sendMessage` the local variable named `connectorKey` holds the
+**quota** key, not `ConnectorLib._connectorKey`. Mixing them silently corrupts
+accounting.
 
 ## DATA messages aren't deleted on ack
 
 REPLY and CONTROL messages are deleted from the queue when the peer acks
-them. DATA messages stay until the matching REPLY arrives — because the
-REPLY processing needs the original DATA's `connectorId` to do source-side
-accounting (in-flight counter, quota counter, source-side slashing).
+them. DATA messages stay until the matching REPLY arrives, because REPLY
+processing reads the original slot: `connectorIdForReply` for source-side
+accounting (in-flight counter, quota counter, source-side slashing) and the
+payload's `sender` for the `onClprResponse` callback. The REPLY handler then
+deletes the slot.
 
 `_deleteAckedNonDataMessages` is named accurately. Don't generalize it.
 
-**Redaction interaction (DRIFT-REVIEW C-4 + C?-12 — fixed).** `redactMessage`
-zeros the DATA payload and decrements both `_connectorQueueCounts` *and*
-`_connectorInflightCount`. The original `connectorId` is preserved in
-`MessageValue.connectorIdForReply` at enqueue time and survives payload
-redaction. When the eventual REPLY arrives, `_processReplyMessageDecoded`
-uses `connectorIdForReply` to perform source-side slashing even though the
-payload is empty. The in-flight counter is NOT decremented a second time by
-REPLY processing (only `redactMessage` decrements it for the redacted case).
-After redaction, `removeConnector` succeeds immediately because inflight = 0.
+**Redaction interaction (DRIFT-REVIEW C-4 + C?-12).** `redactMessage`
+**replaces** the DATA payload with an encoded `ClprRedactedMessage` marker
+carrying `sha256(originalPayload)` — it does not zero it — and decrements both
+`_connectorQueueCounts` *and* `_connectorInflightCount`. The marker matters:
+REPLY processing branches on the stored payload decoding as `REDACTED` rather
+than `DATA`, which a zeroed slot would not produce. The original `connectorId`
+is preserved in `MessageValue.connectorIdForReply` at enqueue time and survives
+redaction. When the eventual REPLY arrives, `_processReplyMessageDecoded` uses
+`connectorIdForReply` to perform source-side slashing even though the original
+payload is gone; with no recoverable `sender`, it skips the `onClprResponse`
+callback. The in-flight counter is NOT decremented a second time by REPLY
+processing (only `redactMessage` decrements it for the redacted case). Once a
+connector's last in-flight message is redacted, `removeConnector` succeeds
+immediately because inflight = 0.
 
 ## In-memory `Channel` mutation
 
-`_finishBundle` and helpers mutate a memory copy of the `Channel` and
-write it back at the end (`_channels[id] = channel`). This avoids
-intermediate SSTOREs. Don't mix in-place storage writes with this pattern
-inside the same call — the in-place writes will be clobbered by the
+`BundleLib.processBundle` loads `_channels[id]` into a memory copy in
+`_validateAndPrepare`; `_validateAndPrepare` and `_applyBundle` mutate that
+copy, and Step 12 writes it back once (`_channels[ctx.channelId] = channel`).
+This avoids intermediate SSTOREs. Don't mix in-place writes to `_channels[id]`
+with this pattern inside the same call — they are clobbered by the
 end-of-call write-back.
 
-## Empty-bundle revert
+Two writes deliberately happen before Step 12: the peer endpoint manifest
+(Step 1b writes `_peerEndpointManifests` directly), and the response-ordering
+early exit, where `_validateAndPrepare` persists the channel itself and returns
+`earlyReturn = true`.
 
-A bundle is `EmptyBundle` if it has no payloads AND no ack progress AND no
-trust-anchor change. Tests that drive pure state transitions with zero
-messages must set a non-empty new anchor. Discovered as a footgun in tests;
-see `bundle-flow.md` and `testing.md`.
+The same pattern means storage holds the **pre-bundle** channel cursors while
+`onClprMessage` / `onClprResponse` run. `submitBundle`, `sendMessage`,
+`removeConnector` and `collectPending` are `nonReentrant` (the other mutating
+entry points are not), and the non-view getters are not guarded, so a read-only
+reentrant call observes stale channel state (see the reentrancy note in
+`_processReplyMessageDecoded`).
+
+## No-progress revert
+
+A bundle reverts with **`NoProgress`** when none of these hold: new messages, a
+non-empty new trust anchor, an endpoint-manifest version advance, ack progress,
+or a channel state-machine transition (`BundleLib._checkBundleProgress`, called
+right after `verifyBundle`). `BundleLib.EmptyBundle` is declared but never
+thrown — don't expect it in a test.
+
+Tests that drive pure state transitions with zero messages must supply one of
+the five; a new trust anchor is the usual choice. See `bundle-flow.md` and
+`testing.md`.
 
 ## ECDSA recovery against pubkey-derived address
 
-`ConnectorLib._ecrecoverCheck` recovers via `ecrecover` and compares against
-`address(uint160(uint256(keccak256(pubKey))))` — the address derived from
-the **64-byte uncompressed pubkey** (X‖Y, no 0x04 prefix). This is *not*
-the more common "store address, verify signature against address" pattern.
-Reason: the protocol carries the full pubkey through the commitment for
-cross-platform parity (the same pubkey bytes must hash identically on every
-ledger).
+`ECDSA._ecrecoverCheck` (`src/libraries/crypto/ECDSA.sol`) recovers via
+`ecrecover` over the EIP-191 `"\x19Ethereum Signed Message:\n32"`-prefixed hash
+and compares against `address(uint160(uint256(keccak256(pubKey))))` — the
+address derived from the **64-byte uncompressed pubkey** (X‖Y, no 0x04 prefix).
+Both the channel reveal (`ECDSA._verifySignature`, from
+`ChannelLogic.completeChannel`) and the connector reveal
+(`ConnectorLib._verifyConnectorSig`) use it. This is *not* the more common
+"store address, verify signature against address" pattern. Reason: the
+protocol carries the full pubkey through the commitment for cross-platform
+parity (the same pubkey bytes must hash identically on every ledger).
 
 ## EVM pubkey encoding is 64-byte uncompressed (S-7/D-6)
 
-The spec (§1.2) allows 33-byte compressed *or* 64-byte uncompressed secp256k1
-public keys. The EVM implementation currently accepts only **64-byte
-uncompressed** (X‖Y, no 0x04 prefix).
+The spec allows 33-byte compressed *or* 64-byte uncompressed secp256k1 public
+keys. The EVM implementation accepts only **64-byte uncompressed** (X‖Y, no
+0x04 prefix).
 
 Rationale: On-chain secp256k1 point decompression has no native EVM opcode.
 Implementing it in Solidity carries significant gas cost and code-size impact.
@@ -100,18 +162,49 @@ The spec acknowledges this is ledger-specific. Per Richard's design decision
 (DRIFT-REVIEW S-7): "It is ledger specific for now, and we can pick either."
 For v1, EVM picks uncompressed.
 
-If compressed-key support is added in future versions it should be implemented
-in the verifier layer (off-chain decompress, supply uncompressed on-chain) or
-via a precompile if one becomes available. Don't try to decompress on-chain
-in `ChannelLogic` or `EndpointLib`.
+Compressed-key support belongs in the verifier layer (off-chain decompress,
+supply uncompressed on-chain) or behind a precompile. Don't try to decompress
+on-chain in `ChannelLogic` or `ConnectorLib`.
+
+## Channel pubkey-length error reuses the signature error
+
+`ChannelLogic.completeChannel` requires `pubKey.length == 64`; otherwise it
+reverts with `ClprInvalidSignature` — a signature selector reused for a
+structural problem. `ECDSA._verifySignature` repeats the check, and a signature
+that is not 65 bytes reverts with the same error. Pinned by
+`ClprService_Channel.test_completeChannel_revert_invalidSignature_pubKeyLength`
+(`test/logic/ChannelLogic.t.sol`) and
+`EcdsaTest.test_verifySignature_wrongPubKeyLength_reverts`
+(`test/libraries/crypto/Ecdsa.t.sol`). If you change the error, update those
+tests.
+
+## Endpoint registration is two-step, and validated
+
+`registerEndpoint` takes an `Endpoint` struct (`{ipAddress, port,
+tlsCertificate, accountId}`) plus a bond as `msg.value` (`>= minEndpointBond`,
+else `ClprInsufficientBond`). It creates a **PENDING** entry only — the endpoint
+is not in the manifest peers see until the owner admits it with `addEndpoint`
+or `updateEndpointManifest`, which bumps the manifest version
+(`ManifestLib.registerEndpoint`, `ManifestLib.addEndpoint`). `Endpoint` carries
+no signing key.
+
+`ManifestLib._validateEndpoint` delegates to `EndpointValidation`: the IP must
+be empty or a **numeric** IPv4/IPv6 address (no DNS names — reverts
+`ClprInvalidEndpointAddress`), and the TLS certificate must be empty or a
+DER-encoded X.509 certificate carrying an RSA key with a ≥2048-bit modulus
+(else `ClprInvalidEndpointCertificate`). The owner's direct-add path in
+`addEndpoint` / `updateEndpointManifest` runs the same validation.
 
 ## Endpoint deregister is unconditional (I-4)
 
-`EndpointLib.deregister` (called from `AdminLogic.removeEndpoint`) is
-unconditional once the caller is registered: no in-flight-message gate exists.
+`ManifestLib.removeEndpoint` (called from `AdminLogic.removeEndpoint`, by the
+registrant or the owner) is unconditional once the entry exists: no
+in-flight-message gate exists. The bond is credited in full to
+`_pendingWithdrawals[registrant]` rather than pushed; a PENDING entry is
+cancelled the same way without bumping the manifest version.
 
-The spec (§6.5) says endpoints "MUST NOT deregister with in-flight sync
-submissions." On EVM this does not apply:
+The spec says endpoints "MUST NOT deregister with in-flight sync submissions."
+On EVM this does not apply:
 
 > "An endpoint that submits a bundle then deregisters will either pay for both
 > transactions or neither will land. If the bundle transaction has not been
@@ -125,12 +218,14 @@ guaranteed by nonces. On EVM the economic model is enforced by transaction
 inclusion: the slashing happens in the same transaction as the bundle
 submission, so deregistering after the fact does not help the endpoint.
 
-## Connector signature binds to `address(this)`
+## Connector and channel signatures bind to `address(this)`
 
-The connector reveal signs `keccak256(connectorId ‖ address(this))`. Under
-DELEGATECALL, `address(this)` is the **router** address. The signature
-therefore binds to a specific router deployment. This is the EVM rendering
-of the spec's "service_address" binding (spec §6.3).
+The connector reveal signs `keccak256(connectorId ‖ address(this))`
+(`ConnectorLib._verifyConnectorSig`) and the channel reveal signs
+`keccak256(channelId ‖ address(this))` (`ECDSA._verifySignature`), both
+EIP-191-prefixed. Under DELEGATECALL, `address(this)` is the **router**
+address, so each signature binds to a specific router deployment. This is the
+EVM rendering of the spec's "service_address" binding.
 
 ## Charge verification by router-balance delta
 
@@ -138,67 +233,78 @@ of the spec's "service_address" binding (spec §6.3).
 then asserts `address(this).balance` grew by exactly `amount`. Because
 `ConnectorLib` is an internal library, `address(this)` resolves to the
 router. A connector that "succeeds" without transferring (or transfers the
-wrong amount) is detected here and slashed. **Don't replace this with a
+wrong amount) makes `charge` return `false`, and
+`BundleLib._processDataMessageDecoded` slashes it. **Don't replace this with a
 return-value check** — the ABI return value is unreliable for measuring
 actual ETH flow.
 
 ## Pull-payment fallback (`_pendingWithdrawals`)
 
-Three-step delivery for any outbound ETH:
-1. Push to recipient.
-2. On revert, push to `_fallbackRecipient` (the owner).
+Three-step delivery for connector charges and slash proceeds
+(`ConnectorLib._transferWithFallback`):
+1. Push to recipient (the bundle submitter).
+2. On revert, push to the fallback recipient — the `owner()` address, passed
+   into `ConnectorLib.charge` / `slash` as a parameter, not a stored field.
 3. On revert again, credit `_pendingWithdrawals[recipient]`; recipient pulls
    later via `collectPending()`.
 
-This exists because connector charges and slash proceeds are sent to bundle
-submitters / connector admins, who may be contracts that revert in
-`receive()`. The B8 regression in `ConnectorLib.t.sol` pins this.
+This exists because bundle submitters may be contracts that revert in
+`receive()`. Other ETH exits differ: `removeConnector` pushes the stake to its
+`recipient` and reverts with `ClprTransferFailed` on failure, and
+`removeEndpoint` credits `_pendingWithdrawals` directly. The B8 regression in
+`test/libraries/service/ConnectorLib_SlashAndCharge.t.sol` pins the
+fallback.
 
 ## Auto-ban on stake exhaustion
 
-If `lockedStake` drops to zero or `slashCount >= slashBanThreshold`, the
-`Connector` entry is **deleted** (not just marked banned). It can be
-re-registered later, but every reference to the old key becomes a
-`hasConnector == false`. Pinned by the B9 regression.
+If the post-slash count (`slashCount + 1`) reaches `slashBanThreshold`, the
+connector's **entire remaining `lockedStake` is seized** and the `Connector`
+entry is **deleted** (not just marked banned) — the geometric penalty formula is
+skipped on that branch. The entry is also deleted when a normal geometric slash
+leaves zero stake. It can be re-registered later, but every reference to the old
+key becomes a `hasConnector == false`. `ConnectorLib.slash`; the
+stake-drains-to-zero case is the B9 regression in
+`test/libraries/service/ConnectorLib_SlashAndCharge.t.sol`.
 
-## Endpoint key-length error reuses signature error
-
-`registerEndpoint(signingKey)` requires `length == 64`; otherwise reverts
-with `ClprInvalidSignature`. Selector reused for a structural problem.
-Pinned in `test/logic/AdminLogic.t.sol:148` (`EndpointManagerTest.test_register_revert_invalidKeyLength`).
-If you change the error, update that test.
-
-## Bundle margin and submitter payout (DRIFT-REVIEW C-5/D-1 — resolved)
+## Bundle margin and submitter payout (DRIFT-REVIEW C-5/D-1)
 
 When a submitter submits a bundle they front the gas for the entire
 transaction. The protocol reimburses them for every DATA message processed,
-with the connector paying the full execution cost plus a margin:
+with the connector paying the measured execution cost plus a margin
+(`BundleLib._processDataMessageDecoded`):
 
 ```
-totalCharge = gasUsed * tx.gasprice * (100 + connector.marginPercent) / 100
+actualCharge = gasUsed * tx.gasprice
+totalCharge  = actualCharge + actualCharge * economicConfig.endpointMarginPercent / 100
 ```
 
 All of `totalCharge` is transferred to the bundle submitter via
 `ConnectorLib.charge` — no split, no owner cut, no protocol treasury. The
 margin covers the submitter's overhead (routing, verification, hash checks)
-and provides a small profit incentive. The margin is a per-connector
-configuration value (`Connector.marginPercent`), not a global setting.
+and provides a small profit incentive. The margin is a single service-wide
+setting (`EconomicConfig.endpointMarginPercent`) applied identically to every
+connector — `Connector` has no margin field. `EconomicConfig.messageExecutionCost`
+is stored but no code in `src/` reads it; charges are always measured gas.
 
 Example: if the application call uses 300,000 gas at a gas price of 1 gwei
-with `marginPercent = 10`, the connector pays
+with `endpointMarginPercent = 10`, the connector pays
 `300,000 * 1e9 * 110 / 100 = 330,000 gwei` and the submitter receives all
 of it.
 
-**Pre-call bailout:** before invoking the application, the service computes
-a conservative ceiling `maxPossibleCharge = maxGasPerMessage * tx.gasprice *
-(100 + margin) / 100`. If the connector contract's ETH balance is below this
-ceiling, the connector is considered CONNECTOR_UNDERFUNDED, is slashed, and
-no application call is made. This prevents the service from advancing an
-application call only to find the connector can't pay afterward.
+**Pre-call gas clamp:** before invoking the application the service computes
+`affordableGas = connectorContract.balance * 100 / ((100 + endpointMarginPercent)
+* tx.gasprice)`. If that is **zero**, the connector is CONNECTOR_UNDERFUNDED —
+slashed, and no application call is made. Otherwise the call is dispatched
+with `gas: min(maxGasPerMessage, affordableGas)`, so the endpoint never
+performs work the connector cannot pay for. It is a *clamp* on the forwarded
+gas, not a ceiling check against a fixed maximum charge.
+
+When `tx.gasprice == 0` (some test and L2 environments) execution is free, so the
+clamp is skipped entirely.
 
 Slash proceeds also go to the submitter (with the pull-payment fallback).
-The owner is the fallback recipient for all ETH transfers — meaning the
-protocol owner ends up holding ETH from any push-failures. Don't accumulate
+The owner is the fallback recipient for charge and slash transfers — meaning
+the protocol owner ends up holding ETH from any push-failures. Don't accumulate
 large balances on the owner address; they should be swept periodically.
 
 **Interaction with redaction (C-4):** `redactMessage` decrements both the
@@ -209,7 +315,7 @@ redaction and is not bricked by the outstanding slot.
 
 ## sendMessage stamps msg.sender — application-layer "from" claims are untrusted
 
-`sendMessage` does not accept a `sender` parameter. The service stamps the on-chain caller address (`msg.sender`) as the sender in the queued DATA message payload using `abi.encodePacked(msg.sender)`. This is the CLPR spec §4.3 step 6 behavior: "*sender* (stamped from transaction caller)." Applications on the destination side that use the `sender` field for routing or authentication can rely on it as the *on-chain identity of the source-side caller*. However, they MUST NOT trust any in-band "from" claim embedded inside `messageData` itself without independent verification — `messageData` is fully application-controlled and can be forged by any caller.
+`sendMessage` does not accept a `sender` parameter. The service stamps the on-chain caller address (`msg.sender`) as the sender in the queued DATA message payload using `abi.encodePacked(msg.sender)`. This is the CLPR spec's send-message behavior: "*sender* (stamped from transaction caller)." Applications on the destination side that use the `sender` field for routing or authentication can rely on it as the *on-chain identity of the source-side caller*. However, they MUST NOT trust any in-band "from" claim embedded inside `messageData` itself without independent verification — `messageData` is fully application-controlled and can be forged by any caller.
 
 ## Bilateral connector requirement
 
