@@ -350,7 +350,9 @@ library BundleLib {
 
         // ── Step 9a: Lazy config propagation ────────────────────────
         // Both nanosSinceEpoch and lastConfigTimestamp are stored as uint96 nanoseconds.
-        if (ctx.config.nanosSinceEpoch > channel.lastConfigTimestamp) {
+        if (
+            channel.status == ClprTypes.ChannelStatus.ACTIVE && ctx.config.nanosSinceEpoch > channel.lastConfigTimestamp
+        ) {
             channel.lastConfigTimestamp = ctx.config.nanosSinceEpoch;
             bytes memory controlPayload = ClprProtobuf.encodeControlMessage(ctx.config);
             _enqueueMessage(ctx.channelId, channel, controlPayload, _messageQueues, ClprTypes.MessageType.CONTROL);

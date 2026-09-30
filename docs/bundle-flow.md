@@ -65,7 +65,7 @@ flowchart TD
     S7 -->|"violation on CLOSING"| RV["revert ClprBundleVerificationFailed"]
     S7 -->|"violation otherwise"| PS["ACTIVE becomes PAUSED, other statuses unchanged; channel persisted; stop"]
     S7 -->|"ordered"| S8["Step 8: PAUSED becomes ACTIVE"]
-    S8 --> S9a["Step 9a: enqueue CONTROL if local config is newer"]
+    S8 --> S9a["Step 9a: if ACTIVE, enqueue CONTROL if local config is newer"]
     S9a --> S9b["Step 9b: delete acked CONTROL and REPLY slots"]
     S9b --> S10["Step 10: dispatch new messages"]
     S10 --> CUR["advance receive and ack cursors"]
@@ -85,7 +85,7 @@ flowchart TD
 | 6 | Ack bounds on `metadata.receivedMessageId` (the peer's ack of our messages): not below `channel.ackedMessageId`, and if changed, `< channel.nextMessageId`; else `ClprAckVerificationFailed` | `_validateAndPrepare` |
 | 7 | Response-ordering pre-scan over the new payloads (see below). **Violation: CLOSING → revert `ClprBundleVerificationFailed`; ACTIVE → PAUSED (emits `ChannelStatusChanged`); PAUSED or DRAINED → status unchanged.** In the two non-reverting cases the channel is written back with its Step 1b/1c updates and processing stops: nothing is dispatched and neither cursor advances. Otherwise `channel.nextExpectedReplyId` takes the scan's result | `_validateAndPrepare`, `_checkResponseOrdering` |
 | 8 | Auto-resume: PAUSED → ACTIVE (emits `ChannelStatusChanged`) | `_applyBundle` |
-| 9a | Lazy config propagation: if `_config.nanosSinceEpoch > channel.lastConfigTimestamp`, update `lastConfigTimestamp` and enqueue `ClprProtobuf.encodeControlMessage(_config)` as a CONTROL message. There is **no** channel-status condition — a CLOSING or DRAINED channel still enqueues | `_applyBundle` → `_enqueueMessage` |
+| 9a | Lazy config propagation: only when `channel.status == ACTIVE` (Step 8 already resolves PAUSED), if `_config.nanosSinceEpoch > channel.lastConfigTimestamp`, update `lastConfigTimestamp` and enqueue `ClprProtobuf.encodeControlMessage(_config)` as a CONTROL message. CLOSING or DRAINED channels are skipped | `_applyBundle` → `_enqueueMessage` |
 | 9b | For outbound ids in `(oldAcked, newAcked]`, delete queued CONTROL and REPLY slots. DATA slots, redacted or not, stay until their REPLY arrives | `_deleteAckedNonDataMessages` |
 | 10 | Per-message dispatch of the new payloads, with inbound ids from `expectedFirstId` | `_dispatchMessages` |
 | — | If there were new messages, `receivedMessageId = expectedFirstId + newMessageCount − 1` and `receivedRunningHash` = the Step 5 result; `ackedMessageId = metadata.receivedMessageId` | `_applyBundle` |
@@ -170,10 +170,11 @@ spec's peer-close propagation and drain-and-close rules:
 
 Step 8 runs first, so a channel that entered the bundle PAUSED is ACTIVE by
 Step 11.
-Step 11 evaluates after dispatch, so the REPLY and CONTROL messages this bundle
-enqueued count toward `_allOutboundAcked`: DRAINED → CLOSED waits until the peer
-acks them. Several hops can happen in one bundle. Owner-driven transitions are
-in `lifecycle.md`.
+Step 11 evaluates after dispatch, so a REPLY this bundle enqueued counts toward
+`_allOutboundAcked`: DRAINED → CLOSED waits until the peer acks it. Step 9a's
+ACTIVE gate keeps a CLOSING or DRAINED channel from adding a new CONTROL
+message to that same wait. Several hops can happen in one bundle. Owner-driven
+transitions are in `lifecycle.md`.
 
 ## Per-message dispatch (`_dispatchMessages`)
 
