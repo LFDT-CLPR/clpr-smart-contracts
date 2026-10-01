@@ -193,10 +193,25 @@ contract PeerEndpointManifestTest is ClprTestBase {
     ///      bundle satisfying Criterion 5 alone is accepted), and — with nothing to drain —
     ///      the state machine walks CLOSING → DRAINED, which also continues to accept them.
     function test_manifestBundle_acceptedOnClosingAndDrained() public {
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING
+        // instead of advancing immediately to DRAINED.
+        _registerTestConnector();
+        service.sendMessage(channelId, connectorId, hex"11223344", hex"01");
         service.closeChannel(channelId);
         assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.CLOSING));
 
-        verifier.setVerifyBundleResult(_noOpMetadata(), new bytes[](0));
+        // Ack AND reply to that DATA message in the same bundle that advances the manifest.
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
+        ClprTypes.QueueMetadata memory meta = _noOpMetadata();
+        meta.nextMessageId = 2;
+        meta.sentRunningHash = hash1;
+        meta.receivedMessageId = 1;
+        meta.lastMessageId = 1;
+        meta.lastMessageRunningHash = hash1;
+        verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewEndpointManifest(_manifest(2, 1));
         service.submitBundle(channelId, hex"00FF");
 
@@ -204,6 +219,9 @@ contract PeerEndpointManifestTest is ClprTestBase {
         assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.DRAINED));
 
         // Manifest-only bundle against DRAINED, but still accepted and applied
+        meta.lastMessageId = 0;
+        meta.lastMessageRunningHash = bytes32(0);
+        verifier.setVerifyBundleResult(meta, new bytes[](0));
         verifier.setNewEndpointManifest(_manifest(3, 2));
         service.submitBundle(channelId, hex"00FF");
 

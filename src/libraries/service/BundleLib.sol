@@ -99,8 +99,8 @@ library BundleLib {
             _stepStatus(
                     channel.status,
                     metadata.state,
-                    _allDataAcked(channel, effectiveAcked),
-                    _allOutboundAcked(channel, effectiveAcked),
+                    _allDataAcked(channel.lastDataMessageId, effectiveAcked, channel.nextExpectedReplyId),
+                    _allOutboundAcked(channel.nextMessageId, effectiveAcked),
                     _allInboundReceived(channel, metadata)
                 ) != channel.status
         ) {
@@ -311,8 +311,9 @@ library BundleLib {
             if (channel.status == ClprTypes.ChannelStatus.CLOSING) {
                 // A CLOSING channel receiving out-of-order responses is unrecoverable — revert.
                 if (outcome == OrderingOutcome.StructuralViolation) revert ClprTypes.ClprBundleVerificationFailed();
-                // AwaitingReply on a CLOSING channel: dispatch is skipped, but the CLOSING -> DRAINED
-                // hop is gated only by dataAcked, not by the outstanding REPLY, so it can still fire.
+                // AwaitingReply on a CLOSING channel: dispatch is skipped. AwaitingReply only fires
+                // when nextExpectedReplyId <= lastDataMessageId, which forces dataAcked false too -
+                // so this call can't actually transition anything here; it's a safe no-op.
                 _applyStateMachine(ctx.channelId, channel, metadata, ctx.newAckedMessageId);
             } else if (channel.status == ClprTypes.ChannelStatus.ACTIVE) {
                 // Out-of-order responses on ACTIVE → transition to PAUSED
@@ -391,20 +392,26 @@ library BundleLib {
 
     // ── Internal: State machine ───────────────────────────────────────────
 
-    /// @dev True when all outbound DATA Messages have been acked. `lastDataMessageId == 0`
-    ///      means no DATA Message was ever sent (vacuously acked). Gates CLOSING -> DRAINED
-    ///      (§4.2 Step 5b sub-check 1): Response Messages may still be in flight and drain
+    /// @dev True when all outbound DATA Messages have been acknowledged AND answered.
+    ///      `lastDataMessageId == 0` means no DATA Message was ever sent.
+    ///      Requires the peer's ack to cover every DATA Message AND `nextExpectedReplyId` to
+    ///      have advanced past it: a DATA Message that is acked but not yet answered must not
+    ///      drain. Response Messages this side generates may still be in flight and drain
     ///      through DRAINED, so they are deliberately NOT considered here.
-    function _allDataAcked(ClprTypes.Channel memory channel, uint64 acked) private pure returns (bool) {
-        return channel.lastDataMessageId == 0 || acked >= channel.lastDataMessageId;
+    function _allDataAcked(uint64 lastDataMessageId, uint64 acked, uint64 nextExpectedReplyId)
+        internal
+        pure
+        returns (bool)
+    {
+        return lastDataMessageId == 0 || (acked >= lastDataMessageId && nextExpectedReplyId > lastDataMessageId);
     }
 
     /// @dev True when every outbound message (DATA and Response) has been acked.
     ///      `nextMessageId == 1` means nothing was ever sent (vacuously acked). Gates
-    ///      DRAINED -> CLOSED (§4.2 Step 5b sub-check 2), which requires the final in-flight
-    ///      Response Messages to be acknowledged before the channel may close.
-    function _allOutboundAcked(ClprTypes.Channel memory channel, uint64 acked) private pure returns (bool) {
-        return channel.nextMessageId == 1 || acked >= channel.nextMessageId - 1;
+    ///      DRAINED -> CLOSED, which requires the final in-flight Response Messages to be
+    ///      acknowledged before the channel may close.
+    function _allOutboundAcked(uint64 nextMessageId, uint64 acked) internal pure returns (bool) {
+        return nextMessageId == 1 || acked >= nextMessageId - 1;
     }
 
     /// @dev True when every message in the peer's proven queue has been received. A bundle may
@@ -454,8 +461,8 @@ library BundleLib {
         ClprTypes.QueueMetadata memory metadata,
         uint64 newAckedMessageId
     ) internal {
-        bool dataAcked = _allDataAcked(channel, newAckedMessageId);
-        bool allAcked = _allOutboundAcked(channel, newAckedMessageId);
+        bool dataAcked = _allDataAcked(channel.lastDataMessageId, newAckedMessageId, channel.nextExpectedReplyId);
+        bool allAcked = _allOutboundAcked(channel.nextMessageId, newAckedMessageId);
         bool inboundReceived = _allInboundReceived(channel, metadata);
         // Walk to the settled status, emitting each hop. Transitions are monotonic
         // (ACTIVE -> CLOSING -> DRAINED -> CLOSED), so this terminates in <= 3 steps.

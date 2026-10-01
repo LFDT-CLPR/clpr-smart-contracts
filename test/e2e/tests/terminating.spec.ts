@@ -202,28 +202,16 @@ describe("channel close lifecycle", () => {
         expectEmptyChannel(connAInitial, ACTIVE);
         expectEmptyChannel(connBInitial, ACTIVE);
 
-        // Step 2: A initiates close → CLOSING
+        // Step 2: A initiates close → straight to DRAINED (empty channel, no Data
+        // Messages outstanding, so CLOSING and DRAINED are reached in the same call)
         await closeChannel(A, addrsA.clprService, channel.channelId);
-        const connAClosing = await getChannelState(A, addrsA.clprService, channel.channelId);
-        expect(connAClosing.status).toBe(CLOSING);
-        expectMessageIds(connAClosing, {nextMessageId: 1n, ackedMessageId: 0n});
-        expectRunningHashesZero(connAClosing);
-
-        // Step 3: Ferry B→A (empty bundle) → A transitions to DRAINED
-        await ferry({
-            source: B,
-            dest: A,
-            sourceAddrs: addrsB,
-            destAddrs: addrsA,
-            channelId: channel.channelId,
-            range: {fromId: 1n, throughId: 0n}
-        });
         const connADrained = await getChannelState(A, addrsA.clprService, channel.channelId);
         expect(connADrained.status).toBe(DRAINED);
         expectMessageIds(connADrained, {nextMessageId: 1n, ackedMessageId: 0n});
         expectRunningHashesZero(connADrained);
 
-        // Step 4: Ferry A→B → B learns A is DRAINED, B transitions to CLOSED
+        // Step 3: Ferry A→B → B learns A is DRAINED; B (also empty) cascades
+        // ACTIVE→CLOSING→DRAINED→CLOSED in this same bundle
         await ferry({
             source: A,
             dest: B,
@@ -237,7 +225,7 @@ describe("channel close lifecycle", () => {
         expectMessageIds(connBClosed, {nextMessageId: 1n, ackedMessageId: 0n});
         expectRunningHashesZero(connBClosed);
 
-        // Step 5: Ferry B→A → A transitions to CLOSED
+        // Step 4: Ferry B→A → A learns B is CLOSED, transitions to CLOSED
         await ferry({
             source: B,
             dest: A,
@@ -264,28 +252,16 @@ describe("channel close lifecycle", () => {
         expectEmptyChannel(connAInitial, ACTIVE);
         expectEmptyChannel(connBInitial, ACTIVE);
 
-        // Step 2: B initiates close → CLOSING
+        // Step 2: B initiates close → straight to DRAINED (empty channel, no Data
+        // Messages outstanding, so CLOSING and DRAINED are reached in the same call)
         await closeChannel(B, addrsB.clprService, channel.channelId);
-        const connBClosing = await getChannelState(B, addrsB.clprService, channel.channelId);
-        expect(connBClosing.status).toBe(CLOSING);
-        expectMessageIds(connBClosing, {nextMessageId: 1n, ackedMessageId: 0n});
-        expectRunningHashesZero(connBClosing);
-
-        // Step 3: Ferry A→B (empty bundle) → B transitions to DRAINED
-        await ferry({
-            source: A,
-            dest: B,
-            sourceAddrs: addrsA,
-            destAddrs: addrsB,
-            channelId: channel.channelId,
-            range: {fromId: 1n, throughId: 0n}
-        });
         const connBDrained = await getChannelState(B, addrsB.clprService, channel.channelId);
         expect(connBDrained.status).toBe(DRAINED);
         expectMessageIds(connBDrained, {nextMessageId: 1n, ackedMessageId: 0n});
         expectRunningHashesZero(connBDrained);
 
-        // Step 4: Ferry B→A → A learns B is DRAINED, A transitions to CLOSED
+        // Step 3: Ferry B→A → A learns B is DRAINED; A (also empty) cascades
+        // ACTIVE→CLOSING→DRAINED→CLOSED in this same bundle
         await ferry({
             source: B,
             dest: A,
@@ -299,7 +275,7 @@ describe("channel close lifecycle", () => {
         expectMessageIds(connAClosed, {nextMessageId: 1n, ackedMessageId: 0n});
         expectRunningHashesZero(connAClosed);
 
-        // Step 5: Ferry A→B → B transitions to CLOSED
+        // Step 4: Ferry A→B → B learns A is CLOSED, transitions to CLOSED
         await ferry({
             source: A,
             dest: B,
@@ -335,29 +311,18 @@ describe("channel close lifecycle", () => {
         expect(connAInitial.chainId).toBe(backend.caipB()); // A's peer is B
         expect(connBInitial.chainId).toBe(backend.caipA()); // B's peer is A
 
-        // Step 2: A initiates close → CLOSING with storage slot validations
+        // Step 2: A initiates close → straight to DRAINED (empty channel, no Data
+        // Messages outstanding, so CLOSING and DRAINED are reached in the same call)
         await closeChannel(A, addrsA.clprService, channel.channelId);
-        const connAClosing = await getChannelState(A, addrsA.clprService, channel.channelId);
-        expectEmptyChannel(connAClosing, CLOSING);
-
-        // Step 3: Ferry B→A (B ACTIVE, A CLOSING) → A transitions to DRAINED
-        await ferry({
-            source: B,
-            dest: A,
-            sourceAddrs: addrsB,
-            destAddrs: addrsA,
-            channelId: channel.channelId,
-            range: {fromId: 1n, throughId: 0n}
-        });
         const connADrained = await getChannelState(A, addrsA.clprService, channel.channelId);
         expectEmptyChannel(connADrained, DRAINED);
 
-        // Step 4: B initiates close → CLOSING with storage slot validations
+        // Step 3: B initiates close → straight to DRAINED, same reasoning
         await closeChannel(B, addrsB.clprService, channel.channelId);
-        const connBClosing = await getChannelState(B, addrsB.clprService, channel.channelId);
-        expectEmptyChannel(connBClosing, CLOSING);
+        const connBDrained = await getChannelState(B, addrsB.clprService, channel.channelId);
+        expectEmptyChannel(connBDrained, DRAINED);
 
-        // Step 5: Ferry A→B (A DRAINED, B CLOSING) → B transitions to CLOSED
+        // Step 4: Ferry A→B (A DRAINED, B DRAINED) → B transitions to CLOSED
         await ferry({
             source: A,
             dest: B,
@@ -369,7 +334,7 @@ describe("channel close lifecycle", () => {
         const connBClosed = await getChannelState(B, addrsB.clprService, channel.channelId);
         expectEmptyChannel(connBClosed, CLOSED);
 
-        // Step 6: Ferry B→A → A transitions to CLOSED
+        // Step 5: Ferry B→A → A transitions to CLOSED
         await ferry({
             source: B,
             dest: A,
@@ -381,7 +346,7 @@ describe("channel close lifecycle", () => {
         const connAClosed = await getChannelState(A, addrsA.clprService, channel.channelId);
         expectEmptyChannel(connAClosed, CLOSED);
 
-        // Step 7: Final comprehensive verification - channel metadata preserved
+        // Step 6: Final comprehensive verification - channel metadata preserved
         const connAFinal = await getChannelState(A, addrsA.clprService, channel.channelId);
         const connBFinal = await getChannelState(B, addrsB.clprService, channel.channelId);
         expect(connAFinal.channelId).toBe(channel.channelId);
@@ -503,7 +468,8 @@ describe("channel close lifecycle", () => {
         });
         await A.publicClient.waitForTransactionReceipt({hash: setResponseTx});
 
-        // Step 1: A initiates close on empty channel
+        // Step 1: A initiates close on empty channel → straight to DRAINED (no Data
+        // Messages outstanding, so CLOSING and DRAINED are reached in the same call)
         const closeTxA = await A.walletClient.writeContract({
             address: addrsA.clprService,
             abi: service.abi as never,
@@ -512,7 +478,7 @@ describe("channel close lifecycle", () => {
         });
         await A.publicClient.waitForTransactionReceipt({hash: closeTxA});
 
-        const connAClosing = (await A.publicClient.readContract({
+        const connADrained = (await A.publicClient.readContract({
             address: addrsA.clprService,
             abi: service.abi as never,
             functionName: "getChannel",
@@ -522,10 +488,10 @@ describe("channel close lifecycle", () => {
             nextMessageId: bigint;
         };
 
-        expect(connAClosing.status).toBe(CLOSING);
-        expect(connAClosing.nextMessageId).toBe(1n);
+        expect(connADrained.status).toBe(DRAINED);
+        expect(connADrained.nextMessageId).toBe(1n);
 
-        // Step 2: B sends messages to A (while A is CLOSING)
+        // Step 2: B sends messages to A (while A is DRAINED)
         const sendTx1 = await B.walletClient.writeContract({
             address: addrsB.application,
             abi: appAbi as never,
@@ -578,7 +544,8 @@ describe("channel close lifecycle", () => {
             range: {fromId: 1n, throughId: 2n}
         });
 
-        // A has no outbound DATA (lastDataMessageId=0), so CLOSING→DRAINED fires immediately.
+        // A was already DRAINED from the admin close in Step 1 and stays DRAINED: DATA
+        // Messages are still dispatched normally while DRAINED, generating replies.
         const connAAfterReceive = (await A.publicClient.readContract({
             address: addrsA.clprService,
             abi: service.abi as never,
@@ -1295,7 +1262,9 @@ describe("channel close lifecycle", () => {
         expect(connAAfterReply.nextExpectedReplyId).toBe(2n);
         expect(connAAfterReply.receivedRunningHash).not.toBe(ZERO_HASH);
 
-        // Step 5: NOW initiate close after successful message exchange
+        // Step 5: NOW initiate close after successful message exchange. A's one DATA
+        // Message is already acked and answered (nextExpectedReplyId=2 above), so this
+        // goes straight to DRAINED instead of stopping at CLOSING.
         const closeTxA = await A.walletClient.writeContract({
             address: addrsA.clprService,
             abi: service.abi as never,
@@ -1304,7 +1273,7 @@ describe("channel close lifecycle", () => {
         });
         await A.publicClient.waitForTransactionReceipt({hash: closeTxA});
 
-        const connAClosing = (await A.publicClient.readContract({
+        const connADrained = (await A.publicClient.readContract({
             address: addrsA.clprService,
             abi: service.abi as never,
             functionName: "getChannel",
@@ -1318,35 +1287,12 @@ describe("channel close lifecycle", () => {
             receivedRunningHash: `0x${string}`;
         };
 
-        expect(connAClosing.status).toBe(CLOSING);
-        expect(connAClosing.nextMessageId).toBe(2n); // No new messages after close
-        expect(connAClosing.ackedMessageId).toBe(1n); // Previous ack preserved
-        expect(connAClosing.receivedMessageId).toBe(1n); // Previous receive preserved
-
-        // Step 6: Ferry B→A (empty) - A can drain immediately (all messages acked)
-        await ferry({
-            source: B, dest: A,
-            sourceAddrs: addrsB, destAddrs: addrsA,
-            channelId: channel.channelId,
-            range: {fromId: 2n, throughId: 1n} // empty bundle
-        });
-
-        const connADrained = (await A.publicClient.readContract({
-            address: addrsA.clprService,
-            abi: service.abi as never,
-            functionName: "getChannel",
-            args: [channel.channelId]
-        })) as {
-            status: number;
-            nextMessageId: bigint;
-            ackedMessageId: bigint;
-            receivedMessageId: bigint;
-        };
-
         expect(connADrained.status).toBe(DRAINED);
-        expect(connADrained.ackedMessageId).toBe(1n);
+        expect(connADrained.nextMessageId).toBe(2n); // No new messages after close
+        expect(connADrained.ackedMessageId).toBe(1n); // Previous ack preserved
+        expect(connADrained.receivedMessageId).toBe(1n); // Previous receive preserved
 
-        // Step 7: Ferry A→B - B learns A is DRAINED and transitions to CLOSED
+        // Step 6: Ferry A→B - B learns A is DRAINED and transitions to CLOSED
         await ferry({
             source: A, dest: B,
             sourceAddrs: addrsA, destAddrs: addrsB,
@@ -1371,7 +1317,7 @@ describe("channel close lifecycle", () => {
         expect(connBClosed.ackedMessageId).toBe(1n);
         expect(connBClosed.receivedMessageId).toBe(1n);
 
-        // Step 8: Ferry B→A - A transitions to CLOSED
+        // Step 7: Ferry B→A - A transitions to CLOSED
         await ferry({
             source: B, dest: A,
             sourceAddrs: addrsB, destAddrs: addrsA,

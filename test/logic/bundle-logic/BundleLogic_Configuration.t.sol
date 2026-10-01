@@ -67,11 +67,12 @@ contract BundleLogic_Configuration is BundleLogicTestBase {
         vm.warp(block.timestamp + 10);
         service.updateLedgerConfiguration(hex"BEEF", defaultThrottles, "", "");
 
+        // No Data Messages were ever sent, so admin-close advances straight to DRAINED.
         service.closeChannel(channelId);
         assertEq(
             uint8(service.getChannel(channelId).status),
-            uint8(ClprTypes.ChannelStatus.CLOSING),
-            "channel should be CLOSING before the bundle"
+            uint8(ClprTypes.ChannelStatus.DRAINED),
+            "channel should be DRAINED before the bundle"
         );
 
         // Peer already reports DRAINED with nothing outstanding; with nextMessageId still 1,

@@ -19,12 +19,14 @@ contract BundleLibHarness {
         ClprTypes.ChannelStatus peerState,
         uint64 nextMessageId,
         uint64 lastDataMessageId,
-        uint64 newAckedMessageId
+        uint64 newAckedMessageId,
+        uint64 nextExpectedReplyId
     ) external returns (ClprTypes.ChannelStatus) {
         ClprTypes.Channel memory channel;
         channel.status = current;
         channel.nextMessageId = nextMessageId;
         channel.lastDataMessageId = lastDataMessageId;
+        channel.nextExpectedReplyId = nextExpectedReplyId;
 
         ClprTypes.QueueMetadata memory meta;
         meta.state = peerState;
@@ -112,8 +114,12 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
         uint64 nextMessageId = allAcked ? 1 : 3;
         uint64 lastDataMessageId = allAcked ? 0 : 2;
         uint64 acked = 0;
+        // Irrelevant when lastDataMessageId == 0 (vacuous) or acked < lastDataMessageId
+        // (already unacked); both of this helper's two configurations short-circuit before
+        // nextExpectedReplyId is consulted, so any value passed through here is unobserved.
+        uint64 nextExpectedReplyId = 0;
         ClprTypes.ChannelStatus got =
-            harness.runStateMachine(CID, current, peer, nextMessageId, lastDataMessageId, acked);
+            harness.runStateMachine(CID, current, peer, nextMessageId, lastDataMessageId, acked, nextExpectedReplyId);
         assertEq(uint8(got), uint8(expected), "unexpected settled status");
     }
 
@@ -184,39 +190,47 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
         _assertSM(PENDING, DRAINED, false, PENDING);
     }
 
-    // ── DATA-acked predicate boundary (CLOSING → DRAINED, §4.2 Step 5b sub-check 1) ──
-    // This transition is gated on DATA Messages only (lastDataMessageId), not all outbound.
+    // ── DATA-acked-and-answered predicate boundary (CLOSING → DRAINED) ──
+    // This transition is gated on DATA Messages only (lastDataMessageId), not all outbound,
+    // and requires both the peer's ack and the matching REPLY to have arrived.
 
     function test_stateMachine_dataAcked_boundary() public {
-        // lastDataMessageId == 0 → no DATA ever sent → vacuously acked → drains.
-        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 1, 0, 0)), uint8(DRAINED));
-        // acked == lastDataMessageId → all DATA acked → drains.
-        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 2, 1, 1)), uint8(DRAINED));
+        // lastDataMessageId == 0 → no DATA ever sent → vacuously acked and answered → drains.
+        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 1, 0, 0, 0)), uint8(DRAINED));
+        // acked == lastDataMessageId AND nextExpectedReplyId past it → acked and answered → drains.
+        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 2, 1, 1, 2)), uint8(DRAINED));
         // acked < lastDataMessageId → DATA not fully acked → stays CLOSING.
-        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 2, 1, 0)), uint8(CLOSING));
+        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 2, 1, 0, 2)), uint8(CLOSING));
+        // acked == lastDataMessageId but nextExpectedReplyId hasn't passed it → acked but not
+        // yet answered → stays CLOSING. A channel must never enter DRAINED with a REPLY still
+        // outstanding: no DATA Message ever exists past lastDataMessageId, so that REPLY could
+        // then never arrive and the channel would be stuck.
+        assertEq(uint8(harness.runStateMachine(CID, CLOSING, ACTIVE, 2, 1, 1, 1)), uint8(CLOSING));
     }
 
-    /// @dev §4.2 Step 5b uses two DIFFERENT drain predicates, and a Response Message in flight
-    ///      is exactly what separates them: CLOSING → DRAINED requires only DATA Messages acked
-    ///      (responses drain through DRAINED), but DRAINED → CLOSED requires ALL messages acked
-    ///      including those responses. Guards against collapsing both onto one predicate.
+    /// @dev CLOSING → DRAINED and DRAINED → CLOSED use two DIFFERENT drain predicates, and a
+    ///      Response Message in flight is exactly what separates them: CLOSING → DRAINED
+    ///      requires only DATA Messages acked and answered (responses drain through DRAINED),
+    ///      but DRAINED → CLOSED requires ALL messages acked including those responses. Guards
+    ///      against collapsing both onto one predicate.
     function test_stateMachine_responsesGateClosedNotDrained() public {
         // One DATA Message (id 1) + one Response (id 2): nextMessageId = 3, lastDataMessageId = 1.
-        // acked = 1 → DATA fully acked, Response (id 2) still in flight.
+        // acked = 1 and nextExpectedReplyId = 2 → DATA acked and answered, Response (id 2) still
+        // in flight.
         assertEq(
-            uint8(harness.runStateMachine(CID, CLOSING, CLOSED, 3, 1, 1)),
+            uint8(harness.runStateMachine(CID, CLOSING, CLOSED, 3, 1, 1, 2)),
             uint8(DRAINED),
-            "CLOSING drains on DATA-acked even with a response in flight"
+            "CLOSING drains on DATA-acked-and-answered even with a response in flight"
         );
         // DRAINED must NOT close while the response is unacked (acked 1 < nextMessageId - 1 = 2).
         assertEq(
-            uint8(harness.runStateMachine(CID, DRAINED, CLOSED, 3, 1, 1)),
+            uint8(harness.runStateMachine(CID, DRAINED, CLOSED, 3, 1, 1, 2)),
             uint8(DRAINED),
             "DRAINED holds until the in-flight response is acked"
         );
         // Once the response (id 2) is acked too, DRAINED → CLOSED.
         assertEq(
-            uint8(harness.runStateMachine(CID, DRAINED, CLOSED, 3, 1, 2)),
+            uint8(harness.runStateMachine(CID, DRAINED, CLOSED, 3, 1, 2, 2)),
             uint8(CLOSED),
             "DRAINED closes once all messages are acked"
         );
@@ -233,12 +247,12 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
         vm.expectEmit(true, false, false, true, address(harness));
         emit ChannelStatusChanged(CID, CLOSED);
 
-        harness.runStateMachine(CID, ACTIVE, CLOSED, 1, 0, 0);
+        harness.runStateMachine(CID, ACTIVE, CLOSED, 1, 0, 0, 0);
     }
 
     function test_stateMachine_noTransition_emitsNothing() public {
         vm.recordLogs();
-        harness.runStateMachine(CID, ACTIVE, ACTIVE, 1, 0, 0);
+        harness.runStateMachine(CID, ACTIVE, ACTIVE, 1, 0, 0, 0);
         assertEq(vm.getRecordedLogs().length, 0, "no event expected when status is unchanged");
     }
 
@@ -441,31 +455,36 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
     // ── Test 13: State machine: CLOSING -> DRAINED (all acked)
 
     function test_stateMachine_closingToDrained() public {
-        // Close our channel first
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING
+        // instead of advancing immediately to DRAINED.
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
         service.closeChannel(channelId);
 
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.CLOSING));
 
-        // Submit bundle with peer ACTIVE, no new messages
-        // Since nextMessageId==1 (no messages), all outbound are "acked"
-        bytes[] memory msgs = new bytes[](0);
+        // Submit bundle with peer ACTIVE, acking AND replying to our outbound DATA message.
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
         ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
+            nextMessageId: 2,
+            sentRunningHash: hash1,
+            receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
             endpointManifestVersion: 0,
-            lastMessageId: 0,
-            lastMessageRunningHash: bytes32(0)
+            lastMessageId: 1,
+            lastMessageRunningHash: hash1
         });
         verifier.setVerifyBundleResult(meta, msgs);
-        // Trust anchor advancement keeps the bundle non-empty (NoProgress guard)
         // When the channel is CLOSING on our side, the only additional condition
-        // we need is that all messages we have sent have already been acknowledged.
-        // Once that condition is met, we should transition to DRAINED regardless of whether
-        // we receive an empty bundle and regardless of the state of the remote peer.
+        // we need is that all messages we have sent have already been acknowledged
+        // and answered. Once that condition is met, we should transition to DRAINED
+        // regardless of the state of the remote peer.
         _submitBundle(hex"00FF");
 
         channel = service.getChannel(channelId);
@@ -475,41 +494,48 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
     // ── Test 14: State machine: DRAINED -> CLOSED (peer drained)
 
     function test_stateMachine_drainedToClosed() public {
-        // Close our channel
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING.
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
         service.closeChannel(channelId);
 
-        // First bundle: CLOSING -> DRAINED (nextMessageId==1, all acked)
-        bytes[] memory msgs = new bytes[](0);
+        // First bundle: peer acks AND replies to our DATA#1 -> CLOSING -> DRAINED.
+        // (A bundle that acks but does not carry the REPLY leaves the message
+        // AwaitingReply, which — see Test 13's sibling coverage — never reaches
+        // _applyStateMachine again on a later bundle; the REPLY here avoids that.)
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
         ClprTypes.QueueMetadata memory meta1 = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
+            nextMessageId: 2,
+            sentRunningHash: hash1,
+            receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
             endpointManifestVersion: 0,
-            lastMessageId: 0,
-            lastMessageRunningHash: bytes32(0)
+            lastMessageId: 1,
+            lastMessageRunningHash: hash1
         });
         verifier.setVerifyBundleResult(meta1, msgs);
-        // Trust anchor advancement should not be required to advance
         _submitBundle(hex"00FF");
 
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.DRAINED));
 
-        // Second bundle: peer is DRAINED -> CLOSED
+        // Second bundle: message-less, peer is DRAINED -> CLOSED
         ClprTypes.QueueMetadata memory meta2 = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
+            nextMessageId: 2,
+            sentRunningHash: hash1,
+            receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED,
             endpointManifestVersion: 0,
             lastMessageId: 0,
             lastMessageRunningHash: bytes32(0)
         });
-        verifier.setVerifyBundleResult(meta2, msgs);
-        // Trust anchor advancement should not be required to advance
+        verifier.setVerifyBundleResult(meta2, new bytes[](0));
         _submitBundle(hex"00FF02");
 
         channel = service.getChannel(channelId);
@@ -519,27 +545,32 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
     // ── Test 15: State machine: CLOSING -> DRAINED -> CLOSED (all acked)
 
     function test_stateMachine_closingToDrainedToClosed() public {
-        // Close our channel first
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING.
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
         service.closeChannel(channelId);
 
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.CLOSING));
 
-        // Submit bundle with peer DRAINED already, and no new messages
-        // Since nextMessageId==1 (no messages), all outbound are "acked"
-        bytes[] memory msgs = new bytes[](0);
+        // Submit bundle with peer DRAINED already, acking AND replying to our outbound
+        // DATA message.
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
         ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
+            nextMessageId: 2,
+            sentRunningHash: hash1,
+            receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.DRAINED, // All drained on both ends.
             endpointManifestVersion: 0,
-            lastMessageId: 0,
-            lastMessageRunningHash: bytes32(0)
+            lastMessageId: 1,
+            lastMessageRunningHash: hash1
         });
         verifier.setVerifyBundleResult(meta, msgs);
-        // Trust anchor advancement should not be required to advance
         _submitBundle(hex"00FF");
 
         channel = service.getChannel(channelId);
@@ -549,25 +580,30 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
     /// @dev The transition CLOSING → DRAINED should occur when all outbound messages
     ///      are acknowledged, regardless of peer state.
     function test_regression_closingToDrained_withPeerStillActive() public {
-        // Close our channel first
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING.
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
         service.closeChannel(channelId);
 
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.CLOSING));
 
-        // Submit bundle with peer ACTIVE (not DRAINED), and no new messages
-        // Since nextMessageId==1 (no messages), all outbound are "acked"
-        // This should trigger CLOSING -> DRAINED even though peer is still ACTIVE
-        bytes[] memory msgs = new bytes[](0);
+        // Submit bundle with peer ACTIVE (not DRAINED), acking AND replying to our outbound
+        // DATA message. This should trigger CLOSING -> DRAINED even though peer is still ACTIVE.
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
         ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
+            nextMessageId: 2,
+            sentRunningHash: hash1,
+            receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE, // peer is still ACTIVE
             endpointManifestVersion: 0,
-            lastMessageId: 0,
-            lastMessageRunningHash: bytes32(0)
+            lastMessageId: 1,
+            lastMessageRunningHash: hash1
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -801,26 +837,11 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
     ///      channel.status=CLOSING (not ACTIVE/PAUSED), so (ACTIVE||PAUSED) evaluates to false.
     ///      BRDA:131,6,0,- — inside 4c: `meta.receivedMessageId(0) > effectiveAcked(0)` FALSE;
     ///      effectiveAcked stays at channel.ackedMessageId.
-    ///      Both branches are covered in one test: local CLOSING + peer CLOSING + nextMessageId==1.
-    function test_checkBundleProgress_closingConnMetaClosing_drains() public {
-        service.closeChannel(channelId); // channel.status → CLOSING
-
-        bytes[] memory msgs = new bytes[](0);
-        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
-            receivedRunningHash: bytes32(0),
-            state: ClprTypes.ChannelStatus.CLOSING,
-            endpointManifestVersion: 0,
-            lastMessageId: 0,
-            lastMessageRunningHash: bytes32(0)
-        });
-        verifier.setVerifyBundleResult(meta, msgs);
-        _submitBundle(hex"CC");
-
-        // 4c fires (nextMessageId==1 → all acked) → channel transitions CLOSING → DRAINED.
-        ClprTypes.Channel memory channel = service.getChannel(channelId);
-        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.DRAINED));
+    ///      Both branches are covered in one call: local CLOSING + peer CLOSING + nextMessageId==1.
+    ///      Exercised directly against the harness: a real Channel can no longer be observed at
+    ///      CLOSING with zero messages sent — admin-close and bundle processing both walk
+    ///      straight through to DRAINED in that case (see Test 13 for that transition).
+    function test_checkBundleProgress_closingConnMetaClosing_drains() public view {
+        harness.checkProgress(CLOSING, 1, 0, 0, 0, CLOSING, 1, 0, hex"");
     }
 }

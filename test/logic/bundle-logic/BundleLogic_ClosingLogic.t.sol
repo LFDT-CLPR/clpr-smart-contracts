@@ -45,7 +45,7 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
         internal
         returns (uint64 replyMsgId)
     {
-        _registerTestConnector();
+        if (connectorId == bytes32(0)) _registerTestConnector();
         bytes memory dataPayload =
             ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F");
 
@@ -76,13 +76,14 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
     ///         to the application, generate a real Response Message, and charge the
     ///         Connector — not generate a CHANNEL_CLOSED reply (spec §4.2).
     function test_dataMessage_onClosingChannel_dispatchedNormally() public {
+        // Keep one outbound DATA message unacked so admin-close stays at CLOSING
+        // rather than advancing immediately to DRAINED.
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
         _adminClose();
 
         // Submit a DATA message while channel is CLOSING and peer is ACTIVE.
-        // We need peerNextMsgId = 2 because the channel moved to CLOSING (no outbound
-        // DATA messages were sent, so lastDataMessageId = 0 and ackedMessageId = 0 ≥ 0
-        // → CLOSING→DRAINED will fire immediately after this bundle; that's fine for the
-        // test, what matters is the reply content).
         uint64 replyMsgId = _submitDataOnStatus(ClprTypes.ChannelStatus.ACTIVE, 2, bytes32(0));
 
         // The app must have been called.
@@ -102,24 +103,8 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
     /// @notice A DATA message arriving on a DRAINED channel must also be dispatched
     ///         normally — the channel still accepts the peer's remaining messages.
     function test_dataMessage_onDrainedChannel_dispatchedNormally() public {
-        // Drive to CLOSING then immediately to DRAINED (no outbound DATA, so
-        // lastDataMessageId = 0 and the ack check is satisfied trivially).
-        _adminClose();
-
-        bytes[] memory noMsgs = new bytes[](0);
-        ClprTypes.QueueMetadata memory drainMeta = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
-            receivedRunningHash: bytes32(0),
-            state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0,
-            lastMessageId: 0,
-            lastMessageRunningHash: bytes32(0)
-        });
-        verifier.setVerifyBundleResult(drainMeta, noMsgs);
-        verifier.setNewTrustAnchor(hex"01");
-        _submitBundle(hex"00FF");
+        // No outbound DATA was ever sent, so admin-close advances straight to DRAINED.
+        service.closeChannel(channelId);
         assertEq(
             uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.DRAINED), "should be DRAINED"
         );
@@ -338,19 +323,19 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
         );
     }
 
-    /// @notice When there are NO outbound DATA messages (only CONTROL/REPLY messages),
-    ///         CLOSING → DRAINED should fire immediately (lastDataMessageId == 0).
+    /// @notice When there are NO outbound DATA messages (only CONTROL/REPLY messages), a
+    ///         bundle that pushes the channel to CLOSING advances it straight to DRAINED
+    ///         in the same call (lastDataMessageId == 0), without a further bundle.
     function test_closingToDrained_noDataMessages_firesImmediately() public {
-        // No sendMessage calls → lastDataMessageId = 0.
-        _adminClose();
-
+        // No sendMessage calls → lastDataMessageId = 0. Peer signals CLOSING (not yet
+        // DRAINED/CLOSED), so the cascade stops at DRAINED rather than reaching CLOSED.
         bytes[] memory noMsgs = new bytes[](0);
         ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
             nextMessageId: 1,
             sentRunningHash: bytes32(0),
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
-            state: ClprTypes.ChannelStatus.ACTIVE,
+            state: ClprTypes.ChannelStatus.CLOSING,
             endpointManifestVersion: 0,
             lastMessageId: 0,
             lastMessageRunningHash: bytes32(0)
@@ -434,6 +419,40 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
             uint8(ClprTypes.ChannelStatus.CLOSED),
             "must CLOSE once both queues are drained"
         );
+    }
+
+    /// @notice Admin recovery closeChannel on a DRAINED channel must revert while a
+    ///         Response Message generated during CLOSING is still unacknowledged —
+    ///         closing here would abandon a message the peer never received.
+    function test_closeChannel_fromDrained_reverts_whenResponseUnacked() public {
+        _registerTestConnector();
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544131");
+        _adminClose();
+
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes memory data2 =
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes32 hash2 = sha256(abi.encodePacked(hash1, sha256(data2)));
+
+        // Bundle A: peer acks our DATA#1 → CLOSING -> DRAINED.
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
+        verifier.setVerifyBundleResult(_drainedPeerMeta(3, hash2, 1, 1, hash1), msgs);
+        _submitBundle(hex"00FF");
+        assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.DRAINED));
+
+        // Bundle B: peer's DATA#2 arrives, generating our unacked Response (id 2).
+        msgs[0] = data2;
+        verifier.setVerifyBundleResult(_drainedPeerMeta(3, hash2, 1, 2, hash2), msgs);
+        _submitBundle(hex"00FF02");
+        ClprTypes.Channel memory channel = service.getChannel(channelId);
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.DRAINED));
+        assertEq(channel.ackedMessageId, 1, "our Response (id 2) is not yet acked");
+
+        vm.expectRevert(ClprTypes.ClprInvalidChannelStatus.selector);
+        service.closeChannel(channelId);
     }
 
     receive() external payable override {}

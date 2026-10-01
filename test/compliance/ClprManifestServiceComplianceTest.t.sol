@@ -166,17 +166,37 @@ contract ClprManifestServiceComplianceTest is ClprTestBase {
     /// @dev Spec: manifest advancement applies when the Channel is CLOSING or DRAINED as well as
     ///      ACTIVE — it is not limited to ACTIVE Channels.
     function test_compliance_manifestAdvancement_appliesToClosingAndDrained() public {
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING
+        // instead of advancing immediately to DRAINED.
+        _registerTestConnector();
+        service.sendMessage(channelId, connectorId, hex"11223344", hex"01");
         service.closeChannel(channelId);
         assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.CLOSING));
 
-        verifier.setVerifyBundleResult(_noOpMetadata(), new bytes[](0));
+        // Ack AND reply to that DATA message in the same bundle that advances the manifest.
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        bytes[] memory msgs = new bytes[](1);
+        msgs[0] = reply1;
+        ClprTypes.QueueMetadata memory meta = _noOpMetadata();
+        meta.nextMessageId = 2;
+        meta.sentRunningHash = hash1;
+        meta.receivedMessageId = 1;
+        meta.lastMessageId = 1;
+        meta.lastMessageRunningHash = hash1;
+        verifier.setVerifyBundleResult(meta, msgs);
         verifier.setNewEndpointManifest(_manifest(2, 1));
         service.submitBundle(channelId, hex"00FF");
 
         assertEq(service.getChannel(channelId).endpointManifestVersion, 2, "applied while CLOSING");
-        // With nothing left to drain the state machine walks CLOSING → DRAINED.
+        // With the outstanding DATA message now acked and answered, the state machine walks
+        // CLOSING → DRAINED.
         assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.DRAINED));
 
+        // Second bundle carries no new messages, only the manifest advance.
+        meta.lastMessageId = 0;
+        meta.lastMessageRunningHash = bytes32(0);
+        verifier.setVerifyBundleResult(meta, new bytes[](0));
         verifier.setNewEndpointManifest(_manifest(3, 2));
         service.submitBundle(channelId, hex"00FF");
 

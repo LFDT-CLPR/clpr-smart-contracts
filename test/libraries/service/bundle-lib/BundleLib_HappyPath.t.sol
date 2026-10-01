@@ -99,6 +99,11 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
     function test_dataMessage_closingState_dispatchesNormally() public {
         _registerTestConnector();
 
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING
+        // instead of advancing immediately to DRAINED.
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
+
         // Close channel
         service.closeChannel(channelId);
         assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.CLOSING));
@@ -127,8 +132,8 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
         // The DATA message is dispatched to the application despite CLOSING ...
         assertEq(app.getMessageCallCount(), 1);
 
-        // ... and generates a SUCCESS Response Message.
-        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 1);
+        // ... and generates a SUCCESS Response Message (id 2: id 1 is our own outbound DATA).
+        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 2);
         assertTrue(reply.payload.length > 0);
         ClprTypes.DecodedReply memory decoded = ClprProtobuf.decodeReplyMessage(reply.payload);
         assertEq(uint8(decoded.status), uint8(ClprTypes.ReplyStatus.SUCCESS));

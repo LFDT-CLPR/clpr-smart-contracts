@@ -545,7 +545,11 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
     ///      must still apply the state machine transition, not just commit the ack — otherwise
     ///      the channel is stuck CLOSING forever and the identical bundle can be resubmitted
     ///      indefinitely with no progress and no revert.
-    function test_closingPlusAwaitingReply_stillTransitionsToDrained() public {
+    /// @dev A DATA Message that is acked but not yet answered (AwaitingReply) must NOT drain
+    ///      CLOSING -> DRAINED. Draining anyway would let the channel reach DRAINED with a
+    ///      REPLY still outstanding that, since no DATA Message ever exists past
+    ///      lastDataMessageId, could never subsequently arrive — leaving the channel stuck.
+    function test_closingPlusAwaitingReply_staysClosingUntilAnswered() public {
         _registerTestConnector();
 
         // Send one outbound DATA message so there is something to ack.
@@ -571,14 +575,14 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         _submitBundle(hex"00FF");
 
-        // dataAcked is now true, so CLOSING -> DRAINED must fire even though dispatch was
-        // skipped for the AwaitingReply outcome.
+        // dataAcked is false (acked but not answered), so CLOSING -> DRAINED must not fire,
+        // even though dispatch was skipped and the ack itself is still committed.
         chan = service.getChannel(channelId);
-        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.DRAINED), "must drain, not stay stuck CLOSING");
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.CLOSING), "must stay CLOSING until answered");
         assertEq(chan.ackedMessageId, 1, "ack must still be committed");
 
         // Resubmitting the identical no-op bundle must now be rejected as no progress,
-        // instead of silently re-evaluating the same transition forever.
+        // instead of silently re-evaluating the same non-transition forever.
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         vm.expectRevert(BundleLib.NoProgress.selector);
         _submitBundle(hex"00FF");
