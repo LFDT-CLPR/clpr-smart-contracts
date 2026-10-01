@@ -29,7 +29,18 @@ fs_permissions = [
     { access = "read", path = "test/verifiers/evm/qbft/fixtures" },
     { access = "read", path = "src/verifiers" },
     { access = "read", path = "test/verifiers" },
+    # The Blake2s test harness compiles in the legacy profile; via-IR tests load it from its artifact.
+    { access = "read", path = "out/Blake2sHarness.sol" },
 ]
+# ZkSyncStateTreeVerifier is hand-scheduled assembly (an unrolled Blake2s). The legacy pipeline compiles it
+# in seconds and runs it at the same speed, while via-IR spends minutes optimizing it. Sources that import it
+# compile in the same profile, so the via-IR verifiers reach it through its interface only.
+additional_compiler_profiles = [{ name = "asm-legacy", via_ir = false }]
+compilation_restrictions = [
+    { paths = "src/verifiers/evm/zksync/ZkSyncStateTreeVerifier.sol", via_ir = false },
+    { paths = "test/verifiers/evm/zksync/Blake2sHarness.sol", via_ir = false },
+]
+
 [profile.default.fuzz]
 runs = 256
 
