@@ -176,9 +176,30 @@ library ClprBeaconBls {
     }
 
     function _hashToG2(bytes32 signingRoot) private view returns (bytes memory) {
+        return _hashBytesToG2(abi.encodePacked(signingRoot));
+    }
+
+    /// @notice Hash an arbitrary-length message to G2 under the same `_POP_` ciphersuite DST
+    ///         (`BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`). Used by verifiers whose signers sign
+    ///         raw byte strings rather than a 32-byte signing root (e.g. Solana Alpenglow votes).
+    function hashBytesToG2(bytes memory message) internal view returns (bytes memory) {
+        return _hashBytesToG2(message);
+    }
+
+    /// @notice Verify `e(aggPubkey, H(message)) == e(G1, signature)` for an already-aggregated
+    ///         128-byte EIP-2537 G1 public key and a 256-byte EIP-2537 G2 signature. The pairing
+    ///         precompile subgroup-checks both inputs. Reverts on an identity key or signature.
+    function verifyAggregate(bytes memory aggPubkey, bytes memory signature, bytes memory message) internal view {
+        if (signature.length != 256) revert InvalidSignatureLength();
+        if (aggPubkey.length != 128) revert InvalidPubkeyLength();
+        if (_isZero(aggPubkey) || _isZero(signature)) revert BlsSignatureInvalid();
+        _verifyPairing(aggPubkey, signature, _hashBytesToG2(message));
+    }
+
+    function _hashBytesToG2(bytes memory message) private view returns (bytes memory) {
         // hash_to_field(msg, count=2) for G2: 2 Fp2 elements = 4 Fp elements, each from L=64 bytes
         // reduced mod p (RFC 9380 §5.3, L = ceil((ceil(log2 p) + k) / 8) = 64). So 256 expansion bytes.
-        bytes memory expanded = _expandMessageXmd(abi.encodePacked(signingRoot), BLS_DST, 256);
+        bytes memory expanded = _expandMessageXmd(message, BLS_DST, 256);
         bytes memory q0 = _mapFp2ToG2(_makeFp2(expanded, 0)); // u[0] = (e0, e1) from bytes [0..128)
         bytes memory q1 = _mapFp2ToG2(_makeFp2(expanded, 128)); // u[1] = (e2, e3) from bytes [128..256)
         return _g2Add(q0, q1);
