@@ -1,2 +1,8 @@
 .DS_Store
 .idea/
+out/
+cache/
+broadcast/
+node_modules/
+coverage/
+lcov.info
