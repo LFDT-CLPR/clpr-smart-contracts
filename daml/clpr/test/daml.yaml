@@ -1,0 +1,10 @@
+sdk-version: 3.5.12
+name: clpr-test
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../main/.daml/dist/clpr-0.1.0.dar

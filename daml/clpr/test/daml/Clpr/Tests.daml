@@ -1,0 +1,299 @@
+-- Copyright (c) 2026 ColdAI. SPDX-License-Identifier: Apache-2.0
+
+-- | Daml Script tests for the CLPR Canton app. Hash vectors were computed
+-- independently with Python's hashlib (see daml/clpr/README section in
+-- src/verifiers/canton/README.md).
+module Clpr.Tests where
+
+import DA.Assert ((===))
+import DA.List (head, last, (!!))
+import DA.Foldable (forA_)
+import DA.Crypto.Text (sha256)
+import DA.Text qualified as T
+import Daml.Script
+
+import Clpr.Codec
+import Clpr.Channel
+import Clpr.Rules
+
+-- ── Vectors ─────────────────────────────────────────────────────────────────
+
+connector : Text
+connector = T.implode (map (const "11") [1 .. 32])
+
+target : Text
+target = T.implode (map (const "22") [1 .. 20])
+
+hello40 : Text
+hello40 = T.implode (map (const "68656c6c6f") [1 .. 40])
+
+-- Python: payload for sender = b"alice::1220ab", message_data = b"hello" * 40.
+expectedPayload : Text
+expectedPayload =
+  "0a92020a20" <> connector <> "1214" <> target
+    <> "1a0d616c6963653a3a313232306162" <> "22c801" <> hello40
+
+opKey : Int -> Text
+opKey i = T.implode (map (const (byteHex i)) [1 .. 20])
+
+test_codec : Script ()
+test_codec = script do
+  -- sha256 hashes the bytes the hex denotes, not the hex characters.
+  sha256 "616263" === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  varintHex 0 === "00"
+  varintHex 127 === "7f"
+  varintHex 128 === "8001"
+  varintHex 300 === "ac02"
+  pbBytesField 3 "" === ""
+  encodeDataMessagePayload connector target "616c6963653a3a313232306162" hello40 === expectedPayload
+  nextRunningHash SpecDirect zeroHash32 expectedPayload
+    === "58d566bbd06aa0826d481b654c7360e60624d5a23b1ea02bb366e4a1d19a4089"
+  nextRunningHash PayloadDigest zeroHash32 expectedPayload
+    === "77954e6de7f1ee212342f58de243314dda60e45d618d5a6850b04cb9d1ebdc46"
+
+-- ── Fixture ─────────────────────────────────────────────────────────────────
+
+data World = World with
+  clpr : Party
+  ops : [Party]
+  alice : Party
+  rulesCid : ContractId ClprRules
+
+channelIdHex : Text
+channelIdHex = T.implode (map (const "c4") [1 .. 32])
+
+asOp : Party -> Party -> SubmitOptions
+asOp clpr op = actAs op <> readAs clpr
+
+setupWorld : Script World
+setupWorld = do
+  clpr <- allocatePartyByHint (PartyIdHint "clpr")
+  op1 <- allocatePartyByHint (PartyIdHint "op1")
+  op2 <- allocatePartyByHint (PartyIdHint "op2")
+  op3 <- allocatePartyByHint (PartyIdHint "op3")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  let ops = [op1, op2, op3]
+  rulesCid <- submit clpr do
+    createCmd ClprRules with
+      clpr; operators = ops; attestationKeys = map opKey [1, 2, 3]; threshold = 2; epoch = 0
+  pure World with ..
+
+confirm : World -> Party -> ClprAction -> Script (ContractId Confirmation)
+confirm w op action =
+  submit (asOp w.clpr op) do exerciseCmd w.rulesCid ClprRules_Confirm with confirmer = op; action
+
+quorum : World -> [Party] -> ClprAction -> Script [ContractId Confirmation]
+quorum w signers action = mapA (\op -> confirm w op action) signers
+
+openChannel : World -> RunningHashScheme -> Script (ContractId Channel)
+openChannel w scheme = do
+  let [op1, op2, _] = w.ops
+      action = OpenChannel with
+        channelId = channelIdHex; peerChainId = "hedera:testnet"; hashScheme = scheme; endpointManifestVersion = 1
+  cids <- quorum w [op1, op2] action
+  submit (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_OpenChannel with
+      executor = op1; confirmationCids = cids; channelId = channelIdHex
+      peerChainId = "hedera:testnet"; hashScheme = scheme; endpointManifestVersion = 1
+
+send : World -> ContractId Channel -> Text -> Script (ContractId Channel, ContractId OutboundMessage)
+send w chCid dataHex = do
+  reqCid <- submit w.alice do
+    createCmd SendRequest with
+      sender = w.alice; clpr = w.clpr; channelId = channelIdHex
+      connectorId = connector; targetApplication = target; messageData = dataHex
+  submit (asOp w.clpr (head w.ops)) do
+    exerciseCmd w.rulesCid ClprRules_Enqueue with executor = head w.ops; requestCid = reqCid; channelCid = chCid
+
+-- ── Outbound queue ──────────────────────────────────────────────────────────
+
+test_outboundQueue : Script ()
+test_outboundQueue = script do
+  w <- setupWorld
+  forA_ [SpecDirect, PayloadDigest] $ \scheme -> do
+    chCid <- openChannel w scheme
+    (chCid, m1) <- send w chCid "01"
+    (chCid, m2) <- send w chCid "0202"
+    (chCid, m3) <- send w chCid hello40
+    Some ch <- queryContractId w.clpr chCid
+    msgs <- mapA (\c -> do Some m <- queryContractId w.clpr c; pure m) [m1, m2, m3]
+    map (.messageId) msgs === [1, 2, 3]
+    ch.nextMessageId === 4
+    -- The running hash is the spec fold over the canonical payloads.
+    let payloads = map (.payloadHex) msgs
+    ch.sentRunningHash === runningHashChain scheme zeroHash32 payloads
+    (last msgs).runningHashAfter === ch.sentRunningHash
+    (head msgs).payloadHex
+      === encodeDataMessagePayload connector target (partyBytesHex w.alice) "01"
+    -- Per-message hashes chain from one another.
+    (msgs !! 1).runningHashAfter === nextRunningHash scheme (head msgs).runningHashAfter (msgs !! 1).payloadHex
+
+test_enqueueNeedsOperatorAndSignedRequest : Script ()
+test_enqueueNeedsOperatorAndSignedRequest = script do
+  w <- setupWorld
+  chCid <- openChannel w SpecDirect
+  reqCid <- submit w.alice do
+    createCmd SendRequest with
+      sender = w.alice; clpr = w.clpr; channelId = channelIdHex
+      connectorId = connector; targetApplication = target; messageData = "aa"
+  -- A non-operator cannot run the enqueue choice.
+  submitMustFail (actAs w.alice <> readAs w.clpr) do
+    exerciseCmd w.rulesCid ClprRules_Enqueue with executor = w.alice; requestCid = reqCid; channelCid = chCid
+  -- Bad connector id is rejected on-ledger.
+  badReq <- submit w.alice do
+    createCmd SendRequest with
+      sender = w.alice; clpr = w.clpr; channelId = channelIdHex
+      connectorId = "1234"; targetApplication = target; messageData = "aa"
+  submitMustFail (asOp w.clpr (head w.ops)) do
+    exerciseCmd w.rulesCid ClprRules_Enqueue with executor = head w.ops; requestCid = badReq; channelCid = chCid
+
+-- ── Quorum-gated inbound delivery ───────────────────────────────────────────
+
+inboundPayload : Text
+inboundPayload = expectedPayload
+
+deliverAction : World -> Int -> Text -> Text -> ClprAction
+deliverAction w mid payload rh = DeliverInbound with
+  channelId = channelIdHex; messageId = mid; payloadHex = payload
+  runningHashAfter = rh; peerReceivedMessageId = 0; recipient = w.alice
+
+deliver : World -> Party -> [ContractId Confirmation] -> ContractId Channel -> Int -> Text -> Text -> Commands (ContractId Channel, ContractId InboundMessage)
+deliver w executor cids chCid mid payload rh =
+  exerciseCmd w.rulesCid ClprRules_DeliverInbound with
+    executor; confirmationCids = cids; channelCid = chCid; messageId = mid
+    payloadHex = payload; runningHashAfter = rh; peerReceivedMessageId = 0; recipient = w.alice
+
+test_inboundDelivery : Script ()
+test_inboundDelivery = script do
+  w <- setupWorld
+  let [op1, op2, op3] = w.ops
+  chCid <- openChannel w SpecDirect
+  let rh1 = nextRunningHash SpecDirect zeroHash32 inboundPayload
+      act1 = deliverAction w 1 inboundPayload rh1
+
+  -- One confirmation is below t = 2.
+  [c1] <- quorum w [op1] act1
+  submitMustFail (asOp w.clpr op1) do deliver w op1 [c1] chCid 1 inboundPayload rh1
+  -- The same operator twice does not make a quorum.
+  [c1b] <- quorum w [op1] act1
+  submitMustFail (asOp w.clpr op1) do deliver w op1 [c1, c1b] chCid 1 inboundPayload rh1
+  -- A confirmation for a different action does not count.
+  [cOther] <- quorum w [op2] (deliverAction w 1 inboundPayload zeroHash32)
+  submitMustFail (asOp w.clpr op1) do deliver w op1 [c1, cOther] chCid 1 inboundPayload rh1
+  -- A non-operator cannot confirm.
+  submitMustFail (asOp w.clpr w.alice) do
+    exerciseCmd w.rulesCid ClprRules_Confirm with confirmer = w.alice; action = act1
+  -- A quorum over a wrong running hash cannot be delivered.
+  bad <- quorum w [op2, op3] (deliverAction w 1 inboundPayload zeroHash32)
+  submitMustFail (asOp w.clpr op3) do deliver w op3 bad chCid 1 inboundPayload zeroHash32
+
+  -- t distinct confirmations: delivered.
+  [c2] <- quorum w [op2] act1
+  (chCid, inCid) <- submit (asOp w.clpr op3) do deliver w op3 [c1, c2] chCid 1 inboundPayload rh1
+  Some ch <- queryContractId w.clpr chCid
+  ch.receivedMessageId === 1
+  ch.receivedRunningHash === rh1
+  Some inbound <- queryContractId w.alice inCid
+  inbound.payloadHex === inboundPayload
+
+  -- Spent confirmations cannot be replayed.
+  submitMustFail (asOp w.clpr op3) do deliver w op3 [c1, c2] chCid 1 inboundPayload rh1
+  -- A fresh quorum for the same message id is rejected (replay).
+  again <- quorum w [op1, op2] act1
+  submitMustFail (asOp w.clpr op1) do deliver w op1 again chCid 1 inboundPayload rh1
+  -- A gap (id 3 before 2) is rejected.
+  let rh3 = nextRunningHash SpecDirect rh1 inboundPayload
+  gap <- quorum w [op1, op2] (deliverAction w 3 inboundPayload rh3)
+  submitMustFail (asOp w.clpr op1) do deliver w op1 gap chCid 3 inboundPayload rh3
+  -- The next id with the right chained hash is accepted.
+  let rh2 = nextRunningHash SpecDirect rh1 inboundPayload
+  ok2 <- quorum w [op1, op3] (deliverAction w 2 inboundPayload rh2)
+  (chCid, _) <- submit (asOp w.clpr op1) do deliver w op1 ok2 chCid 2 inboundPayload rh2
+  Some ch <- queryContractId w.clpr chCid
+  ch.receivedMessageId === 2
+  ch.receivedRunningHash === rh2
+  inbound <- query @InboundMessage w.alice
+  length inbound === 2
+
+-- ── Operator-set management ─────────────────────────────────────────────────
+
+test_rotation : Script ()
+test_rotation = script do
+  w <- setupWorld
+  let [op1, op2, op3] = w.ops
+  op4 <- allocatePartyByHint (PartyIdHint "op4")
+  chCid <- openChannel w SpecDirect
+  let newOps = [op2, op3, op4]
+      rot = RotateOperators with newOperators = newOps; newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 2
+      rh1 = nextRunningHash SpecDirect zeroHash32 inboundPayload
+      act1 = deliverAction w 1 inboundPayload rh1
+
+  -- An epoch-0 confirmation made before the rotation ...
+  [stale] <- quorum w [op2] act1
+
+  -- Rotation needs the current quorum.
+  [r1] <- quorum w [op1] rot
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_RotateOperators with
+      executor = op1; confirmationCids = [r1]; newOperators = newOps
+      newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 2
+  -- An invalid new set (t > n) is rejected even with a quorum.
+  badRot <- quorum w [op1, op2]
+    (RotateOperators with newOperators = newOps; newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 4)
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_RotateOperators with
+      executor = op1; confirmationCids = badRot; newOperators = newOps
+      newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 4
+  -- A minority threshold (1-of-3) is rejected: quorums must intersect.
+  weakRot <- quorum w [op1, op2]
+    (RotateOperators with newOperators = newOps; newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 1)
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_RotateOperators with
+      executor = op1; confirmationCids = weakRot; newOperators = newOps
+      newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 1
+  -- Duplicate attestation keys are rejected.
+  dupRot <- quorum w [op1, op2]
+    (RotateOperators with newOperators = newOps; newAttestationKeys = map opKey [2, 2, 4]; newThreshold = 2)
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_RotateOperators with
+      executor = op1; confirmationCids = dupRot; newOperators = newOps
+      newAttestationKeys = map opKey [2, 2, 4]; newThreshold = 2
+
+  [r2] <- quorum w [op3] rot
+  rules2 <- submit (asOp w.clpr op3) do
+    exerciseCmd w.rulesCid ClprRules_RotateOperators with
+      executor = op3; confirmationCids = [r1, r2]; newOperators = newOps
+      newAttestationKeys = map opKey [2, 3, 4]; newThreshold = 2
+  Some r <- queryContractId w.clpr rules2
+  r.epoch === 1
+  r.operators === newOps
+  let w2 = w with rulesCid = rules2
+
+  -- The removed operator can no longer confirm.
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd rules2 ClprRules_Confirm with confirmer = op1; action = act1
+  -- An epoch-0 confirmation cannot be combined into an epoch-1 quorum.
+  [fresh] <- quorum w2 [op4] act1
+  submitMustFail (asOp w.clpr op4) do deliver w2 op4 [stale, fresh] chCid 1 inboundPayload rh1
+  -- The new set works.
+  [fresh2] <- quorum w2 [op3] act1
+  (chCid, _) <- submit (asOp w.clpr op4) do deliver w2 op4 [fresh, fresh2] chCid 1 inboundPayload rh1
+  Some ch <- queryContractId w.clpr chCid
+  ch.receivedMessageId === 1
+
+test_channelStatus : Script ()
+test_channelStatus = script do
+  w <- setupWorld
+  let [op1, op2, _] = w.ops
+  chCid <- openChannel w SpecDirect
+  cids <- quorum w [op1, op2] (SetChannelStatus with channelId = channelIdHex; newStatus = Paused)
+  chCid <- submit (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_SetChannelStatus with
+      executor = op1; confirmationCids = cids; channelCid = chCid; newStatus = Paused
+  -- A paused channel refuses new messages.
+  reqCid <- submit w.alice do
+    createCmd SendRequest with
+      sender = w.alice; clpr = w.clpr; channelId = channelIdHex
+      connectorId = connector; targetApplication = target; messageData = "aa"
+  submitMustFail (asOp w.clpr op1) do
+    exerciseCmd w.rulesCid ClprRules_Enqueue with executor = op1; requestCid = reqCid; channelCid = chCid

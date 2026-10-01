@@ -1,0 +1,115 @@
+-- Copyright (c) 2026 ColdAI. SPDX-License-Identifier: Apache-2.0
+
+-- | Hex, protobuf and running-hash helpers for the CLPR Canton app.
+--
+-- Daml has no byte type. Every byte string here is lowercase hex ('BytesHex'),
+-- and hashing goes through the 'DA.Crypto.Text' builtins, which hash the bytes
+-- the hex denotes (not the hex characters).
+module Clpr.Codec
+  ( RunningHashScheme(..)
+  , zeroHash32
+  , isHexBytes
+  , isHex32
+  , normalizeHex
+  , byteHex
+  , varintHex
+  , pbBytesField
+  , encodeDataMessagePayload
+  , nextRunningHash
+  , runningHashChain
+  , partyBytesHex
+  ) where
+
+import DA.Crypto.Text (sha256, isHex, toHex)
+import DA.Text qualified as T
+
+-- | How a queue folds a payload into its running hash.
+--
+-- * 'SpecDirect' is CLPR spec §4.1 as amended by ADR 2026-08-01
+--   ("Removing Message Redaction"):
+--   @running_hash = SHA-256(previous_running_hash || serialized_payload)@.
+-- * 'PayloadDigest' is the pre-ADR rule that the reference Solidity
+--   ClprService (MessagingLogic / BundleLib) still implements:
+--   @running_hash = SHA-256(previous_running_hash || SHA-256(serialized_payload))@.
+--
+-- The scheme is fixed per channel when the channel is opened; both peers
+-- must use the same one (the spec ties it to the channel's protocol version).
+data RunningHashScheme = SpecDirect | PayloadDigest
+  deriving (Eq, Show)
+
+-- | 32 zero bytes: the initial running hash of every channel (spec §4.1).
+zeroHash32 : Text
+zeroHash32 = T.implode (map (const "00") [1 .. 32])
+
+-- | Lowercase the hex digits of a byte string.
+normalizeHex : Text -> Text
+normalizeHex = T.asciiToLower
+
+-- | True for an even-length hex string. The empty string counts (zero bytes).
+isHexBytes : Text -> Bool
+isHexBytes t = T.length t % 2 == 0 && (t == "" || isHex t)
+
+-- | True for exactly 32 bytes of hex.
+isHex32 : Text -> Bool
+isHex32 t = T.length t == 64 && isHex t
+
+nibble : Int -> Text
+nibble n = case n of
+  10 -> "a"
+  11 -> "b"
+  12 -> "c"
+  13 -> "d"
+  14 -> "e"
+  15 -> "f"
+  _ -> show n
+
+-- | One byte (0..255) as two hex digits.
+byteHex : Int -> Text
+byteHex n
+  | n < 0 || n > 255 = error ("byteHex: out of range: " <> show n)
+  | otherwise = nibble (n / 16) <> nibble (n % 16)
+
+-- | Protobuf base-128 varint of a non-negative Int.
+varintHex : Int -> Text
+varintHex n
+  | n < 0 = error ("varintHex: negative: " <> show n)
+  | n < 128 = byteHex n
+  | otherwise = byteHex (n % 128 + 128) <> varintHex (n / 128)
+
+-- | A length-delimited protobuf field (wire type 2). Proto3 canonical encoding
+-- omits an empty bytes field, so empty input yields "".
+pbBytesField : Int -> Text -> Text
+pbBytesField field dataHex
+  | not (isHexBytes dataHex) = error ("pbBytesField: not hex: " <> dataHex)
+  | dataHex == "" = ""
+  | otherwise = varintHex (field * 8 + 2) <> varintHex (T.length dataHex / 2) <> dataHex
+
+-- | Canonical protobuf of
+-- @ClprMessagePayload { message = ClprMessage { connector_id = 1, target_application = 2, sender = 3, message_data = 4 } }@
+-- (spec §1.4). The data message itself is always emitted, even when every
+-- inner field is empty, because it is a set oneof member.
+encodeDataMessagePayload : Text -> Text -> Text -> Text -> Text
+encodeDataMessagePayload connectorId targetApplication sender messageData =
+  let inner =
+        pbBytesField 1 (normalizeHex connectorId)
+          <> pbBytesField 2 (normalizeHex targetApplication)
+          <> pbBytesField 3 (normalizeHex sender)
+          <> pbBytesField 4 (normalizeHex messageData)
+  in varintHex (1 * 8 + 2) <> varintHex (T.length inner / 2) <> inner
+
+-- | Fold one serialized payload into a running hash.
+nextRunningHash : RunningHashScheme -> Text -> Text -> Text
+nextRunningHash scheme prev payload
+  | not (isHex32 prev) = error ("nextRunningHash: previous hash is not 32 bytes: " <> prev)
+  | not (isHexBytes payload) || payload == "" = error "nextRunningHash: payload must be non-empty hex"
+  | otherwise = case scheme of
+      SpecDirect -> sha256 (normalizeHex prev <> normalizeHex payload)
+      PayloadDigest -> sha256 (normalizeHex prev <> sha256 (normalizeHex payload))
+
+-- | Fold a list of payloads, starting from 'prev'.
+runningHashChain : RunningHashScheme -> Text -> [Text] -> Text
+runningHashChain scheme = foldl (nextRunningHash scheme)
+
+-- | The CLPR 'sender' bytes for a Canton party: the UTF-8 bytes of its party id.
+partyBytesHex : Party -> Text
+partyBytesHex p = toHex (partyToText p)

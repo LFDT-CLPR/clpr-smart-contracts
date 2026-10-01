@@ -1,0 +1,152 @@
+-- Copyright (c) 2026 ColdAI. SPDX-License-Identifier: Apache-2.0
+
+-- | Per-channel CLPR queue state on Canton.
+--
+-- Every contract here is signed by the decentralized @clpr@ party alone. Its
+-- choices are controlled by @clpr@ too, so they can only run inside a
+-- 'Clpr.Rules.ClprRules' choice, which carries @clpr@'s authority and enforces
+-- the operator rules (DSO pattern).
+module Clpr.Channel where
+
+import DA.Text qualified as T
+import Clpr.Codec
+
+-- | Mirrors @ClprTypes.ChannelStatus@ / the spec's ChannelSyncData status, in
+-- the same order, so 'channelStatusIndex' is the Solidity enum value.
+data ChannelStatus = Pending | Active | Paused | Closing | Drained | Closed
+  deriving (Eq, Show, Ord, Enum, Bounded)
+
+channelStatusIndex : ChannelStatus -> Int
+channelStatusIndex = fromEnum
+
+-- | The channel's queue metadata (spec §2 Channel + ChannelSyncData).
+template Channel
+  with
+    clpr : Party
+    channelId : Text                 -- ^ 32 bytes, lowercase hex
+    peerChainId : Text               -- ^ CAIP-2 id of the peer (e.g. "hedera:testnet")
+    hashScheme : RunningHashScheme
+    status : ChannelStatus
+    nextMessageId : Int              -- ^ id the next enqueued message gets (starts at 1)
+    sentRunningHash : Text           -- ^ running hash through nextMessageId - 1
+    receivedMessageId : Int          -- ^ last inbound message delivered
+    receivedRunningHash : Text       -- ^ running hash through receivedMessageId
+    ackedMessageId : Int             -- ^ highest outbound id the peer has acknowledged
+    endpointManifestVersion : Int
+  where
+    signatory clpr
+    ensure isHex32 channelId
+      && isHex32 sentRunningHash
+      && isHex32 receivedRunningHash
+      && nextMessageId >= 1
+      && receivedMessageId >= 0
+      && ackedMessageId >= 0
+      && ackedMessageId < nextMessageId
+
+    -- | Append one data message (spec §4.3 steps 6-9). The payload is built
+    -- on-ledger, so the sender bytes are stamped from the submitting party.
+    choice Channel_Enqueue : (ContractId Channel, ContractId OutboundMessage)
+      with
+        sender : Party
+        connectorId : Text
+        targetApplication : Text
+        messageData : Text
+      controller clpr
+      do
+        assertMsg "channel is not ACTIVE" (status == Active)
+        assertMsg "connectorId must be 32 bytes of hex" (isHex32 connectorId)
+        assertMsg "targetApplication must be hex" (isHexBytes targetApplication)
+        assertMsg "messageData must be hex" (isHexBytes messageData)
+        let payloadHex =
+              encodeDataMessagePayload connectorId targetApplication (partyBytesHex sender) messageData
+            runningHashAfter = nextRunningHash hashScheme sentRunningHash payloadHex
+            messageId = nextMessageId
+        msgCid <- create OutboundMessage with
+          clpr; channelId; messageId; sender; payloadHex; runningHashAfter
+        chCid <- create this with
+          nextMessageId = nextMessageId + 1
+          sentRunningHash = runningHashAfter
+        pure (chCid, msgCid)
+
+    -- | Accept the next inbound message from the peer, after quorum checks in
+    -- 'Clpr.Rules.ClprRules_DeliverInbound'. Recomputes the running hash
+    -- (spec §4.2 steps 3-4) and records the peer's acknowledgement.
+    choice Channel_RecordInbound : (ContractId Channel, ContractId InboundMessage)
+      with
+        messageId : Int
+        payloadHex : Text
+        expectedRunningHash : Text
+        peerReceivedMessageId : Int
+        recipient : Party
+      controller clpr
+      do
+        assertMsg "channel does not accept inbound messages" (status == Active || status == Closing)
+        assertMsg "inbound message id is not received_message_id + 1" (messageId == receivedMessageId + 1)
+        let computed = nextRunningHash hashScheme receivedRunningHash payloadHex
+        assertMsg "inbound running hash mismatch" (computed == normalizeHex expectedRunningHash)
+        assertMsg "peer ack runs ahead of the outbound queue" (peerReceivedMessageId < nextMessageId)
+        inCid <- create InboundMessage with
+          clpr; channelId; messageId; payloadHex = normalizeHex payloadHex; runningHashAfter = computed; recipient
+        chCid <- create this with
+          receivedMessageId = messageId
+          receivedRunningHash = computed
+          ackedMessageId = max ackedMessageId peerReceivedMessageId
+        pure (chCid, inCid)
+
+    choice Channel_SetStatus : ContractId Channel
+      with newStatus : ChannelStatus
+      controller clpr
+      do create this with status = newStatus
+
+-- | One outbound queue entry (spec ClprMessageKey + ClprMessageValue).
+template OutboundMessage
+  with
+    clpr : Party
+    channelId : Text
+    messageId : Int
+    sender : Party
+    payloadHex : Text          -- ^ canonical protobuf ClprMessagePayload
+    runningHashAfter : Text    -- ^ running_hash_after_processing
+  where
+    signatory clpr
+    observer sender
+    ensure messageId >= 1 && isHex32 runningHashAfter && T.length payloadHex > 0
+
+-- | A delivered inbound message, handed to its Canton recipient.
+template InboundMessage
+  with
+    clpr : Party
+    channelId : Text
+    messageId : Int
+    payloadHex : Text
+    runningHashAfter : Text
+    recipient : Party
+  where
+    signatory clpr
+    observer recipient
+
+    choice InboundMessage_Consume : ()
+      controller recipient
+      do pure ()
+
+-- | A user's request to send a CLPR data message. Signed by the user, so the
+-- @sender@ stamped into the payload is authenticated by Canton.
+template SendRequest
+  with
+    sender : Party
+    clpr : Party
+    channelId : Text
+    connectorId : Text
+    targetApplication : Text
+    messageData : Text
+  where
+    signatory sender
+    observer clpr
+
+    choice SendRequest_Accept : SendRequest
+      controller clpr
+      do pure this
+
+    choice SendRequest_Cancel : ()
+      controller sender
+      do pure ()

@@ -1,0 +1,7 @@
+sdk-version: 3.5.12
+name: clpr
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib

@@ -1,0 +1,225 @@
+-- Copyright (c) 2026 ColdAI. SPDX-License-Identifier: Apache-2.0
+
+-- | Operator rules for the CLPR Canton app, in the Splice DSO pattern.
+--
+-- @clpr@ is a decentralized party hosted by the n CLPR endpoint operators'
+-- participants with confirmation threshold t. 'ClprRules' is signed by @clpr@
+-- and lists the operators. An operator acts in two ways:
+--
+-- * Confirm: 'ClprRules_Confirm' creates a 'Confirmation' of one 'ClprAction'.
+-- * Execute: any operator exercises the matching choice with at least
+--   'threshold' confirmations of exactly that action from distinct operators of
+--   the current epoch. The choice archives the confirmations, so each quorum is
+--   spent once.
+--
+-- Enqueueing an outbound message needs no quorum here: it is a deterministic
+-- function of a user-signed 'SendRequest', and Canton already requires t of
+-- the @clpr@ hosts to confirm the transaction.
+module Clpr.Rules where
+
+import DA.List (unique)
+import DA.Text qualified as T
+import Clpr.Codec
+import Clpr.Channel
+
+-- | Everything that needs a t-of-n operator quorum.
+data ClprAction
+  = OpenChannel with
+      channelId : Text
+      peerChainId : Text
+      hashScheme : RunningHashScheme
+      endpointManifestVersion : Int
+  -- Operators confirm DeliverInbound only after checking the Hiero state proof
+  -- of the message (off-ledger today; see the relay's HieroProofChecker).
+  | DeliverInbound with
+      channelId : Text
+      messageId : Int
+      payloadHex : Text
+      runningHashAfter : Text
+      peerReceivedMessageId : Int
+      recipient : Party
+  | SetChannelStatus with
+      channelId : Text
+      newStatus : ChannelStatus
+  | RotateOperators with
+      newOperators : [Party]
+      newAttestationKeys : [Text]
+      newThreshold : Int
+  deriving (Eq, Show)
+
+-- | t-of-n operator set. 'attestationKeys' are the operators' secp256k1
+-- attestation addresses (20-byte EVM addresses, lowercase hex, no 0x), in the
+-- same order as 'operators'. CantonAttestedVerifier on Hiero pins exactly this
+-- list, threshold and epoch.
+template ClprRules
+  with
+    clpr : Party
+    operators : [Party]
+    attestationKeys : [Text]
+    threshold : Int
+    epoch : Int
+  where
+    signatory clpr
+    observer operators
+    ensure validOperatorSet operators attestationKeys threshold && epoch >= 0
+
+    nonconsuming choice ClprRules_Confirm : ContractId Confirmation
+      with
+        confirmer : Party
+        action : ClprAction
+      controller confirmer
+      do
+        assertMsg "confirmer is not a CLPR operator" (confirmer `elem` operators)
+        create Confirmation with clpr; confirmer; epoch; action
+
+    nonconsuming choice ClprRules_OpenChannel : ContractId Channel
+      with
+        executor : Party
+        confirmationCids : [ContractId Confirmation]
+        channelId : Text
+        peerChainId : Text
+        hashScheme : RunningHashScheme
+        endpointManifestVersion : Int
+      controller executor
+      do
+        spendQuorum this executor confirmationCids
+          (OpenChannel with channelId; peerChainId; hashScheme; endpointManifestVersion)
+        create Channel with
+          clpr
+          channelId = normalizeHex channelId
+          peerChainId
+          hashScheme
+          status = Active
+          nextMessageId = 1
+          sentRunningHash = zeroHash32
+          receivedMessageId = 0
+          receivedRunningHash = zeroHash32
+          ackedMessageId = 0
+          endpointManifestVersion
+
+    -- | Turn a user's 'SendRequest' into the next outbound queue entry.
+    nonconsuming choice ClprRules_Enqueue : (ContractId Channel, ContractId OutboundMessage)
+      with
+        executor : Party
+        requestCid : ContractId SendRequest
+        channelCid : ContractId Channel
+      controller executor
+      do
+        assertMsg "executor is not a CLPR operator" (executor `elem` operators)
+        req <- exercise requestCid SendRequest_Accept
+        ch <- fetch channelCid
+        assertMsg "request is for another clpr party" (req.clpr == clpr && ch.clpr == clpr)
+        assertMsg "request is for another channel" (normalizeHex req.channelId == ch.channelId)
+        exercise channelCid Channel_Enqueue with
+          sender = req.sender
+          connectorId = req.connectorId
+          targetApplication = req.targetApplication
+          messageData = req.messageData
+
+    -- | Deliver the next inbound message once t operators confirmed it.
+    nonconsuming choice ClprRules_DeliverInbound : (ContractId Channel, ContractId InboundMessage)
+      with
+        executor : Party
+        confirmationCids : [ContractId Confirmation]
+        channelCid : ContractId Channel
+        messageId : Int
+        payloadHex : Text
+        runningHashAfter : Text
+        peerReceivedMessageId : Int
+        recipient : Party
+      controller executor
+      do
+        ch <- fetch channelCid
+        assertMsg "channel belongs to another clpr party" (ch.clpr == clpr)
+        spendQuorum this executor confirmationCids
+          (DeliverInbound with
+            channelId = ch.channelId
+            messageId
+            payloadHex = normalizeHex payloadHex
+            runningHashAfter = normalizeHex runningHashAfter
+            peerReceivedMessageId
+            recipient)
+        exercise channelCid Channel_RecordInbound with
+          messageId; payloadHex; expectedRunningHash = runningHashAfter; peerReceivedMessageId; recipient
+
+    nonconsuming choice ClprRules_SetChannelStatus : ContractId Channel
+      with
+        executor : Party
+        confirmationCids : [ContractId Confirmation]
+        channelCid : ContractId Channel
+        newStatus : ChannelStatus
+      controller executor
+      do
+        ch <- fetch channelCid
+        assertMsg "channel belongs to another clpr party" (ch.clpr == clpr)
+        spendQuorum this executor confirmationCids (SetChannelStatus with channelId = ch.channelId; newStatus)
+        exercise channelCid Channel_SetStatus with newStatus
+
+    -- | Replace the operator set. Signed off by the current quorum; the epoch
+    -- goes up by one, which invalidates every unspent confirmation of the old
+    -- epoch.
+    choice ClprRules_RotateOperators : ContractId ClprRules
+      with
+        executor : Party
+        confirmationCids : [ContractId Confirmation]
+        newOperators : [Party]
+        newAttestationKeys : [Text]
+        newThreshold : Int
+      controller executor
+      do
+        spendQuorum this executor confirmationCids
+          (RotateOperators with newOperators; newAttestationKeys = map normalizeHex newAttestationKeys; newThreshold)
+        create this with
+          operators = newOperators
+          attestationKeys = map normalizeHex newAttestationKeys
+          threshold = newThreshold
+          epoch = epoch + 1
+
+-- | One operator's vote for one action in one epoch.
+template Confirmation
+  with
+    clpr : Party
+    confirmer : Party
+    epoch : Int
+    action : ClprAction
+  where
+    signatory clpr
+    observer confirmer
+
+    choice Confirmation_Spend : Confirmation
+      controller clpr
+      do pure this
+
+    choice Confirmation_Withdraw : ()
+      controller confirmer
+      do pure ()
+
+-- | Operators are distinct, keys are distinct 20-byte hex, one key per
+-- operator, and n/2 < t <= n. A strict majority means two quorums always
+-- share an operator, so one epoch cannot attest two different queue heads
+-- unless an operator equivocates. CantonAttestedVerifier enforces the same
+-- rule.
+validOperatorSet : [Party] -> [Text] -> Int -> Bool
+validOperatorSet operators keys t =
+  not (null operators)
+    && unique operators
+    && length keys == length operators
+    && all (\k -> T.length k == 40 && isHexBytes k) keys
+    && unique (map normalizeHex keys)
+    && 2 * t > length operators
+    && t <= length operators
+
+-- | Check and archive a quorum for 'action'. Every confirmation must be for
+-- this clpr party, this epoch and exactly this action, from distinct current
+-- operators, and there must be at least 'threshold' of them.
+spendQuorum : ClprRules -> Party -> [ContractId Confirmation] -> ClprAction -> Update ()
+spendQuorum rules executor cids action = do
+  assertMsg "executor is not a CLPR operator" (executor `elem` rules.operators)
+  confs <- mapA (\cid -> exercise cid Confirmation_Spend) cids
+  let confirmers = map (.confirmer) confs
+  assertMsg "confirmation for another clpr party" (all (\c -> c.clpr == rules.clpr) confs)
+  assertMsg "confirmation from another operator epoch" (all (\c -> c.epoch == rules.epoch) confs)
+  assertMsg "confirmation for a different action" (all (\c -> c.action == action) confs)
+  assertMsg "confirmation from a non-operator" (all (`elem` rules.operators) confirmers)
+  assertMsg "duplicate confirmer" (unique confirmers)
+  assertMsg "below operator threshold" (length confs >= rules.threshold)
