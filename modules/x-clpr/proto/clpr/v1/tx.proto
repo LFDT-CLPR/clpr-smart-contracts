@@ -1,0 +1,56 @@
+syntax = "proto3";
+package clpr.v1;
+
+import "cosmos/msg/v1/msg.proto";
+import "cosmos_proto/cosmos.proto";
+import "amino/amino.proto";
+
+option go_package = "github.com/LFDT-CLPR/clpr-smart-contracts/modules/x-clpr/x/clpr/types";
+
+service Msg {
+  option (cosmos.msg.v1.service) = true;
+
+  // Opens a channel on this side, ACTIVE at once. Prototype stand-in for the spec's
+  // registerChannel/completeChannel commit-reveal (§5.1) and verifyConfig.
+  rpc OpenChannel(MsgOpenChannel) returns (MsgOpenChannelResponse);
+
+  // Enqueues a Data Message (§4.3) on the channel's outbound queue.
+  rpc SendMessage(MsgSendMessage) returns (MsgSendMessageResponse);
+
+  // Sets the local endpoint manifest; the service item then commits to keccak256(manifest).
+  rpc UpdateManifest(MsgUpdateManifest) returns (MsgUpdateManifestResponse);
+}
+
+message MsgOpenChannel {
+  option (cosmos.msg.v1.signer) = "owner";
+  option (amino.name) = "clpr/MsgOpenChannel";
+  string owner = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  bytes channel_id = 2;
+}
+
+message MsgOpenChannelResponse {}
+
+message MsgSendMessage {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "clpr/MsgSendMessage";
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  bytes channel_id = 2;
+  bytes connector_id = 3;
+  bytes target_application = 4;
+  bytes message_data = 5;
+}
+
+message MsgSendMessageResponse {
+  uint64 message_id = 1;
+  bytes running_hash = 2;
+}
+
+message MsgUpdateManifest {
+  option (cosmos.msg.v1.signer) = "authority";
+  option (amino.name) = "clpr/MsgUpdateManifest";
+  string authority = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  // Serialized ClprEndpointManifest (spec §1.2).
+  bytes manifest = 2;
+}
+
+message MsgUpdateManifestResponse {}

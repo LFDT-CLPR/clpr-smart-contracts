@@ -1,0 +1,143 @@
+syntax = "proto3";
+package clpr.v1;
+
+import "gogoproto/gogo.proto";
+
+option go_package = "github.com/LFDT-CLPR/clpr-smart-contracts/modules/x-clpr/x/clpr/types";
+
+// Mirrors clpr-service-spec.md §1.1–§1.4 and §2.1. Field numbers are the spec's, so a
+// payload serialized here is byte-identical to the Solidity ClprProtobuf encoding.
+
+// §1.5 ClprChannelStatus.
+enum ClprChannelStatus {
+  option (gogoproto.goproto_enum_prefix) = false;
+  PENDING = 0;
+  ACTIVE = 1;
+  PAUSED = 2;
+  CLOSING = 3;
+  DRAINED = 4;
+  CLOSED = 5;
+}
+
+// §1.1
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+// §1.1
+message ClprThrottles {
+  uint32 max_messages_per_bundle = 1;
+  uint32 max_message_payload_bytes = 2;
+  uint64 max_gas_per_message = 3;
+  uint32 max_queue_depth = 4;
+  uint64 max_sync_bytes = 5;
+  uint32 max_local_endpoints = 6;
+  uint32 max_peer_endpoints = 7;
+}
+
+// §1.1
+message ClprLedgerConfiguration {
+  uint32 protocol_version = 1;
+  string chain_id = 2;
+  bytes service_address = 3;
+  Timestamp timestamp = 4;
+  ClprThrottles throttles = 5;
+  bytes initial_trust_anchor = 6;
+  bytes initial_trust_anchor_id = 7;
+}
+
+// §1.2
+message ServiceEndpoint {
+  string ip_address = 1;
+  uint32 port = 2;
+}
+
+// §1.2
+message ClprEndpoint {
+  ServiceEndpoint service_endpoint = 1;
+  bytes tls_certificate = 2;
+}
+
+// §1.2
+message ClprEndpointManifest {
+  uint64 version = 1;
+  bytes service_address = 2;
+  repeated ClprEndpoint endpoints = 3;
+}
+
+// §1.3
+message ClprConfigUpdate {
+  ClprLedgerConfiguration configuration = 1;
+}
+
+// §1.3
+message ClprControlMessage {
+  oneof payload {
+    ClprConfigUpdate config_update = 1;
+  }
+}
+
+// §1.4
+message ClprMessage {
+  bytes connector_id = 1;
+  bytes target_application = 2;
+  bytes sender = 3;
+  bytes message_data = 4;
+}
+
+// §1.4
+enum ClprMessageReplyStatus {
+  option (gogoproto.goproto_enum_prefix) = false;
+  SUCCESS = 0;
+  APPLICATION_ERROR = 1;
+  CONNECTOR_NOT_FOUND = 2;
+  CONNECTOR_UNDERFUNDED = 3;
+}
+
+// §1.4
+message ClprMessageReply {
+  uint64 message_id = 1;
+  ClprMessageReplyStatus status = 2;
+  bytes message_reply_data = 3;
+}
+
+// §1.4
+message ClprMessagePayload {
+  oneof payload {
+    ClprMessage message = 1;
+    ClprMessageReply message_reply = 2;
+    ClprControlMessage control = 3;
+  }
+}
+
+// §1.4 Stored value for a queued message, at key 0x02 ‖ channel_id ‖ message_id.
+// `payload` is kept as the exact serialized ClprMessagePayload bytes that entered the running
+// hash, so a verifier never re-encodes it. Wire-compatible with the spec's
+// `ClprMessagePayload payload = 1` (an embedded message is length-delimited bytes).
+message ClprMessageValue {
+  bytes payload = 1;
+  bytes running_hash_after_processing = 2;
+}
+
+// §2.1 Channel: the fields this prototype keeps on-chain for its own side. status,
+// next_message_id and received_message_id (ChannelSyncData) live in the queue record
+// (0x01 ‖ channel_id), the only entry the peer's verifier reads.
+message Channel {
+  bytes channel_id = 1;
+  string owner = 2;
+  uint64 acked_message_id = 3;
+}
+
+// Module parameters.
+message Params {
+  // Account allowed to update the endpoint manifest in addition to the keeper's authority
+  // (the x/gov module account on a production chain). Empty disables it.
+  string admin = 1;
+  // Local cap on message_data length (spec §4.3 step 4 uses the peer's advertised limit).
+  uint32 max_message_payload_bytes = 2;
+}
+
+message GenesisState {
+  Params params = 1 [(gogoproto.nullable) = false];
+}

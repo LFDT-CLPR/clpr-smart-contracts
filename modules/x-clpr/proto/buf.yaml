@@ -1,0 +1,12 @@
+version: v1
+name: buf.build/clpr/x-clpr
+deps:
+  - buf.build/cosmos/cosmos-sdk:05419252bcc241ea8023acf1ed4cadc5
+  - buf.build/cosmos/cosmos-proto:04467658e59e44bbb22fe568206e1f70
+  - buf.build/cosmos/gogo-proto:88ef6483f90f478fb938c37dde52ece3
+breaking:
+  use:
+    - FILE
+lint:
+  use:
+    - DEFAULT
