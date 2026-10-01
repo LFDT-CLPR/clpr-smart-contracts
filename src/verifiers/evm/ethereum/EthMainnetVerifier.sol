@@ -105,6 +105,8 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     uint256 internal constant FORK_VERSION_LENGTH = 4;
     uint256 internal constant TRUST_ANCHOR_LENGTH = ANCHOR_OFF_CODE_HASH + 32; // 260
 
+    // Ethereum (Electra/Fulu) defaults for the chain-layout hooks below. Beacon chains derived from
+    // Ethereum (Gnosis, PulseChain) override the hooks — see src/verifiers/evm/ethtwins/.
     uint256 internal constant EXECUTION_BRANCH_DEPTH = 9;
     uint256 internal constant NEXT_COMMITTEE_BRANCH_DEPTH = 6;
 
@@ -216,10 +218,9 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
 
         // Step 4 — execution state root SSZ branch against the attested bodyRoot.
         bytes32 executionStateRoot = RLP.readBytes32(payload[IDX_EXECUTION_STATE_ROOT]);
-        bytes32[] memory execBranch = _decodeBranch(payload[IDX_EXECUTION_BRANCH], EXECUTION_BRANCH_DEPTH);
-        if (!ClprBeaconSsz.verifyProof(
-                executionStateRoot, execBranch, header.bodyRoot, ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY
-            )) {
+        (uint256 execGindex, uint256 execDepth) = _executionStateRootGindex();
+        bytes32[] memory execBranch = _decodeBranch(payload[IDX_EXECUTION_BRANCH], execDepth);
+        if (!ClprBeaconSsz.verifyProof(executionStateRoot, execBranch, header.bodyRoot, execGindex)) {
             revert ExecutionBranchInvalid();
         }
 
@@ -264,7 +265,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         // for, i.e. period(attested slot) + 1 (the next committee always belongs to the next period).
         // Empty when no rotation occurred.
         newTrustAnchorId =
-            newTrustAnchor.length == 0 ? newTrustAnchor : _periodId(header.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1);
+            newTrustAnchor.length == 0 ? newTrustAnchor : _periodId(header.slot / _slotsPerSyncCommitteePeriod() + 1);
     }
 
     /// @inheritdoc IClprVerifier
@@ -300,6 +301,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes32 gvr = RLP.readBytes32(cfg[CONFIG_IDX_GVR]);
         bytes memory forkVersion = RLP.readBytes(cfg[CONFIG_IDX_FORK_VERSION]);
         if (forkVersion.length != FORK_VERSION_LENGTH) revert InvalidConfigPayload();
+        _checkChainIdentity(gvr, _toBytes4(forkVersion));
 
         ClprTypes.LedgerConfiguration memory lc =
         ClprProtobuf.decodeControlMessage(RLP.readBytes(cfg[CONFIG_IDX_LEDGER])).config;
@@ -318,7 +320,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             lc.throttles,
             initialTrustAnchor,
             // The genesis committee is the current committee for the config slot's period.
-            _periodId(slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD),
+            _periodId(slot / _slotsPerSyncCommitteePeriod()),
             // Verify the endpoint-manifest storage proof (when supplied) against a beacon proof signed
             // by this config committee; empty proof → empty manifest (bring-up).
             _verifyConfigEndpointManifest(
@@ -374,10 +376,9 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
 
         // Execution state root SSZ branch against the attested bodyRoot.
         bytes32 executionStateRoot = RLP.readBytes32(p[CM_IDX_EXECUTION_STATE_ROOT]);
-        bytes32[] memory execBranch = _decodeBranch(p[CM_IDX_EXECUTION_BRANCH], EXECUTION_BRANCH_DEPTH);
-        if (!ClprBeaconSsz.verifyProof(
-                executionStateRoot, execBranch, header.bodyRoot, ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY
-            )) {
+        (uint256 execGindex, uint256 execDepth) = _executionStateRootGindex();
+        bytes32[] memory execBranch = _decodeBranch(p[CM_IDX_EXECUTION_BRANCH], execDepth);
+        if (!ClprBeaconSsz.verifyProof(executionStateRoot, execBranch, header.bodyRoot, execGindex)) {
             revert ExecutionBranchInvalid();
         }
 
@@ -391,6 +392,32 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             p[CM_IDX_MANIFEST_STORAGE_PROOF], storageRoot, RLP.readBytes(p[CM_IDX_MANIFEST_PREIMAGE]), serviceAddress
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //   Chain-layout hooks (Ethereum defaults; overridden by Ethereum-derived beacon chains)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Generalized index (and branch depth = floor(log2(gindex))) of
+    ///      `execution_payload.state_root` inside `BeaconBlockBody`. Ethereum Deneb → Fulu: 802 / 9.
+    function _executionStateRootGindex() internal view virtual returns (uint256 gindex, uint256 depth) {
+        return (ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY, EXECUTION_BRANCH_DEPTH);
+    }
+
+    /// @dev Generalized index (and branch depth) of `next_sync_committee` inside `BeaconState`.
+    ///      Ethereum Electra/Fulu: 87 / 6.
+    function _nextSyncCommitteeGindex() internal view virtual returns (uint256 gindex, uint256 depth) {
+        return (ClprBeaconSsz.GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE, NEXT_COMMITTEE_BRANCH_DEPTH);
+    }
+
+    /// @dev `SLOTS_PER_EPOCH × EPOCHS_PER_SYNC_COMMITTEE_PERIOD` (names the trust-anchor period id).
+    function _slotsPerSyncCommitteePeriod() internal view virtual returns (uint64) {
+        return SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+    }
+
+    /// @dev Config-time check of the claimed chain identity (signing-domain inputs). The Ethereum
+    ///      verifier accepts any (it serves mainnet and its testnets); a chain-pinned deployment
+    ///      reverts on a foreign genesis validators root or fork version.
+    function _checkChainIdentity(bytes32 gvr, bytes4 forkVersion) internal view virtual {}
 
     // ─────────────────────────────────────────────────────────────────────────
     //   Internal: rotation
@@ -435,10 +462,9 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         // Reconstruct the beacon-committed SSZ root from the uncompressed keys (compressing each on the
         // fly) and prove it against the attested state — this authenticates the uncompressed keys.
         bytes32 committeeRoot = ClprBeaconSsz.syncCommitteeRootFromUncompressed(nextPubkeys, nextAggregate);
-        bytes32[] memory branch = _decodeBranch(nextBranchItem, NEXT_COMMITTEE_BRANCH_DEPTH);
-        if (!ClprBeaconSsz.verifyProof(
-                committeeRoot, branch, stateRoot, ClprBeaconSsz.GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE
-            )) {
+        (uint256 nextGindex, uint256 nextDepth) = _nextSyncCommitteeGindex();
+        bytes32[] memory branch = _decodeBranch(nextBranchItem, nextDepth);
+        if (!ClprBeaconSsz.verifyProof(committeeRoot, branch, stateRoot, nextGindex)) {
             revert NextCommitteeBranchInvalid();
         }
         // Successor anchor commits to the uncompressed keys via the keccak Merkle root (the keys
