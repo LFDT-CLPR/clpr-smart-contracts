@@ -14,6 +14,8 @@
     "test:e2e:solo": "CLPR_BACKEND=solo vitest run --config vitest.solo.config.ts",
     "test:e2e:qbft-verifier": "vitest run test/e2e/tests/verifiers/qbft-verifier.spec.ts",
     "test:e2e:eth-verifier": "CLPR_BACKEND=anvil vitest run test/e2e/tests/verifiers/eth-verifier.spec.ts",
+    "test:e2e:eth-live": "vitest run test/e2e/tests/verifiers/eth-live-sepolia.spec.ts",
+    "eth-live:refresh": "tsx test/e2e/relay/buildEthLiveProof.ts --refresh --wait-nonsigners 600",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
     "test:e2e:avalanche": "CLPR_BACKEND=avalanche vitest run",
@@ -42,7 +44,11 @@
     "e2e:down:solo:besu": "node --experimental-strip-types test/e2e/backend/infra.ts down solo:besu",
     "e2e:besu:status": "node --experimental-strip-types test/e2e/backend/infra.ts status besu",
     "verify:establish-channel": "tsx test/verification-inputs/establish-channel.ts",
-    "verify:proof": "tsx test/verification-inputs/proof-verification.ts"
+    "verify:proof": "tsx test/verification-inputs/proof-verification.ts",
+    "test:e2e:cardano-live": "vitest run test/e2e/tests/verifiers/cardano-live.spec.ts",
+    "cardano-live:refresh": "tsx test/e2e/relay/buildCardanoLiveProof.ts --refresh",
+    "test:e2e:algorand-live": "vitest run test/e2e/tests/verifiers/algorand-live.spec.ts",
+    "algorand-live:refresh": "tsx test/e2e/relay/buildAlgorandLiveProof.ts --refresh"
   },
   "dependencies": {
     "@ethereumjs/rlp": "^10.1.2",
