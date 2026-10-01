@@ -1,0 +1,196 @@
+{
+ "chain": "arc",
+ "kind": "malachite",
+ "rpc": "https://rpc.testnet.arc.network",
+ "capturedAt": "2026-10-01T02:57:20.943Z",
+ "channelId": "0x2f24ec981266ab0232b1380a7938a430b91011f76ef445a481243f0282699b09",
+ "meta": {
+  "height": "64879061",
+  "validators": 22,
+  "signatures": 14,
+  "blockHash": "0x16f38d29b33d7fb6b2eaaea0fdfd266587cf34afe00077eb61f3a6ecbce730a5",
+  "stateRoot": "0x189817e0aa8edbc7a2c3728e3f61cf357f5aa0bf46a9d55aca073040fad92b42"
+ },
+ "raw": {
+  "certificate": {
+   "height": 64879061,
+   "round": 0,
+   "block_hash": "0x16f38d29b33d7fb6b2eaaea0fdfd266587cf34afe00077eb61f3a6ecbce730a5",
+   "signatures": [
+    {
+     "address": "0x0609ff909c0585c1ae2eea538a22baff9333a69a",
+     "signature": "QZsuGymi02XwZfrQdnpW/6GtD0E8LZuUYiC+WJDdpgMuk2UFmbYElo6zASjFR9CDUJ2w/XMCgLOppG6I+/nwDw=="
+    },
+    {
+     "address": "0x2e78053671f707844a631bc907d4855894848fe3",
+     "signature": "SFXHBJDgGVm0kFU1OfOb9gd2rhqmOHZe2vADfgzLb42hRvMlDhhh0sOjHnT9ftnQS+10h5b77bKbAsaZZluhAA=="
+    },
+    {
+     "address": "0x33a87f19f12a0542c1f3f7060f20a619337a9942",
+     "signature": "S64olv4iPY52twVNrBhY1wFws1k5MzFaBVcJUpCCwXvAChInQ0v6CqMwb1r3FuDrKpaC6GTcDwL6+C6g7JGGBQ=="
+    },
+    {
+     "address": "0x424ca01b5a849b7ce2e6e4d92a0443ce81f16fd2",
+     "signature": "d+GEDVKh7WYWqupGTVj5dBtDih9Y69t99ZSiVCxJ5lL1uF3zrY8DHYbvUJONo7MeeW80vDCCvRFMVImLvEJQDw=="
+    },
+    {
+     "address": "0x554c39efe4f8efad7cd3623a19af1314da7fabbc",
+     "signature": "Bfw5KHA+TT08nEKVSa3CQABOycg8F7MxkbWpP7CC+h7hwggPT/QX828nRWI+vg5cWI7AEDHL93ztsogjCXIgBg=="
+    },
+    {
+     "address": "0x5af5ae7d45e0d10becf4e1ff13dbddf766d48cc6",
+     "signature": "gvEXkf0aSzcQ7wqGuvFE5gB3UVc+DgqJm7OjGecxS03Wd1jXSJWJhnjO/blXYjd3DhmjnHGJ1s2tEpDWndwzDw=="
+    },
+    {
+     "address": "0x602930d1ab44f1744f42e842b701c2b149c5da4f",
+     "signature": "I2l1bXoCP8RbNCrxCOk/T4d3MFcLy+Yh+bBM2EoDZP/AJh/4Prxd2vn+b7ENGJfICLpS/JeAoeZiBNnv2jw8AQ=="
+    },
+    {
+     "address": "0x643ad8ec952efa7d3060dcf94b92e9eba7baab19",
+     "signature": "pSXKWbafO+5WKskkPlLmpCvJsl3z9oZu8qgPGU/8U5GqII8JbFnnV4mrhOFYTFXqlMG7qZrdxxk2bfLEgQLjBg=="
+    },
+    {
+     "address": "0x6791e002c8419e8a2fa5266e2951ed1780bc2295",
+     "signature": "Ap5JZRqrvlXcT+1VKzQTkps2lt2vTRjUiHpPXXqPK3cou0sqpyejZVM8nSTt4MNnFvaXbXUpzBTk/dIY8pp5CQ=="
+    },
+    {
+     "address": "0x68960d463d8a51095947a416fdb7973a87f675d0",
+     "signature": "fsnABBAfyOcVtKllp14OqNXAzrclE0BR8Q5rGWw8cJclFuNvvXHeAwi+hANg1+zsBWoxZXDvViUQBqpuKmjqAw=="
+    },
+    {
+     "address": "0x6d876d2db6ca83c10210d764203743d19c402d58",
+     "signature": "saI8IvEasw4I53BvHbpGW5SlrhH00aghevybsZvsm808gJIpxVvrhiqrC/5q1U/6Rfb/mgTcOQMdSVerrFpiBQ=="
+    },
+    {
+     "address": "0x7e4499718f868ff1f89fe5432e11c9f9f3e01fae",
+     "signature": "jwHWfLgDpr3zOTST/uhReTt1upouQUdCZd8hsozgMoE76sjYTOCtd7o0ZL4Qxrzxc4oqoUY0x3YOUuQGQCRxAg=="
+    },
+    {
+     "address": "0xf911fc0d4faf82087bbddcee4f06d08cbc8c1e7f",
+     "signature": "m06rVJRFiWIOmpXs1JD4p9pZAWnT3DHNTtRKUQTwYBA9BC7bW+H1zrFFqq5vPneNxwCsNn9Mo0Lbez4oIr+CDQ=="
+    },
+    {
+     "address": "0xfdc37d533f82159bf6c46da00db4faa379b941de",
+     "signature": "yAELtbaxdcUn98TdASr/Dxt/ui2tMEDx5CKTl/bMcRdUN4Et1vq7qch3dDGZVwx0doxMiDenqNqeo9dtW0ESCw=="
+    }
+   ]
+  },
+  "validators": [
+   {
+    "publicKey": "0x8396f9da70e4daf1af3bcba234d7247f34bceee859a83b09d9b22e938ce0eccb",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x634059e702a3d9991215218098266f65cd363f82e4a8f82862bdcc36761116da",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0xc3dcde30cbe413e56c023514d2eef54db3ef7330542ae0adc3122696175d194e",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x8242e50d32907e264659b144920caebc88f527466a7181beb9978b425cffeb51",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x2cd943599328018331abc25d2652f4ac10c41165c2994bcea8a990e87018807c",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x892b75d0d234587dc1907be1ec2825a034474c88a8bb4b9bdc42b2e397a27521",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x418994a179acd1e7e7b8155d75d33a428932c50005603c3b4f0f05f865f85b17",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x07b06245ff44c5fe61fff77c68501e3d3d80121f4f5ba80467274adabfe460a0",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x824f520a4ac289070ca5870769f5f8f47ed11db70a7a0d6c2955799c6ed54396",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0xe2cdde6e0c45ab6bde87230e17b625ac9d9ccdecf80a0e653e39104d20f98a75",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x978b968dae03e42b076626745ca38c81819efbf8479074cf97eb5eb29553dc54",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0xe23f5f781ca623ed78c5e076ffba24652d678ca735c9bbc5ecc259ffb03da69f",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x0e2fe2a478f4cb5c7287f8a94f71b3f49669f7ec37d1deef5587504105cd433b",
+    "votingPower": "2000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x07b4c82399b0198641ca71bc42bc88a6303000cffd16febfaed8a1e38f19253d",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0xbb216927bd4940d8bc3a7d33483dc267f7ee1a1e95b461b049af8e213b197086",
+    "votingPower": "0",
+    "status": 2
+   },
+   {
+    "publicKey": "0xa2b8abca8f2fbfb31da9db49ad281e4c69cd4bf7d27eb160da05162166b6c0b7",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0xec5906c0076475d1a2d6b0e7f715602928b2ddaad38e29bcf42ac6d30440c0bc",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x8673a17297e648afa3515746c98ce32eb839b3d11bd49777bfec2c91e8ccef00",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x3df1e32501e126b6f61b72e3162d6ebb1cb23a8d2c77e9d195d3fe9b01b5fe78",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0xefda887755cf7749d9379ce7d353ab5bbfe696fa28aec616975392b1dca9faac",
+    "votingPower": "1000",
+    "status": 2
+   },
+   {
+    "publicKey": "0x641f3bcf91a009f223a675572635a625d953fd85707e928fb3816a11253031d3",
+    "votingPower": "1",
+    "status": 2
+   },
+   {
+    "publicKey": "0xbc7cba126a846cb87a4fd9816ab33316808e6588e62fb5b5e1d1ec9167e95be0",
+    "votingPower": "1",
+    "status": 2
+   }
+  ],
+  "block": {
+   "hash": "0x16f38d29b33d7fb6b2eaaea0fdfd266587cf34afe00077eb61f3a6ecbce730a5",
+   "stateRoot": "0x189817e0aa8edbc7a2c3728e3f61cf357f5aa0bf46a9d55aca073040fad92b42",
+   "number": "64879061"
+  }
+ }
+}

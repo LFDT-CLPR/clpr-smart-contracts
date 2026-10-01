@@ -176,9 +176,15 @@ library ClprBeaconBls {
     }
 
     function _hashToG2(bytes32 signingRoot) private view returns (bytes memory) {
+        return hashToG2Message(abi.encodePacked(signingRoot));
+    }
+
+    /// @dev Same as {hashToG2} for an arbitrary-length message (same DST, `..._POP_`). Used by
+    ///      verifiers whose signers sign more than a 32-byte root (PlasmaBFT votes, 104 bytes).
+    function hashToG2Message(bytes memory message) internal view returns (bytes memory) {
         // hash_to_field(msg, count=2) for G2: 2 Fp2 elements = 4 Fp elements, each from L=64 bytes
         // reduced mod p (RFC 9380 §5.3, L = ceil((ceil(log2 p) + k) / 8) = 64). So 256 expansion bytes.
-        bytes memory expanded = _expandMessageXmd(abi.encodePacked(signingRoot), BLS_DST, 256);
+        bytes memory expanded = _expandMessageXmd(message, BLS_DST, 256);
         bytes memory q0 = _mapFp2ToG2(_makeFp2(expanded, 0)); // u[0] = (e0, e1) from bytes [0..128)
         bytes memory q1 = _mapFp2ToG2(_makeFp2(expanded, 128)); // u[1] = (e2, e3) from bytes [128..256)
         return _g2Add(q0, q1);
