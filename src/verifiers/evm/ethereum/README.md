@@ -1,219 +1,330 @@
-# EthMainnetVerifier
+# Ethereum sync-committee verifier (`EthMainnetVerifier`)
 
-> **Source**: [EthMainnetVerifier.sol](./EthMainnetVerifier.sol)
-> **Interface**: [IClprVerifier.sol](../../interfaces/IClprVerifier.sol)
+`EthMainnetVerifier` lets a CLPR Service on Hiero accept bundles from a CLPR Service on Ethereum
+(`Ethereum → Hiero`). It is an on-chain consensus-layer light client. It checks a BLS12-381 aggregate
+signature from the Ethereum sync committee (512 validators) over a beacon block header, follows SSZ
+Merkle branches from that header to the execution-layer state root, and then follows Merkle-Patricia
+proofs to the peer `ClprService` account and its channel storage. The result is the peer's proven queue
+metadata and the bundle's messages. Every 8,192 slots (about 27 hours) a bundle can also carry the next
+sync committee, proven from the attested beacon state, which moves the trust anchor forward.
 
----
-
-## 1. The big picture
-
-The CLPR protocol needs to **trustlessly verify state from a peer Ethereum chain** entirely on-chain. `EthMainnetVerifier` answers: *"prove to me that this bundle of cross-chain messages actually existed in the peer CLPR service contract's storage on Ethereum mainnet."*
-
-It is a real **consensus-layer light client**: it builds a chain of cryptographic trust from a sync-committee BLS signature down to individual storage slots.
-
-```mermaid
-flowchart LR
-    A["Trust anchor\naggregate pubkey +\ncommittee Merkle root"] --> B["Attested beacon\nblock header\n(bodyRoot, stateRoot)"]
-    B --> C["SSZ branch\nexecution state_root\nin bodyRoot"]
-    C --> E["Account trie (MPT)\nstorageRoot + codeHash"]
-    E --> F["Storage trie (MPT)\n5 queue-metadata slots"]
-    F --> G["Verified metadata\n+ message payloads"]
-    B -. "rotation" .-> R["SSZ branch\nnext_sync_committee\nin stateRoot → new anchor"]
-```
-
-Each arrow is a proof the contract verifies on-chain. If any link breaks, the whole call reverts. Note there is **no EVM block header**: the execution `state_root` is proven *directly* against the beacon `bodyRoot` via SSZ.
-
-> [!IMPORTANT]
-> **All points are EIP-2537 *uncompressed*.** On-chain decompression is gas-infeasible (~22.8M for the 512 G1 pubkeys, ~49.5M for a single compressed G2 signature), so the relayer supplies uncompressed keys (the non-signers' per bundle, the full next committee at rotation) and signature; the contract only ever *compresses* (cheap) to rebuild the beacon SSZ committee root at rotation. The BLS aggregate verification is fully on-chain (EIP-2537) — see §7.
+> **Source**: [EthMainnetVerifier.sol](./EthMainnetVerifier.sol) ·
+> **Interface**: [IClprVerifier.sol](../../../interfaces/IClprVerifier.sol) ·
+> **Per-chain page**: [docs/chains/ethereum.md](../../../../docs/chains/ethereum.md)
 
 ---
 
-## 2. Differences with QBFTVerifier
+## 1. At a glance
 
-Ethereum mainnet uses **Proof of Stake with sync-committee BLS signatures**, not QBFT committed seals, and it commits to its execution state through SSZ rather than an RLP block header.
+| | |
+|---|---|
+| Chains covered | Ethereum mainnet (`eip155:1`). Live data verified from Sepolia (`eip155:11155111`). Gnosis and PulseChain reuse this verifier through `EthBeaconTwinVerifier` on a separate branch. |
+| Finality source | Sync-committee BLS aggregate over the **attested** beacon header, at least 342 of 512 signers (2/3). |
+| Trust assumptions | 2/3 of the current sync committee is honest; the bootstrap committee in the initial trust anchor is correct; the code hash pinned in the anchor is the peer `ClprService`. |
+| Typical bundle | 1,645,052 gas, 19,140 B calldata (18,587 B `proofBytes`); Sepolia slot 11254195, 486/512 signers, ACK-only, measured on anvil and on Hedera testnet |
+| Rotation | 4,836,081 gas, 66,902 B of rotation items (harness call `verifyRotationExt`, includes base and calldata; Sepolia period 1374) |
+| Contract size | 19,338 B runtime, 19,364 B init code (EIP-170 margin 5,238 B) |
+| Hedera limits | 15,000,000 gas and 128 KB (131,072 B) calldata per transaction: a typical bundle uses 11% of the gas and 15% of the calldata |
+| Status | Live Sepolia data verified on anvil (captured 2026-09-30). `verifyBundle` executed on Hedera testnet (chain 296) on 2026-09-30: 1,645,052 gas, same as anvil. |
 
-```mermaid
-flowchart TD
-    subgraph QBFT["QBFTVerifier (Besu QBFT)"]
-        direction TB
-        Q1["EVM block header + extraData"] --> Q2["ECDSA committed seals"]
-        Q2 --> Q3["ecrecover validator set"]
-        Q3 --> Q4["≥ ⅔ validator threshold"]
-    end
-    subgraph ETH["EthMainnetVerifier (Ethereum mainnet)"]
-        direction TB
-        E1["Attested beacon header"] --> E2["Sync-committee BLS aggregate"]
-        E2 --> E3["aggregateVerifyComplement (EIP-2537)"]
-        E3 --> E4["SSZ branch → execution state_root"]
-    end
-```
+## 2. How it works
 
-The **shared** part is the bottom half: MPT account + storage proofs ([ClprEvmStateProof](../../libraries/proof/evm/ClprEvmStateProof.sol)) and the protobuf bundle-content decode. Only "how do we trust this state root?" differs.
-
----
-
-## 3. Configuration & trust anchor
-
-The **trust anchor** is a **flat packed 260-byte layout** (fixed offsets, no RLP). The 512 committee keys are **not stored** — the anchor commits to them with a keccak Merkle root ([ClprCommitteeMerkle](../../libraries/proof/beacon/ClprCommitteeMerkle.sol)):
-
-```
-gvr32 ‖ forkVersion4 ‖ channelId32 ‖ aggregatePubkey128 ‖ committeeMerkleRoot32 || codeHash
-```
-
-| Offset | Field | Bytes | Description |
-|---|---|---|---|
-| 0 | `genesisValidatorsRoot` | 32 | Chain-pinning root, folded into the BLS signing domain. |
-| 32 | `forkVersion` | 4 | Current fork version, folded into the signing domain. Refreshed via a config update on a hard fork. |
-| 36 | `channelId` | 32 | The CLPR channel this anchor authenticates. Seeded from `verifyConfig`'s `channelId`, carried through every rotation, and used to derive the exact storage slots the bundle must prove. |
-| 68 | `aggregatePubkey` | 128 | The committee's precomputed aggregate (uncompressed EIP-2537 G1). Feeds the pairing directly at full participation. |
-| 196 | `committeeMerkleRoot` | 32 | keccak Merkle root over the 512 uncompressed member pubkeys. Per bundle the relay supplies only the **non-signers'** keys (proof item 9), each authenticated against this root. |
-| 228 | `codeHash` | 32 | The `keccak256` hash of the expected contract code. |
-
-260 bytes means the service's per-bundle anchor SLOAD and per-rotation SSTORE shrink from ~2,055 storage slots to 8. Only a **rotation** bundle carries a full committee — namely the *next* one — whose Merkle root (once its SSZ branch verifies) goes into the successor anchor.
-
----
-
-## 4. Proof layout
-
-The bundle proof is a **top-level RLP list of 10 items**:
-
-| # | Item | Contents |
-|---|---|---|
-| 0 | `attestedHeader` | `[slot, proposerIndex, parentRoot, stateRoot, bodyRoot]` |
-| 1 | `syncAggregate` | `[bits(64 B), signature(256 B uncompressed G2)]` |
-| 2 | `executionStateRoot` | 32-byte execution-layer state root (the SSZ leaf) |
-| 3 | `executionBranch` | 9 SSZ sibling hashes (gindex 802) |
-| 4 | `nextCommittee` | rotation committee `[uncompressedPubkeys[512], uncompressedAgg128]` (128 B EIP-2537 keys), or an empty RLP **string** if absent. The contract derives the compressed form on-chain to rebuild the SSZ root. |
-| 5 | `nextCommitteeBranch` | 6 SSZ siblings (gindex 87), or an empty RLP **list** if absent |
-| 6 | `accountProof` | MPT account proof against `executionStateRoot` |
-| 7 | `storageProof` | 4 × `[slotKey, proofNodes]` (ACK-only) or 5 (with outbound messages) against the account `storageRoot` |
-| 8 | `bundleContent` | protobuf `ClprBundleContent` |
-| 9 | `nonSignerProofs` | one 416-byte entry `uncompressedKey(128) ‖ 9 Merkle siblings (288)` per **clear** participation bit, in ascending index order; each is authenticated against the anchor's `committeeMerkleRoot`. Empty RLP list at full 512/512 participation. |
-
-The rotation pair (4 & 5) is **both-present or both-absent**.
-
----
-
-## 5. Step-by-step verification flow
-
-This is the core of [`verifyBundle`](./EthMainnetVerifier.sol):
+The proof chain, from Ethereum consensus to the values `ClprService.submitBundle` stores:
 
 ```mermaid
 flowchart TD
-    START(["verifyBundle(proofBytes, trustAnchor)"]) --> A
-    A["Decode trust anchor (flat 228 B)\ngvr, forkVersion, channelId,\naggregate, committeeMerkleRoot\n+ decode 10-item payload"] --> S2
-    S2["Step 2 · beacon header\nhash_tree_root → beaconBlockRoot"] --> S3
-    S3["Step 3 · BLS (EIP-2537)\nparticipants by bits ≥ ⅔\nnon-signer keys (item 9) Merkle-\nauthenticated vs committeeMerkleRoot\ndomain = f(forkVersion, gvr)\nsigningRoot = sha256(root ∥ domain)\naggregateVerifyComplement(...)"] --> S4
-    S4["Step 4 · execution state root\nSSZ verifyProof(stateRoot, branch,\n  bodyRoot, gindex 802)"] --> S5
-    S5["Step 5 · account proof (MPT)\nverifyAccount(...) → storageRoot, codeHash\ncodeHash == EXPECTED_CODE_HASH?"] --> S6
-    S6["Step 6 · storage proof (MPT)\nverifyProvenSlots(channelId slots)\n→ QueueMetadata"] --> S7
-    S7["Step 7 · bundle content\nprotobuf field 2 → messagePayloads[]"] --> S8
-    S8["Step 8 · rotation (optional)\nif nextCommittee present:\n  SSZ verifyProof(committeeRoot,\n    branch, stateRoot, gindex 87)\n  → successor anchor"] --> OUT
-    OUT(["Returns: metadata · messagePayloads[] ·\nnewTrustAnchor · newTrustAnchorId"])
+    TA["Trust anchor, 260 B<br/>GVR, fork version, channelId,<br/>committee aggregate, committee Merkle root, code hash"]
+    H["Attested beacon header<br/>slot, proposerIndex, parentRoot, stateRoot, bodyRoot"]
+    HR["beaconBlockRoot = SSZ hash_tree_root(header)"]
+    NS["Non-signer keys, payload item 9"]
+    AGG["Participant aggregate =<br/>committee aggregate minus non-signers"]
+    SIG["BLS12-381 aggregate signature<br/>EIP-2537 pairing check"]
+    ESR["Execution state_root"]
+    ACC["Peer ClprService account<br/>storageRoot, codeHash"]
+    SLOTS["Channel storage slots<br/>status, nextMessageId, receivedMessageId,<br/>running hashes, manifest version"]
+    QM["Queue metadata + message payloads<br/>returned to ClprService"]
+    NC["Next sync committee<br/>512 keys + aggregate"]
+    NTA["Successor trust anchor<br/>id = next period"]
 
-    style S3 fill:#2d1b69,color:#fff
-    style S4 fill:#1b4332,color:#fff
-    style S5 fill:#6b2d2d,color:#fff
-    style S6 fill:#1b4332,color:#fff
-    style S7 fill:#4a3728,color:#fff
-    style S8 fill:#4a3728,color:#fff
+    TA -- "each key Merkle-proven against committeeMerkleRoot at its committee index" --> NS
+    NS -- "G1 MSM: aggregate + sum of (r-1) * key" --> AGG
+    H --> HR
+    HR -- "signing root = sha256(root, domain(forkVersion, GVR))" --> SIG
+    AGG -- "participants >= 2/3 of 512" --> SIG
+    SIG -- "SSZ branch, 9 siblings, gindex 802 in bodyRoot" --> ESR
+    ESR -- "MPT account proof, codeHash == anchor code hash" --> ACC
+    ACC -- "MPT storage proofs at slots derived from channelId" --> SLOTS
+    SLOTS -- "protobuf ClprBundleContent decode" --> QM
+    H -- "optional: SSZ branch, 6 siblings, gindex 87 in stateRoot" --> NC
+    NC -- "compressG1 each key, rebuild SSZ committee root" --> NTA
 ```
 
-`newTrustAnchorId` is the successor committee's **sync-committee period** (`slot / 8192`) as an 8-byte big-endian value — a compact, monotonic handle, not a hash of the ~66 KB anchor — and is empty when no rotation occurred.
+Walk-through of `verifyBundle(proofBytes, trustAnchor, channelContext)`:
 
----
+1. **Decode the anchor and payload.** The anchor must be 260 bytes. The payload is an RLP list of 10 items
+   (12 with the optional endpoint-manifest update). `EthMainnetVerifier.sol:verifyBundle`.
+2. **Hash the attested header.** `ClprBeaconSsz.sol:beaconBlockHeaderRoot` computes the SSZ
+   `hash_tree_root` of the five header fields.
+3. **Check participation and the BLS signature.** `EthMainnetVerifier.sol:_verifyBlsCore` reads the 64-byte participation bitvector, requires `3 × participants ≥ 2 × 512`,
+   and `_collectNonSigners` checks one Merkle entry per clear bit against the anchor's committee root
+   (`ClprCommitteeMerkle.sol:verifyAndExtractKey`). `ClprBeaconSsz.sol:computeSyncCommitteeDomain` builds the
+   domain from the anchor's fork version and GVR. `ClprBeaconBls.sol:aggregateVerifyComplement` subtracts
+   the non-signers from the stored aggregate (one `G1MSM`), hashes the signing root to G2 (RFC 9380) and
+   runs the pairing check.
+4. **Prove the execution state root.** `ClprBeaconSsz.sol:verifyProof` checks a 9-sibling branch from the
+   execution `state_root` to the header's `bodyRoot` at generalized index 802.
+5. **Prove the peer account.** `ClprEvmBundleVerifier.sol:_verifyServiceStorageRoot` walks the account
+   trie to `keccak256(remoteServiceAddress)` (address from `channelContext`) and checks `codeHash`
+   against the anchor.
+6. **Prove the channel storage.** `ClprEvmBundleVerifier.sol:_verifyChannelStorage` derives the five
+   `Channel` slots from `channelId` (never from the proof), proves them with `ClprEvmStateProof`, and,
+   when messages are carried, proves a sixth slot: the last message's running hash.
+7. **Decode the messages.** `ClprEvmBundleVerifier.sol:_decodeBundleContent` reads the protobuf
+   `ClprBundleContent`.
+8. **Optional rotation.** `EthMainnetVerifier.sol:_verifyRotation` checks the next committee's keys are on
+   the curve, recomputes the beacon SSZ committee root from them
+   (`ClprBeaconSsz.sol:syncCommitteeRootFromUncompressed`), checks it against the attested `stateRoot` at
+   generalized index 87, and returns the successor anchor. `newTrustAnchorId` is the next period
+   (`slot / 8192 + 1`) as 8 bytes, big-endian.
 
-## 6. Deep dive: key steps
+All BLS points are EIP-2537 **uncompressed**. On-chain decompression is not affordable, so the relayer
+sends uncompressed keys and signatures; the contract only compresses keys (the cheap direction) to rebuild
+the beacon committee root at rotation.
 
-### Step 3 — sync-committee BLS
-
-The sync committee (512 validators, rotated every ~27 h) co-signs each beacon block. Verification reads the 64-byte `bits` vector, requires a **2/3 supermajority** of 512, collects the non-signers' keys from proof item 9 — each Merkle-authenticated against the anchor's `committeeMerkleRoot` at its **committee index** (positional binding, so a relay cannot pass an arbitrary point as a "non-signer") — derives the signing domain, and verifies the aggregate signature via `aggregateVerifyComplement` (recovering the participant aggregate as `committeeAggregate − Σ(non-signers)` — cost scales with the non-signer count) over:
-
-```
-signingRoot = sha256( beaconBlockRoot ∥ domain )
-domain      = 0x07000000 ∥ sha256( pad32(forkVersion) ∥ genesisValidatorsRoot )[0:28]
-```
-
-`computeSyncCommitteeDomain` and the SSZ helpers live in [ClprBeaconSsz](../../libraries/proof/beacon/ClprBeaconSsz.sol); the on-chain aggregation + pairing in [ClprBeaconBls](../../libraries/proof/beacon/ClprBeaconBls.sol) — see §7.
-
-### Step 4 & 8 — SSZ Merkle branches
-
-The execution `state_root` and `next_sync_committee` sit at fixed positions in SSZ binary trees. [`ClprBeaconSsz.verifyProof`](../../libraries/proof/beacon/ClprBeaconSsz.sol) walks the generalized index bit-by-bit (`sha256(left ∥ right)`):
-
-| Leaf | Tree root | gindex | depth / index |
-|---|---|---|---|
-| `execution_payload.state_root` | `bodyRoot` | **802** | 9 / 290 |
-| `next_sync_committee` | `stateRoot` | **87** | 6 / 23 |
-
-The committee root is `sha256(merkleize(512 × sha256(pad64(pubkey48))) ∥ sha256(pad64(aggregate48)))` over the **compressed** 48-byte keys (the beacon-native encoding the proof commits to). The relayer ships only the **uncompressed** next committee, so `syncCommitteeRootFromUncompressed` derives each compressed key on-chain (`compressG1`, the cheap direction) and merkleizes — reconstructing that exact root. Matching the proven root authenticates the uncompressed keys in one pass (fail-closed: `compressG1` is injective, so a wrong key can't reproduce the committed root); no separate compressed committee or compress-and-compare bind is needed. The successor anchor then stores only the **keccak Merkle root** over those uncompressed keys ([ClprCommitteeMerkle.root](../../libraries/proof/beacon/ClprCommitteeMerkle.sol)) plus the new aggregate — not the keys themselves.
-
-### Step 5 & 6 — EVM state proofs (MPT)
-
-Shared with QBFTVerifier via [ClprEvmStateProof](../../libraries/proof/evm/ClprEvmStateProof.sol).
-
-- **Account proof** — walks the state trie from `executionStateRoot` to `keccak256(EXPECTED_CONTRACT_ADDRESS)`, yielding `[nonce, balance, storageRoot, codeHash]`. `codeHash` is checked against the immutable.
-- **Storage proof** — `verifyProvenSlots` proves each entry against the **caller-derived** slot for `channelId` (from the trust anchor), exactly like QBFTVerifier. The slots are never read from the proof, so the proven values are cryptographically bound to *this* channel's `Channel` struct — a relay cannot reorder them or substitute another channel's slot. The proof carries 4 entries (ACK-only) or 5 (with outbound messages):
-
-| Slot index | Channel slot | Decoded field(s) |
-|---|---|---|
-| 0 | `+1` `verifier(20)\|status(1)\|nextMessageId(8)` | `state = slot>>160`, `nextMessageId = slot>>168` |
-| 1 | `+2` `acked(8)\|received(8)\|nextExpectedReply(8)` | `receivedMessageId = slot>>64` |
-| 2 | `+4` `sentRunningHash` | `sentRunningHash` |
-| 3 | `+5` `receivedRunningHash` | `receivedRunningHash` |
-| 4 | `_messageQueues[channelId][nextMessageId-1]` `runningHashAfterProcessing` | proven but not surfaced in metadata |
-
----
-
-## 7. BLS verification
-
-`_verifyBls` runs the real on-chain BLS12-381 check via [ClprBeaconBls](../../libraries/proof/beacon/ClprBeaconBls.sol) (EIP-2537 precompiles). All points arrive **uncompressed** (the relayer's wire format), so there is **no on-chain decompression**:
-
-1. Select the **non-participants** from `bits` (bit clear), require `3·participants ≥ 2·512` (`InsufficientParticipation` otherwise). Their keys arrive in proof item 9 (one 416-byte `key ‖ proof` entry per clear bit, ascending order) and each is Merkle-authenticated against the anchor's `committeeMerkleRoot` before use; with full participation the item is an empty list and no key material is needed.
-2. **Recover the participant aggregate by complement**: the anchor's `aggregatePubkey` minus the non-participants, `aggregate + Σ nonParticipant·(r−1)`, in a single `BLS12_G1MSM` (0x0c) — `1 + |non-signers|` terms (≤ ⅓ of the committee at the supermajority), and no MSM at all when everyone signed.
-3. **Hash-to-G2** the signing root per RFC 9380 (`expand_message_xmd` → 2× `MAP_FP2_TO_G2` (0x11) → `G2ADD` (0x0d)) under the ETH2 POP ciphersuite.
-4. **Pairing**: `BLS12_PAIRING_CHECK` (0x0f) of `e(aggPubkey, H(signingRoot)) · e(−G1, sig) == 1`.
-
-On-chain **compression** (the cheap, MODEXP-free direction, ~720 gas/key) is used only at rotation, to rebuild the beacon SSZ committee root from the uncompressed keys (§4 & 8). Gas (cost scales with the **non-signer** count, so high participation is cheapest): the aggregate verify is ~1.35M at the 342/512 supermajority and ~0.22M at full 512/512; see [GasUsage.t.sol](../../../test/verifiers/ethereum/GasUsage.t.sol) and the `baselines.yml` benchmarks.
-
----
-
-## 8. Library dependency map
+## 3. Bundle lifecycle
 
 ```mermaid
-graph TD
-    EMV["EthMainnetVerifier"] --> SSZ["ClprBeaconSsz"]
-    EMV --> ESP["ClprEvmStateProof"]
-    EMV --> PB["ClprProtobuf / Helpers"]
-    EMV --> RLP["OpenZeppelin RLP + Memory"]
-    EMV --> BLS["ClprBeaconBls"]
-    EMV --> CM["ClprCommitteeMerkle"]
+sequenceDiagram
+    autonumber
+    participant ETH as Ethereum (beacon + execution)
+    participant R as Relayer
+    participant SVC as ClprService on Hiero
+    participant V as EthMainnetVerifier
 
-    ESP --> MPT["MerklePatriciaProof"]
-    SSZ --> SHA["sha256 precompile"]
-    SSZ --> CMP["ClprBls12381.compressG1"]
-    BLS --> EIP["EIP-2537 precompiles\n(0x0c G1MSM / 0x0d G2ADD / 0x0f pairing / 0x11 map_fp2_to_g2)"]
+    R->>ETH: GET /eth/v1/beacon/light_client/finality_update
+    ETH-->>R: attested header, sync aggregate, execution header + branch
+    R->>ETH: GET /eth/v1/beacon/genesis and /eth/v1/config/spec
+    R->>ETH: GET /eth/v1/beacon/light_client/bootstrap/{finalized root}
+    Note over R: committee keys for the signing period,<br/>decompress keys and signature, check the pairing off-chain
+    R->>ETH: eth_getProof(peer ClprService, channel slots, attested block)
+    R->>ETH: eth_getBlockByNumber(attested block)
+    Note over R: build the 10-item RLP proof<br/>(non-signer entries, execution branch, MPT proofs, bundle content)
+    R->>SVC: submitBundle(channelId, proofBytes)
+    SVC->>V: verifyBundle(proofBytes, trustAnchor, channelContext)
+    V-->>SVC: queue metadata, message payloads, new anchor (empty unless rotation)
+    SVC-->>R: messages delivered in order, running hashes checked
+
+    opt once per sync-committee period (8,192 slots, about 27 h)
+        R->>ETH: GET /eth/v1/beacon/light_client/updates?start_period=P&count=1
+        Note over R: add next_sync_committee (uncompressed) and its gindex-87 branch<br/>as payload items 4 and 5
+        R->>SVC: submitBundle(channelId, proofBytes with rotation)
+        SVC->>V: verifyBundle(...)
+        V-->>SVC: successor anchor, id = period P+1
+    end
 ```
 
-| Library | Purpose | Shared with QBFT? |
-|---|---|---|
-| [ClprBeaconSsz](../../libraries/proof/beacon/ClprBeaconSsz.sol) | SSZ Merkle branches, header/committee `hash_tree_root`, signing domain | ETH-only |
-| [ClprCommitteeMerkle](../../libraries/proof/beacon/ClprCommitteeMerkle.sol) | keccak Merkle commitment over the 512 committee keys: `root` at rotation, `verifyEntry` per non-signer per bundle | ETH-only |
-| [ClprBeaconBls](../../libraries/proof/beacon/ClprBeaconBls.sol) | BLS12-381 aggregate verification (G1MSM aggregation + hash-to-G2 + pairing, EIP-2537) | ETH-only |
-| [ClprEvmStateProof](../../libraries/proof/evm/ClprEvmStateProof.sol) | MPT account + storage proofs | Shared |
-| [ClprProtobuf](../../libraries/codec/ClprProtobuf.sol) / [Helpers](../../libraries/codec/ClprProtobufHelpers.sol) | Bundle-content + ledger-config decode | Shared |
+## 4. Trust model
 
----
+Trusted:
 
-## 9. EthMainnetVerifier vs QBFTVerifier
+- **Sync-committee honesty.** At least 2/3 of the 512-member sync committee signs only canonical headers. The verifier authenticates the header the committee signed.
+- **Bootstrap committee.** `verifyConfig` takes the first committee, GVR and fork version from the config
+  payload. Whoever sets up the Channel must supply the real committee for that period.
+- **Pinned code hash.** The anchor pins the peer `ClprService` runtime code hash. A zero code hash turns the
+  check off, so deployments must pin a real one.
+- **Liveness of rotation.** Someone must submit at least one rotation bundle per period. A Channel that
+  misses a full period cannot catch up (section 6).
 
-| Aspect | QBFTVerifier | EthMainnetVerifier |
-|---|---|---|
-| Proof items | 4 | **10** |
-| Block authentication | QBFT committed seals in `extraData` | Sync-committee BLS over the attested beacon header |
-| Signature scheme | ECDSA secp256k1 (`ecrecover`) | BLS12-381 aggregate (EIP-2537, uncompressed points) |
-| Execution state commitment | `stateRoot` field of the EVM block header | execution `state_root` proven **directly** via SSZ branch (no EVM header) |
-| Trust anchor | validator address set | flat 228 B: `gvr ‖ forkVersion ‖ channelId ‖ aggregate ‖ committeeMerkleRoot` |
-| Peer contract identity | from proof | constructor immutables (`address`, `codeHash`) |
-| Storage slots | fixed, caller-derived from `channelId` | fixed, caller-derived from `channelId` |
-| Rotation | on validator-set change | SSZ `next_sync_committee` branch (period change) |
-| Hash functions | keccak256 (MPT) | sha256 (SSZ) + keccak256 (MPT) |
+Not trusted:
+
+- The relayer. It cannot choose the storage slots (they are derived from `channelId`), cannot pass an
+  arbitrary key as a non-signer (each key is Merkle-proven at its committee index), and cannot forge the
+  signing domain (the anchor fixes GVR and fork version).
+- Beacon API and execution RPC providers. Every value they return is checked against the signature.
+
+To forge a bundle an attacker must control 2/3 of one sync committee (342 validators sampled from the
+whole validator set), or break BLS12-381, SHA-256 or Keccak-256.
+
+## 5. Proof format
+
+### Trust anchor (260 bytes, flat)
+
+| Offset | Field | Bytes | Meaning |
+|---|---|---|---|
+| 0 | `genesisValidatorsRoot` | 32 | Chain-pinning root, part of the signing domain |
+| 32 | `forkVersion` | 4 | Fork version of the signing domain; carried unchanged through rotations |
+| 36 | `channelId` | 32 | The CLPR Channel; all storage slots are derived from it |
+| 68 | `aggregatePubkey` | 128 | Uncompressed G1 sum of the 512 committee keys |
+| 196 | `committeeMerkleRoot` | 32 | Keccak Merkle root over the 512 uncompressed keys (`ClprCommitteeMerkle`) |
+| 228 | `codeHash` | 32 | Expected runtime code hash of the peer `ClprService` |
+
+The 512 keys are not stored. Per bundle, the relayer supplies only the non-signers' keys.
+
+### `proofBytes` (RLP list of 10 or 12 items)
+
+| # | Field | Type | Meaning |
+|---|---|---|---|
+| 0 | `attestedHeader` | list of 5 | `[slot, proposerIndex, parentRoot, stateRoot, bodyRoot]` |
+| 1 | `syncAggregate` | list of 2 | participation bits (64 B), signature (256 B uncompressed G2) |
+| 2 | `executionStateRoot` | bytes32 | Execution-layer state root |
+| 3 | `executionBranch` | 9 × bytes32 | SSZ siblings, gindex 802 in `bodyRoot` |
+| 4 | `nextCommittee` | list or empty string | `[512 × 128 B keys, 128 B aggregate]` at rotation, else `0x80` |
+| 5 | `nextCommitteeBranch` | 6 × bytes32 or empty list | SSZ siblings, gindex 87 in `stateRoot`, else `0xc0`; present only with item 4 |
+| 6 | `accountProof` | list of bytes | MPT proof of the peer `ClprService` account |
+| 7 | `storageProof` | 5 or 6 × `[slot, nodes]` | Five `Channel` slots; a sixth (last message running hash) when messages are carried |
+| 8 | `bundleContent` | bytes | Protobuf `ClprBundleContent` |
+| 9 | `nonSignerProofs` | list of 416 B | `key (128 B) ‖ 9 Merkle siblings (288 B)` per clear bit, ascending; empty at 512/512 |
+| 10, 11 | manifest proof, preimage | optional | Endpoint-manifest storage proof and preimage (ADR 2026-07-03) |
+
+Proven `Channel` slots (base `keccak256(channelId, 15)`): `+1` verifier, status, `nextMessageId`;
+`+2` acked, received and next-expected-reply ids; `+4` `sentRunningHash`; `+5` `receivedRunningHash`;
+`+16` `endpointManifestVersion`. The sixth slot is
+`_messageQueues[channelId][nextMessageId − 1].runningHashAfterProcessing`.
+
+### Configuration (`verifyConfig`)
+
+`configProofBytes` is RLP `[slot, [512 keys, aggregate], gvr, forkVersion, ledgerConfiguration, codeHash]`.
+It returns the 260-byte anchor and an anchor id equal to `slot / 8192`. The peer service address comes
+from the proven ledger configuration and is passed to every later call in `channelContext`.
+
+Per-deployment values: GVR, fork version, bootstrap committee and slot, peer `ClprService` code hash.
+The contract itself has no constructor parameters.
+
+## 6. Sync-committee rotation
+
+- **What moves.** The committee changes every 256 epochs = 8,192 slots, about 27.3 hours.
+- **How.** A bundle whose attested header is in period P carries `next_sync_committee` (the committee of
+  P+1) and its branch. The verifier checks the branch against the attested `stateRoot` and returns a new
+  anchor. The id is P+1.
+- **Cost.** 4,836,081 gas and 66,902 B for the rotation items alone (Sepolia period 1374, measured through
+  the harness on anvil). A bundle that also carries messages adds the normal bundle cost.
+- **Catch-up limit.** Only the current committee can sign a rotation. If no rotation lands during
+  period P, the period-P anchor cannot verify anything signed in P+1 or later, and the Channel needs a new
+  trust anchor. The relayer must submit one rotation per period.
+- **Archive depth.** The rotation update's attested block is older than a non-archive node's
+  `eth_getProof` window, so in the live fixture the rotation is verified on its own, not inside a full
+  bundle. A relayer that wants one transaction per rotation needs an archive execution node, or submits the
+  rotation with a fresh block from the same period.
+
+## 7. Gas and calldata
+
+Measured on real Sepolia (Fulu) data from `test/e2e/fixtures/sepolia-live/capture.json` (captured
+2026-09-30, slot 11254195, 486/512 signers, 26 non-signers, 9-node account proof, ACK-only bundle).
+
+| Measurement | Network | Gas | Calldata | Source |
+|---|---|---|---|---|
+| `verifyBundle` | anvil | 1,645,052 (21,000 base + 291,516 calldata + ~1,332,536 execution) | 19,140 B (18,587 B proof) | `eth-live-sepolia.spec.ts` |
+| `verifyBundle` | Hedera testnet, HAPI 0.77.2 | 1,645,052 (receipt), 1.5792 HBAR | 19,140 B, one jumbo `EthereumTransaction` | `hiero-gas-hedera-testnet.json`, 2026-09-30 |
+| deploy `EthMainnetVerifier` | Hedera testnet | 4,213,415, 4.0449 HBAR | 19,364 B | `hiero-gas-hedera-testnet.json` |
+| rotation (`verifyRotationExt`) | anvil | 4,836,081 (incl. base and calldata) | 66,902 B rotation items | `eth-live-sepolia.spec.ts`, period 1374 |
+
+Hedera testnet transactions (public): verify
+`0xaf0b0238d6a430d2750e60648d5b2d7af92990e948303dd662e0b1ee38b71d91` (repeated as
+`0xaafc66c2…6af75` with identical gas), deploy `0xed82231d…c6e3a694`, verifier
+`0x92646d66a66e93411d6f679f4b4befebdb3371bd`. Testnet charged 96 tinybar per gas.
+
+Synthetic hot-path benchmarks (generator committee, `test/verifiers/evm/ethereum/GasUsage.t.sol`,
+tracked in `script/gas/baselines.yml`):
+
+| Step | Gas |
+|---|---|
+| hash-to-G2 | 113,934 |
+| BLS `aggregateVerifyComplement`, 342 signers (170 non-signers) | 1,348,432 |
+| BLS `aggregateVerifyComplement`, 512 signers | 218,662 |
+| SSZ `syncCommitteeRootFromUncompressed`, 512 keys | 1,187,812 |
+
+Cost grows with the number of non-signers: each adds one 419-byte RLP entry (at most 6,704 calldata gas)
+and one MSM term. At the 342-signer minimum the BLS step alone is 1.35M gas. Both a typical bundle and a
+rotation fit Hedera's 15M gas and 128 KB calldata limits.
+
+## 8. Limits and known gaps
+
+- **No ClprService on Sepolia yet.** The live bundle targets the Sepolia deposit contract with its real
+  code hash; the channel slots are empty there, so the storage step checks real MPT **exclusion** proofs
+  and returns zeroed metadata. A non-empty queue on a live chain has not been proven yet.
+- **Rotation inside a full bundle** needs `eth_getProof` at the rotation update's block, which public
+  non-archive nodes no longer serve (section 6).
+- **Fork version is fixed per anchor.** A fork that changes the fork version stops the Channel until the
+  anchor is updated (section 9).
+- **Solo cannot run it.** Local Solo (consensus v0.74, EVM v0.67) has no EIP-2537 precompiles and reverts
+  with `BlsPrecompileCallFailed`. Hedera testnet has them.
+- **Light-client forks.** The proof builder accepts only `electra` and `fulu` light-client data.
+
+## 9. Upgrades and forks
+
+- **Fork version (Class A in the ADR).** The signing domain uses the anchor's 4-byte fork version, which
+  rotation carries forward unchanged. When Ethereum activates a fork with a new version, every later
+  signature fails (`BlsSignatureInvalid`) until the anchor carries the new version. The live spec checks
+  that the real Fulu signature fails under the Electra version. BPO forks do not change the fork version.
+- **Layout (Class B).** The generalized indices 802 (execution `state_root` in the body) and 87
+  (`next_sync_committee` in the state) match the live Electra/Fulu layouts. A fork that deepens
+  `BeaconBlockBody` or `BeaconState` moves them and needs new constants.
+- **Semantic (Class C).** Gloas (EIP-7732) moves the execution payload out of `BeaconBlockBody`; this
+  verifier cannot prove the execution state root after it without new code.
+- **Fork-aware verifiers ADR.** `ADR/2026-10-01-fork-aware-verifiers.md` in the spec fork (draft PR
+  LFDT-CLPR/clpr-spec#1) uses this verifier as its reference: fork evidence from `BeaconState.fork`
+  (generalized index 67), fork profiles armed by dual control, and typed reverts
+  (`ClprForkUnsupported`, `ClprForkBoundary`). None of this is implemented here yet; today a fork-version
+  change needs a new Channel or anchor.
+
+## 10. Running it
+
+```sh
+# Unit, gas and compliance tests (Foundry)
+forge test --match-path 'test/verifiers/{evm/ethereum/*,compliance/EthMainnetComplianceTest.t.sol}'
+
+# Live Sepolia fixture replay on anvil (needs anvil on PATH; builds artifacts first)
+forge build
+npm run test:e2e:eth-live
+
+# Re-capture the live fixture (public Sepolia beacon API + execution RPC;
+# waits up to 10 minutes for an aggregate with non-signers)
+npm run eth-live:refresh
+
+# Synthetic end-to-end spec on anvil
+npm run test:e2e:eth-verifier
+
+# Measure verifyBundle on Hiero (testnet spends testnet HBAR; reads the key from --env <file>)
+npm run gas:eth-verifier:testnet
+npm run gas:eth-verifier:testnet -- --verifier 0x92646d66a66e93411d6f679f4b4befebdb3371bd   # verify only
+npm run gas:eth-verifier:solo
+```
+
+Results on this branch (2026-10-01): Foundry 62 passed, 1 skipped (4 suites); live replay 8 of 8 passed.
+
+## 11. Files
+
+| File | Purpose |
+|---|---|
+| `src/verifiers/evm/ethereum/EthMainnetVerifier.sol` | The verifier: anchor, BLS, SSZ, rotation, config |
+| `src/verifiers/evm/common/ClprEvmBundleVerifier.sol` | Shared EVM account/storage proof, slot derivation, bundle decode |
+| `src/libraries/proof/beacon/ClprBeaconSsz.sol` | SSZ branches, header and committee roots, signing domain |
+| `src/libraries/proof/beacon/ClprBeaconBls.sol` | EIP-2537 aggregate verification, hash-to-G2, pairing, curve checks |
+| `src/libraries/proof/beacon/ClprBls12381.sol` | BLS12-381 point compression (`compressG1`) |
+| `src/libraries/proof/beacon/ClprCommitteeMerkle.sol` | Keccak Merkle commitment over the 512 committee keys |
+| `src/libraries/proof/evm/ClprEvmStateProof.sol` | MPT account and storage proofs |
+| `test/verifiers/evm/ethereum/EthMainnetVerifier.t.sol` | Unit and negative tests; `EthMainnetVerifierProofHarness` |
+| `test/verifiers/evm/ethereum/EthCommitteeFixtures.sol` | Generator committee fixtures |
+| `test/verifiers/evm/ethereum/GasUsage.t.sol` | BLS and SSZ hot-path gas benchmarks |
+| `test/verifiers/evm/ethereum/RotationGas.t.sol` | Rotation sub-step gas breakdown |
+| `test/verifiers/compliance/EthMainnetComplianceTest.t.sol` | Shared `IClprVerifier` compliance suite |
+| `test/e2e/relay/buildEthLiveProof.ts` | Live proof builder and fixture refresh |
+| `test/e2e/relay/buildEthMainnetProof.ts` | Synthetic proof builder for the anvil spec |
+| `test/e2e/tests/verifiers/eth-live-sepolia.spec.ts` | Live fixture replay on anvil |
+| `test/e2e/tests/verifiers/eth-verifier.spec.ts` | Synthetic end-to-end spec |
+| `test/e2e/fixtures/sepolia-live/capture.json` | Captured Sepolia beacon and execution responses |
+| `test/e2e/fixtures/sepolia-live/hiero-gas-hedera-testnet.json` | Hedera testnet deploy and verify measurement |
+| `test/e2e/lib/ethVerifierOnHiero.ts`, `script/gas/eth-verifier-hiero.ts` | Hiero gas measurement |
+| `script/gas/baselines.yml` | Gas regression baselines |
+
+## 12. References
+
+- Ethereum consensus specs, Altair light client sync protocol:
+  <https://github.com/ethereum/consensus-specs/blob/dev/specs/altair/light-client/sync-protocol.md>
+- Beacon API light-client endpoints: <https://ethereum.github.io/beacon-APIs/>
+- EIP-2537, BLS12-381 precompiles: <https://eips.ethereum.org/EIPS/eip-2537>
+- RFC 9380, hashing to elliptic curves: <https://www.rfc-editor.org/rfc/rfc9380>
+- EIP-7732, enshrined proposer-builder separation (Gloas): <https://eips.ethereum.org/EIPS/eip-7732>
+- HIP-1086, jumbo Ethereum transactions: <https://hips.hedera.com/hip/hip-1086>
+- CLPR spec and fork-aware verifiers ADR (draft PR LFDT-CLPR/clpr-spec#1):
+  <https://github.com/LFDT-CLPR/clpr-spec>

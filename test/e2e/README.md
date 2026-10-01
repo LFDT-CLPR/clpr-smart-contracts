@@ -80,7 +80,7 @@ After `e2e:solo:up`, the harness port-forwards relay, mirror REST (`39081`/`3908
 
 See [Solo Falcon deployment](https://solo.hiero.org/docs/advanced-solo-setup/network-deployments/falcon-deployment/).
 
-### Mixed backends (Besu ↔ Solo) — cross-verifier E2E
+### Mixed backends (Besu|Anvil ↔ Solo) — cross-verifier E2E
 
 Cross-chain specs deploy **EVM `ClprService` on both sides** (not native `0x16e`). Proof
 construction is **asymmetric**:
@@ -108,6 +108,20 @@ Mirror REST is used for EVM address → contract id lookup only.
 `buildHieroProof` calls `ProofService.getStateProof` per `SlotKey` (HIP-1081). On block node
 v0.33.x that RPC is not implemented — `getStateProof` throws; B→A stays skipped until it ships.
 
+**Anvil + Solo (`npm run test:e2e:anvil:solo`, `CLPR_BACKEND=anvil:solo`).** Same spec with anvil
+on A (harness-started; `CLPR_ANVIL_PORT_A` overrides port 8545) and `E2EVerifier` stub proofs A→B.
+For B→A it authenticates the Solo reply without `ProofService`
+([`relay/hieroBlockProof.ts`](relay/hieroBlockProof.ts)): it finds the `state_changes` block item
+that writes the reply's running hash, recomputes the block root from the block's items
+(consensus node v0.74 `BlockStreamManagerImpl.combine`), checks it against the next block's
+`BlockFooter.previous_block_root_hash`, then on anvil derives the root from a `block_item_leaf`
+`StateProof` with the production `ClprStateProof`/`ClprMerkleProof`, and verifies Solo's real hinTS
+aggregate signature over it (a tampered root fails). The production `TSSVerifier` then stops at
+`ClprHieroWrapsProofRequired`: Solo block proofs carry the 192-byte Schnorr genesis
+address-book proof (2920-byte signature), not WRAPS (3432 bytes). A full `HieroVerifier` delivery
+also needs native `ClprChannel`/`ClprMessageValue` state items, which an EVM-deployed
+`ClprService` does not produce.
+
 **Storage slot derivation** (from `storage-layout.json`):
 
 | Data | Root slot | Derivation |
@@ -116,7 +130,7 @@ v0.33.x that RPC is not implemented — `getStateProof` throws; B→A stays skip
 | `_channels` | **17** | `keccak256(abi.encode(channelId, 17))` + struct field offsets (+1,+2,+4,+5) |
 
 Homogenous `anvil` / `besu` specs still use `E2EVerifier` (stub proofs). See
-`test/e2e/tests/besu-solo-roundtrip.spec.ts` for real cross-verifier roundtrip.
+`test/e2e/tests/solo-cross-roundtrip.spec.ts` for real cross-verifier roundtrip.
 
 ### Mixed backends (legacy note)
 
@@ -147,7 +161,7 @@ Anvil sides need no `e2e:up` step (Vitest spawns `anvil` inline).
 | `npm run test:e2e:anvil`  | Explicit Anvil run. |
 | `npm run test:e2e:besu`   | Both chains Besu (inline Testcontainers or pre-started stack). |
 | `npm run test:e2e:solo`   | Both chains Solo (`e2e:up:solo` or `e2e:solo:up` first). Sequential specs (`vitest.solo.config.ts`). |
-| `npm run test:e2e:besu:solo` | Cross-verifier roundtrip (`besu-solo-roundtrip.spec.ts` only). |
+| `npm run test:e2e:besu:solo` | Cross-verifier roundtrip (`solo-cross-roundtrip.spec.ts` only). |
 | `npm run test:e2e:solo:besu` | Alias — same spec (`solo:besu` → canonical `besu:solo`). |
 | `npm run test:e2e:all`    | Anvil then Besu — mirrors CI. |
 | `npm run e2e:up`          | `infra.ts up` with default spec `anvil` (no-op for nodes). |
@@ -194,6 +208,79 @@ npm run test:e2e -- test/e2e/tests/smoke.spec.ts
 # Tests matching a name
 npm run test:e2e -- -t "kill-switch"
 ```
+
+## Ethereum ↔ Hiero (real proofs)
+
+### Ethereum → Hiero: `EthMainnetVerifier` on a Hiero network
+
+`script/gas/eth-verifier-hiero.ts` deploys `EthMainnetVerifier` through a Hiero JSON-RPC relay
+and submits `verifyBundle` for the recorded live Sepolia bundle
+(`test/e2e/fixtures/sepolia-live/capture.json`, same inputs as `npm run test:e2e:eth-live`) as a
+real `EthereumTransaction`. It reports the gas and HBAR that consensus charged (receipt + mirror
+node `charged_tx_fee`), and whether the relay sent the large calldata as a jumbo transaction or
+through HFS (`FileCreate`/`FileAppend` paid by the relay operator just before the call).
+
+```bash
+forge build
+
+# Local Solo side B (relay :37547, mirror :39082). Funds a throwaway key from the Solo funder.
+npm run gas:eth-verifier:solo
+
+# Hedera testnet (chain 296). Reads CLPR_TESTNET_PRIVATE_KEY, HEDERA_TESTNET_RPC_URL and
+# HEDERA_TESTNET_MIRROR_URL from ~/clpr/.env (or --env <file>). Spends testnet HBAR and writes
+# test/e2e/fixtures/sepolia-live/hiero-gas-hedera-testnet.json.
+npm run gas:eth-verifier:testnet                       # deploy + verify (~5.6 HBAR)
+npm run gas:eth-verifier:testnet -- --verifier 0x92646d66a66e93411d6f679f4b4befebdb3371bd  # verify only (~1.6 HBAR)
+```
+
+Measured 2026-10-01 (bundle: Sepolia slot 11254195, 486/512 signers, 18 587 B proof, 19 140 B calldata):
+
+| Network | Step | Gas (receipt = consumed) | Fee charged | Hiero tx |
+|---|---|---|---|---|
+| anvil (reference) | `verifyBundle` | 1 645 052 (`eth_estimateGas`) | — | — |
+| Hedera testnet, HAPI 0.77.2 | deploy (19 364 B init code) | 4 213 415 | 4.0449 HBAR | 1 jumbo `ETHEREUMTRANSACTION`, no HFS |
+| Hedera testnet, HAPI 0.77.2 | `verifyBundle` (succeeds, run twice) | 1 645 052 | 1.5792 HBAR | 1 jumbo `ETHEREUMTRANSACTION`, no HFS |
+| Solo, consensus v0.74 | deploy | 4 213 415 | 2.9915 HBAR | 1 jumbo `ETHEREUMTRANSACTION`, no HFS |
+| Solo, consensus v0.74 | `verifyBundle` | reverts `BlsPrecompileCallFailed` | — | — |
+
+- Gas on Hedera testnet equals the anvil figure exactly. Testnet charged 96 tinybar/gas
+  (fee = gas × price); the Solo fee schedule is 71 tinybar/gas. Hiero charges at least 80% of
+  the gas limit, so the script signs `estimate × 1.15`.
+- Solo cannot verify the bundle: consensus v0.74 runs EVM `v0.67`, which has no EIP-2537
+  BLS12-381 precompiles (`eth_call` to `0x0b` returns empty data; on testnet it returns the
+  point at infinity). The script probes this and reports `eip2537`.
+- Size limits. A standard Hiero transaction is capped at 6 144 B
+  (`hedera.transaction.maxBytes`). Larger `EthereumTransaction`s go through as HIP-1086 jumbo
+  transactions: consensus allows 133 120 B per transaction and 131 072 B of calldata
+  (`jumboTransactions.maxTxnSize`, `jumboTransactions.ethereumMaxCallDataSize`). Relay 0.77
+  mirrors this in precheck (`SEND_RAW_TRANSACTION_SIZE_LIMIT` 133 120, `CALL_DATA_SIZE_LIMIT`
+  131 072) and only falls back to HFS when `JUMBO_TX_ENABLED=false`. Both the local relay and
+  hashio reject 131 100 B of calldata with `Oversized data: call data size 131100, call data size
+  limit 131072` before submission. Hashio's intrinsic-gas precheck prices non-zero calldata bytes
+  at 40 gas (the EIP-7623 floor); for this bundle the floor (≈ 750 k) is below the execution cost,
+  so it does not bind.
+
+### Hiero → Ethereum: status on the local Solo network
+
+`HieroVerifier` needs, per bundle, a `StateProof` whose `signed_block_proof` is a WRAPS-settled
+hinTS signature (3 432 B; `TSSVerifier` rejects the 2 920 B genesis-Schnorr form with
+`ClprHieroWrapsProofRequired`) and whose state-item leaves are native CLPR state values
+(`StateValue` tags 482 channel, 498 message, 514 manifest). The Solo network started by
+`npm run e2e:up -- anvil:solo` does not provide that yet:
+
+- Block node `0.38.0` has no `ProofService` (`getStateProof` returns gRPC status 5); the plugin
+  list reported by `serverStatusDetail` has no proof plugin.
+- Consensus nodes run with `tss.wrapsEnabled=false`, so every block proof carries a genesis
+  Schnorr signature (2 920 B).
+- `buildHieroProof.ts` requests `SlotKey` (EVM contract storage) proofs for a `ClprService`
+  deployed as a contract on Solo. `ClprStateProof` skips such leaves as unknown tags, so even
+  with a proof service the bundle would fail with `StateProofMissingChannel`. A real
+  Hiero → Ethereum leg needs the source to be the native Hiero CLPR service.
+
+The recorded WRAPS-signed fixture in `test/verifiers/hiero/fixtures/` (from a localnet with the
+native CLPR service) is what `HieroVerifier` is currently tested against (`forge test --match-contract HieroVerifierTest`).
+What the live Solo network can already prove on anvil (Solo's hinTS aggregate signature over a
+block-item root) is covered by `npm run test:e2e:anvil:solo` (see the mixed-backends section above).
 
 ## What's deployed per chain
 

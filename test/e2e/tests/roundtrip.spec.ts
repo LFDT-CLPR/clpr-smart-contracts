@@ -87,12 +87,15 @@ describe("roundtrip A->B->A (full bidirectional)", () => {
             addrsA = pair.addrsA;
             addrsB = pair.addrsB;
 
-            const isSolo = backend.kindA() === "solo";
-            await wireConfig({clients: A, addrs: pair.addrsA, soloRelay: isSolo});
-            await wireConfig({clients: B, addrs: pair.addrsB, soloRelay: isSolo});
+            // Per side: in a mixed spec (e.g. anvil:solo) only one side is a Hiero relay, whose
+            // msg.value is in tinybars, so bond/stake settings must not leak across sides.
+            const soloA = backend.kindA() === "solo";
+            const soloB = backend.kindB() === "solo";
+            await wireConfig({clients: A, addrs: pair.addrsA, soloRelay: soloA});
+            await wireConfig({clients: B, addrs: pair.addrsB, soloRelay: soloB});
 
-            await registerEndpoint({clients: A, clprService: pair.addrsA.clprService, soloRelay: isSolo});
-            await registerEndpoint({clients: B, clprService: pair.addrsB.clprService, soloRelay: isSolo});
+            await registerEndpoint({clients: A, clprService: pair.addrsA.clprService, soloRelay: soloA});
+            await registerEndpoint({clients: B, clprService: pair.addrsB.clprService, soloRelay: soloB});
 
             const conn = await wireChannel({
                 chainA: A, chainB: B,

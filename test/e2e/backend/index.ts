@@ -17,7 +17,9 @@ function makeNode(kind: BackendKind, slot: "a" | "b"): AnvilNode | AvalancheNode
     if (kind === "avalanche") return new AvalancheNode(slot);
     if (kind === "besu") return new BesuNode(slot);
     if (kind === "solo") return new SoloNode(slot);
-    return new AnvilNode(slot === "a" ? 8545 : 8546, slot === "a" ? 1337 : 1338);
+    // CLPR_ANVIL_PORT_A / CLPR_ANVIL_PORT_B let parallel checkouts avoid port clashes.
+    const port = Number(process.env[`CLPR_ANVIL_PORT_${slot.toUpperCase()}`] ?? (slot === "a" ? 8545 : 8546));
+    return new AnvilNode(port, slot === "a" ? 1337 : 1338);
 }
 
 export function createBackend(): Backend {

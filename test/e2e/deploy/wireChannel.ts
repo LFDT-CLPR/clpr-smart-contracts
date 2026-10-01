@@ -108,7 +108,7 @@ export function buildHieroConfigProof(peerChainId: string): Hex {
     return ("0x" + payload.toString("hex")) as Hex;
 }
 
-// ── Cross-verifier (Besu ↔ Solo) ─────────────────────────────────────────
+// ── Cross-verifier (Besu|Anvil ↔ Solo) ─────────────────────────────────────────
 
 async function wireCrossVerifier(opts: CrossWireOpts): Promise<WiredChannel> {
     const {chainA, chainB, caipA, caipB, addrsA, addrsB, peerKindA, peerKindB} = opts;
@@ -136,6 +136,9 @@ async function wireCrossVerifier(opts: CrossWireOpts): Promise<WiredChannel> {
             validatorAddr: opts.validatorAddr
         });
         configProofA = configProof;
+    } else {
+        // Peer produces stub proofs: chain A runs `E2EVerifier`, which needs its peer config.
+        await configureE2EVerifier({clients: chainA, verifierAddr: addrsA.verifier, peerChainId: caipB});
     }
 
     const commitment = channelCommitment(channelId, operatorPubKey);
@@ -159,6 +162,8 @@ async function wireCrossVerifier(opts: CrossWireOpts): Promise<WiredChannel> {
             validatorAddr: opts.validatorAddr
         });
         configProofB = configProof;
+    } else {
+        await configureE2EVerifier({clients: chainB, verifierAddr: addrsB.verifier, peerChainId: caipA});
     }
 
     await registerOn(chainB, addrsB.clprService, channelId, commitment);
