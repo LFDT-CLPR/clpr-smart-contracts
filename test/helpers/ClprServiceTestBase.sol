@@ -12,4 +12,5 @@ abstract contract ClprServiceTestBase is ClprTestBase {
     // ClprService tests use shared ClprTestBase helpers for channel registration,
     // message sending, and configuration updates. Additional suite-specific helpers
     // can be added here as test coverage expands.
-}
+
+    }
