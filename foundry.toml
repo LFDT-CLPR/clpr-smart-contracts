@@ -23,6 +23,12 @@ evm_version = "osaka"
 # essentially free, and the saving compounds across the still-inlined children.
 bytecode_hash = "none"
 cbor_metadata = false
+# ClprSha512Hasher is one hand-unrolled assembly block: via-IR spills its working variables to
+# memory and the legacy Yul optimizer runs out of stack on it, so it is built legacy, unoptimized.
+additional_compiler_profiles = [{ name = "legacy", via_ir = false, optimizer = false }]
+compilation_restrictions = [
+    { paths = "src/libraries/crypto/ClprSha512Hasher.sol", via_ir = false, optimizer = false },
+]
 fs_permissions = [
     { access = "read", path = "./storage-layout.json" },
     { access = "read", path = "test/verifiers/hiero/fixtures" },
