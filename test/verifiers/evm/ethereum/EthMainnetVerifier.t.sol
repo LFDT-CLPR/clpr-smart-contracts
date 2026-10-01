@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {EthMainnetVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthMainnetVerifier.sol";
+import {EthBeaconLightClient} from "@hiero-ledger/clpr/libraries/proof/beacon/EthBeaconLightClient.sol";
 import {EthCommitteeFixtures} from "@test/verifiers/evm/ethereum/EthCommitteeFixtures.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {ClprCommitteeMerkle} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprCommitteeMerkle.sol";
@@ -261,7 +262,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory payload = _payloadReachingBls();
         bytes memory anchor = _anchor();
         vm.expectRevert(
-            abi.encodeWithSelector(EthMainnetVerifier.InsufficientParticipation.selector, uint256(0), uint256(512))
+            abi.encodeWithSelector(EthBeaconLightClient.InsufficientParticipation.selector, uint256(0), uint256(512))
         );
         exposed.verifyBundle(payload, anchor, "");
     }
@@ -311,7 +312,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory wrapper = _nonSignerWrapper(genUncompressed, 0);
         vm.expectRevert(
             abi.encodeWithSelector(
-                EthMainnetVerifier.InsufficientParticipation.selector, SUPERMAJORITY - 1, SYNC_COMMITTEE_SIZE
+                EthBeaconLightClient.InsufficientParticipation.selector, SUPERMAJORITY - 1, SYNC_COMMITTEE_SIZE
             )
         );
         harness.verifyBlsExt(anchor, wrapper, sig, bits, BEACON_BLOCK_ROOT, abi.encodePacked(FORK_VERSION), GVR);
@@ -335,7 +336,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         // Entries built from a DIFFERENT key than the committee's → root mismatch.
         bytes memory wrapper = _nonSignerWrapper(_pubkey(0x77), SYNC_COMMITTEE_SIZE - SUPERMAJORITY);
         vm.expectRevert(
-            abi.encodeWithSelector(EthMainnetVerifier.NonSignerProofInvalid.selector, uint256(SUPERMAJORITY))
+            abi.encodeWithSelector(EthBeaconLightClient.NonSignerProofInvalid.selector, uint256(SUPERMAJORITY))
         );
         harness.verifyBlsExt(anchor, wrapper, sig, bits, BEACON_BLOCK_ROOT, abi.encodePacked(FORK_VERSION), GVR);
     }
@@ -354,7 +355,9 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory wrapper = _nonSignerWrapper(genUncompressed, 0); // …but zero entries supplied
         vm.expectRevert(
             abi.encodeWithSelector(
-                EthMainnetVerifier.NonSignerProofCountMismatch.selector, SYNC_COMMITTEE_SIZE - SUPERMAJORITY, uint256(0)
+                EthBeaconLightClient.NonSignerProofCountMismatch.selector,
+                SYNC_COMMITTEE_SIZE - SUPERMAJORITY,
+                uint256(0)
             )
         );
         harness.verifyBlsExt(anchor, wrapper, sig, bits, BEACON_BLOCK_ROOT, abi.encodePacked(FORK_VERSION), GVR);
@@ -409,7 +412,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         // compressed leaf, so the reconstructed root fails the branch → NextCommitteeBranchInvalid.
         (bytes memory rotationRlp, bytes32 stateRoot) =
             _rotationWithStateRoot(abi.encodePacked(bytes16(0), G1_GEN_X, bytes16(0), G1_GEN_Y_NEG));
-        vm.expectRevert(EthMainnetVerifier.NextCommitteeBranchInvalid.selector);
+        vm.expectRevert(EthBeaconLightClient.NextCommitteeBranchInvalid.selector);
         harness.verifyRotationExt(
             rotationRlp, stateRoot, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
         );
@@ -498,7 +501,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[0] = RLP.encode(uint256(1)); // present (first byte != 0x80)
         pair[1] = RLP.encode(new bytes[](0)); // absent branch (0xc0)
         bytes memory rotationRlp = RLP.encode(pair);
-        vm.expectRevert(EthMainnetVerifier.RotationPairMismatch.selector);
+        vm.expectRevert(EthBeaconLightClient.RotationPairMismatch.selector);
         harness.verifyRotationExt(
             rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
         );
@@ -516,7 +519,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = _encodeBranch(branch);
         bytes memory rotationRlp = RLP.encode(pair);
 
-        vm.expectRevert(EthMainnetVerifier.InvalidCommittee.selector);
+        vm.expectRevert(EthBeaconLightClient.InvalidCommittee.selector);
         harness.verifyRotationExt(
             rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
         );
@@ -533,7 +536,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = _encodeBranch(branch);
         bytes memory rotationRlp = RLP.encode(pair);
 
-        vm.expectRevert(EthMainnetVerifier.InvalidBranch.selector);
+        vm.expectRevert(EthBeaconLightClient.InvalidBranch.selector);
         harness.verifyRotationExt(
             rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
         );
@@ -549,7 +552,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = _encodeBranch(branch);
         bytes memory rotationRlp = RLP.encode(pair);
 
-        vm.expectRevert(EthMainnetVerifier.InvalidCommittee.selector);
+        vm.expectRevert(EthBeaconLightClient.InvalidCommittee.selector);
         harness.verifyRotationExt(
             rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
         );
