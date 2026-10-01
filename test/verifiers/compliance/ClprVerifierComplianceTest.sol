@@ -334,7 +334,11 @@ abstract contract ClprVerifierComplianceTest is Test {
     }
 
     /// @dev Spec: newTrustAnchor is empty bytes when the proof contains no rotation.
-    function test_compliance_verifyBundle_noRotation_returnsEmptyNewAnchor() public {
+    /// @dev Virtual for verifiers whose anchor advances with every bundle even without a key
+    ///      rotation (IClprVerifier: "empty bytes if the anchor was not advanced"), such as a
+    ///      proof-of-work checkpoint or a last-proven block height. Such adapters override this case
+    ///      and assert what their anchor must contain instead.
+    function test_compliance_verifyBundle_noRotation_returnsEmptyNewAnchor() public virtual {
         BundleVector memory v = _validBundle();
         (,, bytes memory newTrustAnchor,,) = verifier.verifyBundle(v.proofBytes, v.trustAnchor, v.channelContext);
         assertEq(newTrustAnchor.length, 0, "no rotation: newTrustAnchor must be empty");
