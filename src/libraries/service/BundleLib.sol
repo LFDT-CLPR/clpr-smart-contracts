@@ -865,8 +865,8 @@ library BundleLib {
 
         // connectorIdForReply holds the connectorId for every DATA original (redacted or not)
         // and is bytes32(0) for CONTROL/REPLY messages
-        bytes32 connectorIdBytes = message.connectorIdForReply;
-        if (connectorIdBytes == bytes32(0)) {
+        bytes32 connectorId = message.connectorIdForReply;
+        if (connectorId == bytes32(0)) {
             emit ReplyDelivered(ctx.channelId, reply.messageId, reply.status);
             return;
         }
@@ -878,11 +878,10 @@ library BundleLib {
             // Live (non-redacted) DATA: recover sender for the callback and decrement counters.
             // Counters were already decremented at redactMessage time for redacted slots.
             senderBytes = ClprProtobuf.decodeDataMessage(message.payload).sender;
-            bytes32 inflightKey = keccak256(abi.encodePacked(ctx.channelId, connectorIdBytes));
-            bytes32 quotaKey = keccak256(abi.encodePacked(connectorIdBytes));
+            bytes32 inflightKey = keccak256(abi.encodePacked(ctx.channelId, connectorId));
             if (_connectorInflightCount[inflightKey] > 0) _connectorInflightCount[inflightKey]--;
-            if (_connectorQueueCounts[ctx.channelId][quotaKey] > 0) {
-                _connectorQueueCounts[ctx.channelId][quotaKey]--;
+            if (_connectorQueueCounts[ctx.channelId][connectorId] > 0) {
+                _connectorQueueCounts[ctx.channelId][connectorId]--;
             }
         }
 
@@ -891,7 +890,7 @@ library BundleLib {
             reply.status == ClprTypes.ReplyStatus.CONNECTOR_NOT_FOUND
                 || reply.status == ClprTypes.ReplyStatus.CONNECTOR_UNDERFUNDED
         ) {
-            _slashConnector(ctx, connectorIdBytes, _connectors, _connectorExists, _pendingWithdrawals);
+            _slashConnector(ctx, connectorId, _connectors, _connectorExists, _pendingWithdrawals);
         }
 
         // Best-effort callback to sender application (only if sender is a 20-byte address).

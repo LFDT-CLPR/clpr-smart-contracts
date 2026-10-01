@@ -96,9 +96,8 @@ contract MessagingLogic is LogicModuleBase {
 
         /// Enforces the per-connector queue depth quota (connectorQueueQuotaPct % of maxQueueDepth).
         /// Reverts with ClprQueueQuotaExceeded if the connector's pending message count is at or above the quota.
-        bytes32 connectorKey = keccak256(abi.encodePacked(connectorId));
         uint32 quota = (uint32(_config.throttles.maxQueueDepth) * economicConfig.connectorQueueQuotaPct) / 100;
-        if (_connectorQueueCounts[_channelId][connectorKey] >= quota) revert ClprTypes.ClprQueueQuotaExceeded();
+        if (_connectorQueueCounts[_channelId][connectorId] >= quota) revert ClprTypes.ClprQueueQuotaExceeded();
 
         _authorizeConnector(_channelId, connectorId, targetApplication, sender, messageData);
 
@@ -110,7 +109,7 @@ contract MessagingLogic is LogicModuleBase {
         }
 
         messageId =
-            _enqueueDataMessage(_channelId, channel, connectorKey, connectorId, targetApplication, sender, messageData);
+            _enqueueDataMessage(_channelId, channel, connectorId, connectorId, targetApplication, sender, messageData);
     }
 
     // submitBundle moved to BundleLogic to reduce bytecode size.
@@ -138,8 +137,8 @@ contract MessagingLogic is LogicModuleBase {
         if (!known || mt != ClprTypes.MessageType.DATA) revert ClprTypes.ClprMessageNotRedactable();
 
         ClprTypes.DecodedDataMessage memory decoded = ClprProtobuf.decodeDataMessage(msg_.payload);
-        bytes32 connKey = keccak256(abi.encodePacked(decoded.connectorId));
-        bytes32 inflightKey = keccak256(abi.encodePacked(_channelId, decoded.connectorId));
+        bytes32 connKey = decoded.connectorId;
+        bytes32 inflightKey = keccak256(abi.encodePacked(_channelId, connKey));
 
         if (_connectorQueueCounts[_channelId][connKey] > 0) {
             _connectorQueueCounts[_channelId][connKey]--;
