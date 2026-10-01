@@ -76,7 +76,7 @@ function slotHex(n: bigint): Hex {
     return ("0x" + mask256(n).toString(16).padStart(64, "0")) as Hex;
 }
 
-function deriveChannelSlots(channelId: Hex): Hex[] {
+export function deriveChannelSlots(channelId: Hex): Hex[] {
     const cBase = BigInt(keccak256(encodeAbiParameters(
         [{type: "bytes32"}, {type: "uint256"}], [channelId, CHANNELS_SLOT]
     )));
@@ -101,7 +101,7 @@ function sha256(...parts: Buffer[]): Buffer {
 
 /// Fold a leaf up to its SSZ Merkle root using the same rule as ClprBeaconSsz.verifyProof:
 /// at each level, the gindex LSB selects whether the sibling is on the left.
-function foldSszBranch(leaf: Buffer, branch: Buffer[], gindex: bigint): Buffer {
+export function foldSszBranch(leaf: Buffer, branch: Buffer[], gindex: bigint): Buffer {
     let computed = leaf;
     let idx = gindex;
     for (const sib of branch) {
@@ -161,7 +161,7 @@ export function committeeMerkleProof(levels: Buffer[][], index: number): Buffer 
 }
 
 /// Payload item 9: one `key(128) ‖ proof(288)` entry per clear participation bit, ascending order.
-function nonSignerProofEntries(keys: Buffer[], participants: boolean[]): Buffer[] {
+export function nonSignerProofEntries(keys: Buffer[], participants: boolean[]): Buffer[] {
     const levels = committeeMerkleLevels(keys);
     const entries: Buffer[] = [];
     for (let i = 0; i < SYNC_COMMITTEE_SIZE; i++) {
@@ -175,16 +175,19 @@ function nonSignerProofEntries(keys: Buffer[], participants: boolean[]): Buffer[
 /// The 512 keys are committed via the Merkle root, never carried in the anchor.
 /// Pass a real `committee` to anchor against actual BLS pubkeys; otherwise a synthetic 512-committee
 /// is used (only the lengths matter when BLS is bypassed by the harness).
+/// `domain` overrides the synthetic genesis validators root / fork version (the live Sepolia builder
+/// passes the real ones so the on-chain signing domain matches what the beacon committee signed).
 export function encodeEthTrustAnchor(
     channelId: Hex,
     codeHash: Hex,
-    committee?: {pubkeys: Buffer[]; aggregate: Buffer}
+    committee?: {pubkeys: Buffer[]; aggregate: Buffer},
+    domain?: {gvr: Hex; forkVersion: Hex}
 ): Hex {
     const c = committee ?? syntheticCommittee();
     if (c.pubkeys.length !== SYNC_COMMITTEE_SIZE) throw new Error("trust anchor: expected 512 pubkeys");
     const anchor = Buffer.concat([
-        hexToBuf(GVR),
-        hexToBuf(FORK_VERSION),
+        hexToBuf(domain?.gvr ?? GVR),
+        hexToBuf(domain?.forkVersion ?? FORK_VERSION),
         hexToBuf(channelId),
         c.aggregate,
         committeeMerkleRoot(c.pubkeys),

@@ -14,6 +14,8 @@
     "test:e2e:solo": "CLPR_BACKEND=solo vitest run --config vitest.solo.config.ts",
     "test:e2e:qbft-verifier": "vitest run test/e2e/tests/verifiers/qbft-verifier.spec.ts",
     "test:e2e:eth-verifier": "CLPR_BACKEND=anvil vitest run test/e2e/tests/verifiers/eth-verifier.spec.ts",
+    "test:e2e:eth-live": "vitest run test/e2e/tests/verifiers/eth-live-sepolia.spec.ts",
+    "eth-live:refresh": "tsx test/e2e/relay/buildEthLiveProof.ts --refresh --wait-nonsigners 600",
     "test:e2e:sei-verifier": "CLPR_BACKEND=sei vitest run test/e2e/tests/verifiers/sei-verifier.spec.ts",
     "test:e2e:all": "npm run test:e2e:anvil && npm run test:e2e:besu",
     "test:e2e:avalanche": "CLPR_BACKEND=avalanche vitest run",
