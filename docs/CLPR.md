@@ -64,6 +64,7 @@ script/
 | Deploy to a chain (operator) or run two-chain e2e | `README.md` → Deployment; `test/e2e/README.md` |
 | Operate the Safe that owns a deployment | `safe-runbook.md`; the kill switch in `runbooks/kill-switch.md` |
 | Investigate an oddity ("why is X done this way?") | `quirks.md` |
+| See which attacks are covered and how | `security-test-matrix.md` + `test/security/` |
 
 ## Verifier families
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprService} from "@hiero-ledger/clpr/ClprService.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
@@ -512,7 +513,7 @@ contract ClprService_Messaging is ClprServiceTestBase {
     function test_sendMessage_revert_connectorReverts() public {
         _registerTestConnector();
         connector.setAuthorizeReverts(true);
-        vm.expectRevert();
+        vm.expectRevert(bytes("authorize revert"));
         service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
     }
 
@@ -524,7 +525,10 @@ contract ClprService_Messaging is ClprServiceTestBase {
             abi.encodeWithSelector(service.sendMessage.selector, channelId, connectorId, hex"1122334455", hex"02");
         connector.setReentrancy(address(service), reentrantCall);
 
-        vm.expectRevert(); // the inner call reverts via ReentrancyGuard; mock surfaces it
+        // MockClprConnector re-reverts with its own require string, so the guard's
+        // ReentrancyGuardReentrantCall selector is not observable from here. Assert the
+        // wrapper the mock actually produces rather than accepting any revert.
+        vm.expectRevert(bytes("reentrant call failed"));
         service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
     }
 
@@ -679,7 +683,7 @@ contract ClprService_Redaction is ClprServiceTestBase {
         _registerTestConnector();
         uint64 msgId = service.sendMessage(channelId, connectorId, hex"1122334455", hex"48454C4C4F");
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.redactMessage(channelId, msgId);
     }
 

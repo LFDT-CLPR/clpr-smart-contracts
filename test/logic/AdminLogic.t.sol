@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ClprService} from "@hiero-ledger/clpr/ClprService.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprTestBase} from "@test/helpers/ClprTestBase.sol";
 import {ClprServiceTestBase} from "@test/helpers/ClprServiceTestBase.sol";
@@ -149,7 +150,7 @@ contract EndpointManagerTest is ClprTestBase {
 
     function test_addEndpoint_onlyOwner() public {
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         service.addEndpoint(alice, _ep(hex"01"));
     }
 
@@ -269,7 +270,7 @@ contract ClprService_Configuration is ClprServiceTestBase {
     function test_updateLedgerConfiguration_revert_notOwner() public {
         ClprTypes.Throttles memory throttles = _defaultThrottles();
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.updateLedgerConfiguration(hex"1234", throttles, "", "");
     }
 
@@ -457,7 +458,7 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
 
     function test_killSwitch_onlyOwner() public {
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.setClprEnabled(false);
     }
 }

@@ -83,6 +83,7 @@ The tree mirrors `src/`. Key entry points:
 | `ClprService_Constructor.t.sol` | Constructor guards (zero logic address, module not deployed) — behaviour owned by `ClprService.sol` directly, not delegated |
 | `ClprService_ViewSmoke.t.sol` | Smoke test of every read-only getter across all modules |
 | `ClprService_GasBenchmark.t.sol` | Gas benchmarks across all modules, including the low-overhead `MinimalMock*` doubles |
+| `security/*Attacks.t.sol` | Attacker-framed restatements of the guards, one file per attack domain. Each test name carries its row id from `docs/security-test-matrix.md`, which is the canonical catalogue of vectors, defences, and classifications |
 | `SafeSmartAccount.t.sol` | A real Safe v1.5.0 multisig as `ClprService` owner |
 
 The `test/` root also holds the deployable doubles used by the e2e harness and

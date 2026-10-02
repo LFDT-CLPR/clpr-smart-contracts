@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {ClprService} from "@hiero-ledger/clpr/ClprService.sol";
@@ -114,7 +115,7 @@ contract ClprService_Channel is ClprServiceTestBase {
 
     function test_closeChannel_revert_notOwner() public {
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.closeChannel(channelId);
     }
 
