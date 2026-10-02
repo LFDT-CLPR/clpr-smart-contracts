@@ -9,7 +9,7 @@ import {SecurityTestBase} from "@test/security/SecurityTestBase.sol";
 ///      X8 (logic-module substitution), X9 (direct module call) and X11 (storage collision) are
 ///      class `E*` — already asserted by `ClprService_Constructor.t.sol`, `LogicModuleBase.t.sol`,
 ///      and `ClprStorageLayoutGuard.t.sol` plus the CI storage-layout diff — so they are not
-///      restated. X2, X3, X14 are class `N` and X5, X10, X13 class `D`; see the matrix.
+///      restated. X2 and X3 are class `N` and X5 and X10 class `D`; see the matrix.
 contract AccessControlAttacksTest is SecurityTestBase {
     /// X1 — every owner-gated router entry point rejects an unprivileged caller.
     ///
