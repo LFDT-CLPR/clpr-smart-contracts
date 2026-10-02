@@ -10,13 +10,11 @@ import {BundleLogicTestBase} from "@test/logic/bundle-logic/BundleLogicTestBase.
 import {ReentrantConnector} from "@test/security/ReentrantConnector.sol";
 import {SecurityAssertions} from "@test/security/SecurityAssertions.sol";
 
-/// @notice Messaging attack rows from `docs/security-test-matrix.md` (M domain).
-/// @dev This file holds multi-step attacks, plus M7, whose guard no
-///      existing test asserts by selector. The single messaging guards — connector
-///      authorization, queue depth, per-connector quota, the payload and wedge limits,
-///      redaction's own window checks, config validation — are each asserted at this level by
-///      `MessagingLogic.t.sol` and `AdminLogic.t.sol`, so those rows are `E*` and the matrix
-///      points at them.
+/// @notice Attacks on the outbound messaging path: reentrancy through a connector callback, and
+///         redaction used as a lever against the hash chain and against connector accounting.
+/// @dev The individual send-path guards — connector authorization, queue depth, per-connector
+///      quota, the payload and wedge limits, redaction's window checks — are asserted on their own
+///      by `MessagingLogic.t.sol`. These tests chain them.
 contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     ReentrantConnector internal attackerConnector;
     bytes32 internal attackerConnectorId;
@@ -40,7 +38,7 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         vm.deal(address(attackerConnector), 1 ether);
     }
 
-    /// M7 — a connector cannot reenter the service from its authorization callback.
+    /// A connector cannot reenter the service from its authorization callback.
     ///
     /// `authorizeOutboundMessage` is an outward call made while `sendMessage` is mid-flight. A
     /// reentrant second send would run against half-applied queue accounting. This attacker
@@ -58,7 +56,7 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         service.sendMessage(channelId, attackerConnectorId, target, "outer");
     }
 
-    /// M7 — the guard leaves no partial state behind when it fires.
+    /// The guard leaves no partial state behind when it fires.
     ///
     /// The attacker swallows the inner revert so the outer send completes. Exactly one message
     /// must be enqueued: if the reentrant call had partially applied, the queue or the
@@ -82,7 +80,7 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         );
     }
 
-    /// M13 — redaction cannot be used to break the running-hash chain the peer verifies against.
+    /// Redaction cannot be used to break the running-hash chain the peer verifies against.
     ///
     /// Redaction rewrites a live outbound payload to `sha256(original)`. The peer has already
     /// hashed the original into its chain, so the local `sentRunningHash` must not move — if it
@@ -133,7 +131,7 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         assertEq(service.getChannel(channelId).ackedMessageId, 2, "both messages must be acked");
     }
 
-    /// M14 — the in-flight guard on connector eviction cannot be bypassed, and the stake is
+    /// The in-flight guard on connector eviction cannot be bypassed, and the stake is
     /// returned exactly once.
     ///
     /// A connector with messages in flight must not be evictable: its stake is what backs the
@@ -149,12 +147,9 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         service.removeConnector(channelId, connectorId, owner);
 
         // A non-admin still cannot evict it, in-flight or not.
-        _assertRevertsWith(
-            attacker,
-            address(service),
-            abi.encodeCall(service.removeConnector, (channelId, connectorId, attacker)),
-            abi.encodeWithSelector(ClprTypes.ClprConnectorUnauthorized.selector)
-        );
+        vm.prank(attacker);
+        vm.expectRevert(ClprTypes.ClprConnectorUnauthorized.selector);
+        service.removeConnector(channelId, connectorId, attacker);
 
         uint256 stake = service.getConnector(channelId, connectorId).lockedStake;
         assertGt(stake, 0, "precondition: connector has stake at risk");

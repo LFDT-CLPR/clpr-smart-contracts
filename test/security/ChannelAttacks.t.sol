@@ -6,12 +6,13 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {BundleLogicTestBase} from "@test/logic/bundle-logic/BundleLogicTestBase.sol";
 import {SecurityAssertions} from "@test/security/SecurityAssertions.sol";
 
-/// @notice Channel lifecycle attack rows from `docs/security-test-matrix.md` (C domain).
-/// @dev This file holds multi-step attacks. The single channel guards —
-///      the commitment check, the reveal signature and its router binding, the duplicate and cap
-///      checks, the channel-id re-derivation, the verifier code check, the legal close
-///      transitions — are each asserted at this level by `ChannelLogic.t.sol`, so those rows are
-///      `E*` and the matrix points at them.
+/// @notice Attacks on the channel close sequence, where message loss would hide: the operator
+///         stops new traffic while replies for already-sent messages are still arriving.
+/// @dev The individual lifecycle guards — the commitment check, the reveal signature, the
+///      duplicate and cap checks, the legal close transitions — are asserted on their own by
+///      `ChannelLogic.t.sol`, and the transition table exhaustively by
+///      `BundleLib_StateMachine.t.sol` against its harness. These tests drive the same rules
+///      end-to-end through `submitBundle`, with messages actually in flight.
 contract ChannelAttacksTest is BundleLogicTestBase, SecurityAssertions {
     function setUp() public override {
         super.setUp();
@@ -42,7 +43,7 @@ contract ChannelAttacksTest is BundleLogicTestBase, SecurityAssertions {
         );
     }
 
-    /// C15 — closing a channel with messages in flight loses nothing and cannot be short-circuited.
+    /// Closing a channel with messages in flight loses nothing and cannot be short-circuited.
     ///
     /// The close sequence is where message loss would hide: the operator stops new traffic while
     /// replies for already-sent messages are still arriving. This drives the full
@@ -105,7 +106,7 @@ contract ChannelAttacksTest is BundleLogicTestBase, SecurityAssertions {
         service.submitBundle(channelId, hex"00FF");
     }
 
-    /// C15 — the second drain gate: an unacked *reply* also blocks CLOSED.
+    /// The second drain gate: an unacked *reply* also blocks CLOSED.
     ///
     /// `all DATA acked` releases CLOSING→DRAINED, but DRAINED→CLOSED additionally requires every
     /// outbound message to be acked, replies included. Otherwise a channel could close while our

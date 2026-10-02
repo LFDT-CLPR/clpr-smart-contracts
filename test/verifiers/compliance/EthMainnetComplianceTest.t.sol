@@ -369,6 +369,20 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         bytes memory storageProofRlp,
         bytes memory bundleContentItem
     ) private view returns (bytes memory) {
+        return _buildBundleProof(executionStateRoot, accountProofRlp, storageProofRlp, bundleContentItem, _execBranch());
+    }
+
+    /// @dev As {_buildBundleProof}, but the branch placed on the wire may differ from the one the
+    ///      committee signed over. Passing anything other than `_execBranch()` yields a proof that
+    ///      satisfies the BLS check and then fails the execution-branch check — the only way to
+    ///      reach `ExecutionBranchInvalid`, which sits behind BLS verification.
+    function _buildBundleProof(
+        bytes32 executionStateRoot,
+        bytes memory accountProofRlp,
+        bytes memory storageProofRlp,
+        bytes memory bundleContentItem,
+        bytes32[] memory wireBranch
+    ) private view returns (bytes memory) {
         // SSZ: fold executionStateRoot → bodyRoot via gindex 802 (9-step branch).
         bytes32[] memory execBranch = _execBranch();
         bytes32 bodyRoot = _foldSsz(executionStateRoot, execBranch, ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY);
@@ -397,7 +411,7 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         top[1] = RLP.encode(uint256(BUNDLE_SLOT) + 1);
         top[2] = RLP.encode(agg);
         top[3] = RLP.encode(executionStateRoot);
-        top[4] = _encodeBranch(execBranch);
+        top[4] = _encodeBranch(wireBranch);
         top[5] = RLP.encode(new bytes(0)); // nextCommittee: absent (RLP empty string 0x80)
         top[6] = RLP.encode(new bytes[](0)); // nextCommitteeBranch: absent (RLP empty list 0xc0)
         top[7] = accountProofRlp;
@@ -405,6 +419,34 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         top[9] = bundleContentItem;
         top[10] = RLP.encode(new bytes[](0)); // nonSignerProofs: empty (full participation)
         return RLP.encode(top);
+    }
+
+    /// @dev `ExecutionBranchInvalid` guards the link between the BLS-signed beacon body and the
+    ///      execution state root the storage proofs are read against. Without it, a validly signed
+    ///      header could be paired with an unrelated execution state — any state the attacker
+    ///      likes. The check sits behind BLS verification, so reaching it needs a proof the
+    ///      committee actually signed: here the signature covers the honest branch while the wire
+    ///      carries a corrupted one.
+    function test_verifyBundle_corruptExecutionBranch_reverts() public {
+        (bytes32 storageRoot, bytes memory storageProofRlp) = _buildChannelStorageProof(SYNTHETIC_CHANNEL_ID);
+        (bytes32 executionStateRoot, bytes memory accountProofRlp) =
+            _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
+
+        bytes32[] memory corrupted = _execBranch();
+        corrupted[0] = keccak256("not the signed sibling");
+
+        bytes memory proof = _buildBundleProof(
+            executionStateRoot, accountProofRlp, storageProofRlp, RLP.encode(new bytes(0)), corrupted
+        );
+
+        // Hoist the arguments: `_validBundle()` builds a proof, and the aggregate-signature
+        // helper calls the BLS precompile — an external call that would otherwise consume the
+        // `vm.expectRevert` expectation before `verifyBundle` is even reached.
+        bytes memory anchor = _validBundle().trustAnchor;
+        bytes memory ctx = _validChannelContext();
+
+        vm.expectRevert(EthMainnetVerifier.ExecutionBranchInvalid.selector);
+        verifier.verifyBundle(proof, anchor, ctx);
     }
 
     // ── Private: small helpers ────────────────────────────────────────────────

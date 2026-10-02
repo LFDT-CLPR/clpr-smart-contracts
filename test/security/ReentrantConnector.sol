@@ -10,8 +10,8 @@ import {IClprConnector} from "@hiero-ledger/clpr/interfaces/IClprConnector.sol";
 ///      guard raised rather than accepting any revert.
 ///
 ///      Deliberately lives in `test/security/` rather than `test/mocks/`: it is an attack tool for
-///      one row of `docs/security-test-matrix.md` (M7), not shared scaffolding, and changing the
-///      shared mock would ripple through unrelated suites.
+///      one test, not shared scaffolding, and changing the shared mock would ripple through
+///      unrelated suites.
 contract ReentrantConnector is IClprConnector {
     /// @dev Call made on reentry. Set to attack; left empty to behave.
     address private _target;

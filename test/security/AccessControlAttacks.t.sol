@@ -4,14 +4,10 @@ pragma solidity ^0.8.28;
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {SecurityTestBase} from "@test/security/SecurityTestBase.sol";
 
-/// @notice Access-control and admin attack rows from `docs/security-test-matrix.md` (X domain).
-/// @dev Rows X1, X4, X7 and X12 are class `E` and asserted here. X6 (double initialization),
-///      X8 (logic-module substitution), X9 (direct module call) and X11 (storage collision) are
-///      class `E*` — already asserted by `ClprService_Constructor.t.sol`, `LogicModuleBase.t.sol`,
-///      and `ClprStorageLayoutGuard.t.sol` plus the CI storage-layout diff — so they are not
-///      restated. X2 and X3 are class `N` and X5 and X10 class `D`; see the matrix.
+/// @notice Attacks on the service's privileged operations: who may call them, what they may
+///         reach, and which values they must never move.
 contract AccessControlAttacksTest is SecurityTestBase {
-    /// X1 — every owner-gated router entry point rejects an unprivileged caller.
+    /// Every owner-gated router entry point rejects an unprivileged caller.
     ///
     /// One call per `onlyOwner` function on `ClprService`, each asserted against the exact
     /// `OwnableUnauthorizedAccount(attacker)` payload. The loop keeps the row and the test
@@ -58,42 +54,36 @@ contract AccessControlAttacksTest is SecurityTestBase {
         service.updateEconomicConfiguration(defaultEcon);
     }
 
-    /// X1 — the owner check runs before any state or argument validation.
+    /// The owner check runs before any state or argument validation.
     ///
     /// `initialize` would revert `ClprAlreadyInitialized` for the owner at this point, so a
     /// non-owner seeing `OwnableUnauthorizedAccount` proves the gate is reached first and does
     /// not leak whether the service was already initialized.
     function test_X1_ownerCheck_precedesStateValidation() public {
-        _assertRevertsWith(
-            attacker,
-            address(service),
-            abi.encodeCall(service.initialize, (hex"1234", defaultThrottles, "", "", defaultEcon)),
-            abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker)
-        );
+        vm.prank(attacker);
+        _expectOwnableRevert(attacker);
+        service.initialize(hex"1234", defaultThrottles, "", "", defaultEcon);
 
         // Sanity: for the owner the same call fails on the one-shot latch instead.
         vm.expectRevert(ClprTypes.ClprAlreadyInitialized.selector);
         service.initialize(hex"1234", defaultThrottles, "", "", defaultEcon);
     }
 
-    /// X4 — only a connector's own admin may deregister it and reclaim its stake.
+    /// Only a connector's own admin may deregister it and reclaim its stake.
     ///
     /// The owner has no override, so the attacker cannot reach the stake by any route.
     function test_X4_nonAdmin_cannotDeregisterConnector() public {
         _registerTestConnector();
 
-        _assertRevertsWith(
-            attacker,
-            address(service),
-            abi.encodeCall(service.removeConnector, (channelId, connectorId, attacker)),
-            abi.encodeWithSelector(ClprTypes.ClprConnectorUnauthorized.selector)
-        );
+        vm.prank(attacker);
+        vm.expectRevert(ClprTypes.ClprConnectorUnauthorized.selector);
+        service.removeConnector(channelId, connectorId, attacker);
 
         // The connector is untouched and its stake is still held by the service.
         assertEq(service.connectorCount(), 1, "connector must survive the attack");
     }
 
-    /// X7 — a caller may only withdraw its own pending balance.
+    /// A caller may only withdraw its own pending balance.
     ///
     /// `collectPending` takes no arguments and reads `_pendingWithdrawals[msg.sender]`, so there
     /// is no `withdraw(to, amount)` to abuse and no owner sweep. Seeding a victim's balance and
@@ -125,7 +115,7 @@ contract AccessControlAttacksTest is SecurityTestBase {
         assertEq(victim.balance, amount, "victim must receive its own balance");
     }
 
-    /// X12 — `protocolVersion` and `chainId` survive an owner configuration update.
+    /// `protocolVersion` and `chainId` survive an owner configuration update.
     ///
     /// Both are written once in the `ClprService` constructor and are not `immutable`; their
     /// constancy rests on no code path rewriting them. A config update rewrites five sibling

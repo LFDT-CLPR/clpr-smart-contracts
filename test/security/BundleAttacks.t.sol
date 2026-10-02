@@ -6,30 +6,23 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {BundleLogicTestBase} from "@test/logic/bundle-logic/BundleLogicTestBase.sol";
 import {SecurityAssertions} from "@test/security/SecurityAssertions.sol";
 
-/// @notice Composite bundle attack scenarios from `docs/security-test-matrix.md` (B domain).
-/// @dev This file holds **multi-step** attacks only. The individual
-///      bundle guards — no-progress, running-hash mismatch, replay, ack verification, the size
-///      bounds, the protobuf errors — are each asserted precisely and at this same level by the
-///      component suites (`BundleLib_Progress`, `BundleLib_Replay`, `BundleLib_Validation`,
-///      `BundleLib_PartialBundle`, `BundleLib_ResponseOrdering`, `BundleLib_ParseFailure`,
-///      `BundleLogic_RateLimiting`), so those rows are `E*` and the matrix points at them rather
-///      than this tree carrying a second copy.
+/// @notice Multi-step attacks on inbound bundle processing.
+/// @dev Each scenario chains several of BundleLib's guards and then asserts the channel's
+///      integrity *after* the attack fails — that no partial state was written, no accounting was
+///      freed, and no message was skipped. The individual guards are asserted on their own by the
+///      `BundleLib_*` and `BundleLogic_*` suites; what those cannot show is the state a failed
+///      attempt leaves behind, because each stops at its own revert.
 ///
-///      What the component suites do not cover is what happens *after* an attack fails: each
-///      stops at its own revert. These scenarios chain several guards and then assert the
-///      channel's integrity — that a failed attempt leaves no partial state, frees no accounting,
-///      and skips no message.
-///
-///      `submitBundle` is permissionless by design, so the attacker needs no privilege;
-///      the mock verifier stands in for a proof, letting these tests supply the wire values a
-///      relay controls while BundleLib's own checks stay live.
+///      `submitBundle` is permissionless by design, so the attacker needs no privilege. The mock
+///      verifier stands in for a proof, which is what lets these tests choose the `QueueMetadata`
+///      and payload list a proof would attest while BundleLib's own checks stay live.
 contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
     function setUp() public override {
         super.setUp();
         _registerTestConnector();
     }
 
-    /// B4 — a rewound bundle cannot re-deliver messages the channel already accepted.
+    /// A rewound bundle cannot re-deliver messages the channel already accepted.
     ///
     /// A relay replaying an older proof claims a `nextMessageId` behind what the channel has
     /// received; accepting it would dispatch those messages a second time. The attacker pairs the
@@ -63,7 +56,7 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
         assertEq(_localSyncData(channelId).receivedMessageId, 3, "the honest continuation must still apply");
     }
 
-    /// B13 — a message cannot be skipped, by any route, and failed attempts leave no trace.
+    /// A message cannot be skipped, by any route, and failed attempts leave no trace.
     ///
     /// Chains the message-position and hash-chain guards across two attempts. An attacker that
     /// wants message 3 never delivered must either claim a `nextMessageId` beyond the payloads it
@@ -114,7 +107,7 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
         );
     }
 
-    /// B14 — a forged ack cannot launder per-connector queue quota.
+    /// A forged ack cannot launder per-connector queue quota.
     ///
     /// Quota is released by the peer acking what it received. If a forged ack were accepted, a
     /// connector could exceed its share of the shared queue indefinitely — and messages awaiting
@@ -169,7 +162,7 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
         service.sendMessage(channelId, connectorId, target, "four");
     }
 
-    /// B12 — a closing channel drains forward and can never be revived.
+    /// A closing channel drains forward and can never be revived.
     ///
     /// Once the operator closes a channel, a peer that keeps claiming ACTIVE must not be able to
     /// hold it open or walk it back — that would defeat the close and keep accepting traffic the
