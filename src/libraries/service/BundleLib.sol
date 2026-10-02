@@ -807,10 +807,7 @@ library BundleLib {
             gasUsed = gasBefore - gasleft();
         }
 
-        // Charge actual gas used + margin; all goes to submitter.
-        uint256 actualCharge = gasUsed * tx.gasprice;
-        uint256 totalCharge = actualCharge + actualCharge * ctx.econ.endpointMarginPercent / 100;
-
+        uint256 totalCharge = _executionCharge(ctx, gasUsed);
         if (totalCharge > 0) {
             bool charged = ConnectorLib.charge(
                 _connectors,
@@ -852,7 +849,8 @@ library BundleLib {
 
     /// @dev Process a REPLY message using a pre-decoded struct.
     ///      Uses connectorIdForReply to decrement inflight and slash even when the
-    ///      original DATA payload has been redacted (zeroed).
+    ///      original DATA payload has been redacted (zeroed). Charges the source connector
+    ///      for the gas the sender's onClprResponse callback used, plus margin, paid to the submitter.
     function _processReplyMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.DecodedReply memory reply,
@@ -913,17 +911,42 @@ library BundleLib {
         //      observe inconsistent state (read-only reentrancy). This is only safe because no
         //      CLPR view is consumed by another contract as an authoritative oracle. If that
         //      ever changes, such a view must revert under the reentrancy guard.
+        uint256 gasUsed;
         if (senderBytes.length == 20 && _bytesToAddress(senderBytes).code.length > 0) {
+            uint256 gasBefore = gasleft();
             try IClprApplication(_bytesToAddress(senderBytes)).onClprResponse{gas: ctx.throttles.maxGasPerMessage}(
                 ctx.channelId, reply.messageId, uint8(reply.status), reply.messageReplyData
             ) {}
                 catch {}
+            gasUsed = gasBefore - gasleft();
+        }
+
+        // A failed charge is not slashed: source-side slashing is keyed only on the reply status,
+        // and slashing here would penalise a CONNECTOR_NOT_FOUND/UNDERFUNDED reply twice. The
+        // submitter absorbs the unpaid cost, including when the slash above banned the connector.
+        uint256 totalCharge = _executionCharge(ctx, gasUsed);
+        if (totalCharge > 0) {
+            ConnectorLib.charge(
+                _connectors,
+                _connectorExists,
+                _pendingWithdrawals,
+                ctx.fallbackRecipient,
+                ctx.channelId,
+                connectorId,
+                totalCharge,
+                ctx.bundleSubmitter
+            );
         }
 
         emit ReplyDelivered(ctx.channelId, reply.messageId, reply.status);
     }
 
     // ── Internal: Helpers ──────────────────────────────────────────────────
+
+    function _executionCharge(BundleContext memory ctx, uint256 gasUsed) internal view returns (uint256) {
+        uint256 actualCharge = gasUsed * tx.gasprice;
+        return actualCharge + actualCharge * ctx.econ.endpointMarginPercent / 100;
+    }
 
     function _enqueueMessage(
         bytes32 channelId,
