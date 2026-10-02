@@ -50,7 +50,8 @@ contract ChannelAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// ACTIVE→CLOSING→DRAINED→CLOSED walk with two messages in flight and asserts the drain gates
     /// hold — the channel cannot reach CLOSED before every message is acked — and that a closed
     /// channel is inert in both directions afterwards.
-    function test_C15_closeWithInflightMessages_drainsWithoutLoss() public {
+    /// @custom:matrix-row C12
+    function test_closeWithInflightMessages_drainsWithoutLoss() public {
         bytes memory target = abi.encodePacked(address(connector));
         service.sendMessage(channelId, connectorId, target, "one");
         service.sendMessage(channelId, connectorId, target, "two");
@@ -113,7 +114,8 @@ contract ChannelAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// reply to the peer's last message was still unacknowledged, and the peer would never learn
     /// the outcome of the message it sent. `BundleLib_StateMachine` covers this against the
     /// harness; this is the end-to-end path.
-    function test_C15_responseGateBlocksCloseUntilRepliesAreAcked() public {
+    /// @custom:matrix-row C12
+    function test_responseGateBlocksCloseUntilRepliesAreAcked() public {
         // An inbound DATA message makes us enqueue an outbound REPLY (message 1).
         bytes[] memory inbound = _payloads(1);
         _submitBundleWithAnchor(channelId, inbound, 1, _runningHashThrough(inbound, 1));
@@ -127,9 +129,11 @@ contract ChannelAttacksTest is BundleLogicTestBase, SecurityAssertions {
         );
 
         bytes[] memory none = new bytes[](0);
-        // A payload-free bundle must restate our head — `nextMessageId` one past our
-        // receivedMessageId, `sentRunningHash` our receivedRunningHash — or it fails the replay or
-        // running-hash check.
+        // The peer's queue ends at the one message we received: `nextMessageId` one past our
+        // receivedMessageId, `sentRunningHash` our receivedRunningHash, which is the only
+        // `nextMessageId` at which a payload-free bundle's hash is checked. A lower one fails the
+        // replay check; a higher one leaves peer messages unreceived, which holds DRAINED→CLOSED
+        // shut on its own and would mask the reply gate this test pins.
         bytes32 inboundHash = _runningHashThrough(inbound, 1);
         _armBundleWithPeerStatus(none, 2, inboundHash, 0, ClprTypes.ChannelStatus.CLOSED);
         // With no message, no ack and no status change the bundle would revert `NoProgress`; a new

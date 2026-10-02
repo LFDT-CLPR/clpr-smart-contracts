@@ -29,7 +29,8 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// rewind with an ack advance so the bundle clears the progress gate and reaches the
     /// message-position check, which rejects it. The channel is left where it was and still
     /// accepts the honest continuation.
-    function test_B4_rewoundBundle_cannotRedeliverAcceptedMessages() public {
+    /// @custom:matrix-row B4
+    function test_rewoundBundle_cannotRedeliverAcceptedMessages() public {
         bytes[] memory all = _payloads(3);
 
         // Legitimately receive messages 1..2. Each inbound DATA queues a reply, so there is an ack to advance.
@@ -59,11 +60,12 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// A message cannot be skipped, by any route, and failed attempts leave no trace.
     ///
     /// Chains the message-position and hash-chain guards across two attempts. An attacker that
-    /// wants message 3 never delivered must either claim a `nextMessageId` beyond the payloads it
+    /// wants message 3 never delivered must either claim a `lastMessageId` beyond the payloads it
     /// carries, or carry a forged payload in message 3's slot. Both fail; the interesting part
     /// is that after both failures the channel is byte-for-byte where it started, so the
     /// legitimate bundle still applies and message 3 is delivered exactly once.
-    function test_B13_messageCannotBeSkipped_andFailedAttemptsLeaveNoState() public {
+    /// @custom:matrix-row B10
+    function test_messageCannotBeSkipped_andFailedAttemptsLeaveNoState() public {
         bytes[] memory all = _payloads(4);
 
         // Legitimately receive messages 1..2.
@@ -71,8 +73,8 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
         assertEq(_localSyncData(channelId).receivedMessageId, 2, "precondition: 1..2 received");
         bytes32 receivedHashBefore = service.getChannel(channelId).receivedRunningHash;
 
-        // Attempt 1: claim messages through 4 (`nextMessageId` 5) while carrying only message 4 —
-        // skipping 3 outright.
+        // Attempt 1: claim the run ends at message 4 (`lastMessageId` 4) while carrying only
+        // message 4 — skipping 3 outright.
         bytes[] memory onlyFourth = _slice(all, 3, 4);
         _armBundleAnchor(onlyFourth, 4, _runningHashThrough(all, 4), 2);
         vm.prank(attacker);
@@ -109,12 +111,13 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
 
     /// A forged ack cannot launder per-connector queue quota.
     ///
-    /// Quota is released by the peer acking what it received. If a forged ack were accepted, a
-    /// connector could exceed its share of the shared queue indefinitely — and messages awaiting
-    /// a reply would be dropped. This drives the queue to its quota, has the attacker try to
-    /// free it with an unbacked ack, and asserts the quota is still exhausted afterwards; only a
-    /// legitimate ack releases exactly one slot.
-    function test_B14_forgedAck_cannotLaunderConnectorQuota() public {
+    /// A connector's quota is held until the peer's reply to each of its messages is processed.
+    /// If an unbacked ack released it, the connector could exceed its share of the shared queue
+    /// indefinitely. This drives the queue to its quota, has the attacker try to free it with an
+    /// unbacked ack, and asserts the quota is still exhausted afterwards; only a legitimate reply
+    /// releases exactly one slot.
+    /// @custom:matrix-row B11
+    function test_forgedAck_cannotLaunderConnectorQuota() public {
         // maxQueueDepth 4 with the default 50% connector quota gives this connector 2 slots.
         ClprTypes.Throttles memory throttles = defaultThrottles;
         throttles.maxQueueDepth = 4;
@@ -142,9 +145,9 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
         vm.expectRevert(ClprTypes.ClprQueueQuotaExceeded.selector);
         service.sendMessage(channelId, connectorId, target, "three");
 
-        // A legitimate ack releases exactly one slot, and no more. Note the ack must arrive
-        // *with* the reply for the message it acks: acking a live DATA message without its
-        // reply is itself an ordering violation, which pauses the channel instead of applying.
+        // A legitimate reply releases exactly one slot, and no more. The quota is released by the
+        // reply, not the ack: an ack covering a live DATA message without its reply is committed,
+        // but pauses the channel and leaves the quota held.
         bytes[] memory reply = new bytes[](1);
         reply[0] = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
         _armBundleAnchor(reply, 1, _runningHashThrough(reply, 1), 1);
@@ -171,7 +174,8 @@ contract BundleAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// against `BundleLibHarness`; this is the end-to-end path through `submitBundle`, and it
     /// also checks the channel cannot be sent to after the close. The local side has one DATA
     /// message the peer never acks: with an empty queue `closeChannel` goes straight to DRAINED.
-    function test_B12_closingChannel_cannotBeRevivedByPeerClaims() public {
+    /// @custom:matrix-row B9
+    function test_closingChannel_cannotBeRevivedByPeerClaims() public {
         service.sendMessage(channelId, connectorId, abi.encodePacked(address(connector)), "unacked");
         service.closeChannel(channelId);
         assertEq(

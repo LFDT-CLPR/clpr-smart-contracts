@@ -44,7 +44,8 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// reentrant second send would run against half-applied queue accounting. This attacker
     /// bubbles the inner revert verbatim, so the assertion is the guard's own selector rather
     /// than a wrapper string.
-    function test_M7_connectorCannotReenterSendMessage() public {
+    /// @custom:matrix-row M6
+    function test_connectorCannotReenterSendMessage() public {
         _registerAttackerConnector();
 
         bytes memory target = abi.encodePacked(address(connector));
@@ -61,7 +62,8 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// The attacker swallows the inner revert so the outer send completes. Exactly one message
     /// must be enqueued: if the reentrant call had partially applied, the queue or the
     /// connector's in-flight count would be ahead of the message count.
-    function test_M7_swallowedReentry_enqueuesExactlyOneMessage() public {
+    /// @custom:matrix-row M6
+    function test_swallowedReentry_enqueuesExactlyOneMessage() public {
         _registerAttackerConnector();
 
         bytes memory target = abi.encodePacked(address(connector));
@@ -87,7 +89,8 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// did, every later bundle would mismatch and the channel would wedge permanently. This
     /// chains redaction with the reply path: after redacting, the peer's reply for that very
     /// message must still be accepted.
-    function test_M13_redactionPreservesTheHashChainAndStillAcceptsTheReply() public {
+    /// @custom:matrix-row M10
+    function test_redactionPreservesTheHashChainAndStillAcceptsTheReply() public {
         bytes memory target = abi.encodePacked(address(connector));
         service.sendMessage(channelId, connectorId, target, "secret");
         service.sendMessage(channelId, connectorId, target, "public");
@@ -138,7 +141,8 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// slashing of those messages. Redaction decrements the in-flight counter, so it is the
     /// obvious route to unlocking an eviction early. This chains the two and then attacks the
     /// refund path, where a double-release would live.
-    function test_M14_inflightGuardCannotBeBypassed_andStakeIsReturnedOnce() public {
+    /// @custom:matrix-row M11
+    function test_inflightGuardCannotBeBypassed_andStakeIsReturnedOnce() public {
         bytes memory target = abi.encodePacked(address(connector));
         service.sendMessage(channelId, connectorId, target, "in flight");
 

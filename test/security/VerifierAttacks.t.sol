@@ -26,7 +26,8 @@ contract VerifierAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// `BundleLib._validateAndPrepare` store it unchanged, and no setter exists — so this asserts the
     /// property from the outside: run the operations that rewrite channel state and show the verifier
     /// survives all of them, then show the one route that looks like a swap is refused.
-    function test_V6_verifierIsPinnedForTheLifeOfTheChannel() public {
+    /// @custom:matrix-row V6
+    function test_verifierIsPinnedForTheLifeOfTheChannel() public {
         address original = service.getChannel(channelId).verifier;
         assertEq(original, address(verifier), "precondition: the channel uses the deployed verifier");
 

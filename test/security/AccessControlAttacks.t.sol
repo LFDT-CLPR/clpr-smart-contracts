@@ -12,7 +12,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
     /// One call per `onlyOwner` function on `ClprService`, each asserted against the exact
     /// `OwnableUnauthorizedAccount(attacker)` payload. The loop keeps the row and the test
     /// one-to-one while still naming the offending function on failure.
-    function test_X1_ownerOnlyEntryPoints_rejectNonOwner() public {
+    /// @custom:matrix-row X1
+    function test_ownerOnlyEntryPoints_rejectNonOwner() public {
         ClprTypes.Throttles memory throttles = defaultThrottles;
         ClprTypes.ManifestUpdateEntry[] memory adds = new ClprTypes.ManifestUpdateEntry[](0);
         address[] memory removals = new address[](0);
@@ -59,7 +60,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
     /// `initialize` would revert `ClprAlreadyInitialized` for the owner at this point, so a
     /// non-owner seeing `OwnableUnauthorizedAccount` proves the gate is reached first and does
     /// not leak whether the service was already initialized.
-    function test_X1_ownerCheck_precedesStateValidation() public {
+    /// @custom:matrix-row X1
+    function test_ownerCheck_precedesStateValidation() public {
         vm.prank(attacker);
         _expectOwnableRevert(attacker);
         service.initialize(hex"1234", defaultThrottles, "", "", defaultEcon);
@@ -72,7 +74,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
     /// Only a connector's own admin may deregister it and reclaim its stake.
     ///
     /// The owner has no override, so the attacker cannot reach the stake by any route.
-    function test_X4_nonAdmin_cannotDeregisterConnector() public {
+    /// @custom:matrix-row X4
+    function test_nonAdmin_cannotDeregisterConnector() public {
         _registerTestConnector();
 
         vm.prank(attacker);
@@ -88,7 +91,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
     /// `collectPending` takes no arguments and reads `_pendingWithdrawals[msg.sender]`, so there
     /// is no `withdraw(to, amount)` to abuse and no owner sweep. Seeding a victim's balance and
     /// attacking from another account must leave it intact.
-    function test_X7_attacker_cannotCollectAnotherAccountsBalance() public {
+    /// @custom:matrix-row X7
+    function test_attacker_cannotCollectAnotherAccountsBalance() public {
         address victim = makeAddr("victim");
         uint256 amount = 0.05 ether;
 
@@ -120,7 +124,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
     /// Both are written once in the `ClprService` constructor and are not `immutable`; their
     /// constancy rests on no code path rewriting them. A config update rewrites five sibling
     /// fields of the same struct, which is the realistic way they would be lost.
-    function test_X12_configUpdate_doesNotMutateProtocolVersionOrChainId() public {
+    /// @custom:matrix-row X12
+    function test_configUpdate_doesNotMutateProtocolVersionOrChainId() public {
         ClprTypes.LedgerConfiguration memory before = service.getLedgerConfiguration();
         assertEq(before.protocolVersion, 1, "precondition: constructor set protocolVersion");
         assertEq(before.chainId, "eip155:1337", "precondition: constructor set chainId");

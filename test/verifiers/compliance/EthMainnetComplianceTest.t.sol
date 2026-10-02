@@ -427,6 +427,7 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
     ///      likes. The check sits behind BLS verification, so reaching it needs a proof the
     ///      committee actually signed: here the signature covers the honest branch while the wire
     ///      carries a corrupted one.
+    /// @custom:matrix-row V11
     function test_verifyBundle_corruptExecutionBranch_reverts() public {
         (bytes32 storageRoot, bytes memory storageProofRlp) = _buildChannelStorageProof(SYNTHETIC_CHANNEL_ID);
         (bytes32 executionStateRoot, bytes memory accountProofRlp) =
