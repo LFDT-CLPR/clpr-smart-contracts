@@ -22,6 +22,7 @@
     "test:e2e:solo:besu": "CLPR_BACKEND=solo:besu vitest run --config vitest.solo.config.ts test/e2e/tests/besu-solo-roundtrip.spec.ts",
     "gas:check": "tsx script/gas/check-gas-regression.ts",
     "gas:check:update": "tsx script/gas/check-gas-regression.ts -- --update-baselines",
+    "trace:size": "tsx script/trace/trace-size.ts",
     "e2e:up:avalanche": "node --experimental-strip-types test/e2e/backend/infra.ts up avalanche",
     "e2e:down:avalanche": "node --experimental-strip-types test/e2e/backend/infra.ts down avalanche",
     "e2e:avalanche:status": "node --experimental-strip-types test/e2e/backend/infra.ts status avalanche",

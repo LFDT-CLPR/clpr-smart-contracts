@@ -219,3 +219,19 @@ The spec requires a connector to exist on **both** ledgers under the same
 peer-side `CONNECTOR_NOT_FOUND` reply, which source-side slashes the local
 connector. New code that forks connector registration logic must keep the
 ID derivation byte-equivalent across ledgers (see `lifecycle.md`).
+
+## Hedera trace-size cap fails as `INSUFFICIENT_GAS`
+
+Hiero consensus nodes cap the serialized contract trace (every call frame's
+input and output, precompile calls included, plus storage reads and writes)
+at `contracts.maxSerializedTraceDataBytes` = 262,144 B per transaction. Over
+the cap, the call is executed, then failed with `INSUFFICIENT_GAS` and rolled
+back, with the same gas used at every gas limit. `eth_estimateGas` and anvil
+forks don't apply the cap, so they report success.
+
+Because `ClprService` delegates to its logic modules and they call the
+verifier, a verifier input is recorded at least three times: a single input
+near ~87 KB, or less with per-item precompile calls, fails on Hedera
+even though it passes every EVM tool. Don't "fix" this by raising the gas
+limit. Measure with `npm run trace:size` and see
+[`hedera-trace-cap.md`](hedera-trace-cap.md).

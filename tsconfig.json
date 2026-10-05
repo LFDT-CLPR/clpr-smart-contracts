@@ -16,6 +16,7 @@
   "include": [
     "script/deploy/**/*.ts",
     "script/gas/**/*.ts",
+    "script/trace/**/*.ts",
     "test/e2e/**/*.ts",
     "test/verification-inputs/**/*.ts",
     "vitest.config.ts"

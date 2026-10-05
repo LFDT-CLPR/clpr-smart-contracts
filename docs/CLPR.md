@@ -36,6 +36,7 @@ test/                      Foundry tests (see docs/testing.md)
 script/
   ClprConfig.sol           default ledger/economic values (mirrored in `script/deploy/config.ts`)
   deploy/                  viem deploy CLI + library (`script/deploy/cli.ts`, shared by e2e + `bin/deploy.sh`)
+  trace/                   Hiero contract trace-size estimate (`npm run trace:size`)
 ```
 
 ## "I need to..." → read
@@ -51,6 +52,7 @@ script/
 | Write a new test or understand an existing one | `testing.md` |
 | Deploy to a chain (operator) or run two-chain e2e | `README.md` → Deployment; `test/e2e/README.md` |
 | Investigate an oddity ("why is X done this way?") | `quirks.md` |
+| Write or deploy a verifier that takes large inputs on Hedera / Hiero | `hedera-trace-cap.md` |
 
 ## Hard rules to remember when editing
 
