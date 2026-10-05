@@ -29,6 +29,8 @@ library ClprCommitteeMerkle {
 
     /// @notice The committee key list did not have exactly 512 entries.
     error CommitteeMerkleWrongKeyCount();
+    /// @notice {fold} was given an empty or non-power-of-two node list.
+    error CommitteeMerkleNotPowerOfTwo();
 
     /// @notice Merkle root over the 512 uncompressed keys (built once per rotation/genesis;
     ///         1,023 keccaks, no storage).
@@ -44,6 +46,25 @@ library ClprCommitteeMerkle {
             let base := add(nodes, 32)
             // mload(nodes) = nodes.length = COMMITTEE_SIZE (indirect constants can't be used in assembly)
             for { let n := mload(nodes) } gt(n, 1) {} {
+                n := shr(1, n)
+                for { let i := 0 } lt(i, n) { i := add(i, 1) } {
+                    mstore(add(base, shl(5, i)), keccak256(add(base, shl(6, i)), 0x40))
+                }
+            }
+            result := mload(base)
+        }
+    }
+
+    /// @notice Fold a power-of-two run of sibling nodes of this tree (leaf hashes, or subtree roots of
+    ///         one level) into their common ancestor with the same `parent = keccak256(left ‖ right)`
+    ///         rule as {root}. 32 leaves fold to a level-5 node; the 16 level-5 nodes fold to the root.
+    ///         Mutates `nodes`.
+    function fold(bytes32[] memory nodes) internal pure returns (bytes32 result) {
+        uint256 n = nodes.length;
+        if (n == 0 || (n & (n - 1)) != 0) revert CommitteeMerkleNotPowerOfTwo();
+        assembly ("memory-safe") {
+            let base := add(nodes, 32)
+            for {} gt(n, 1) {} {
                 n := shr(1, n)
                 for { let i := 0 } lt(i, n) { i := add(i, 1) } {
                     mstore(add(base, shl(5, i)), keccak256(add(base, shl(6, i)), 0x40))

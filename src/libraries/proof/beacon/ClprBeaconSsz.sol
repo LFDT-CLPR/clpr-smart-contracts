@@ -135,10 +135,26 @@ library ClprBeaconSsz {
         if (uncompressedPubkeys.length != SYNC_COMMITTEE_SIZE) revert InvalidCommitteeSize();
         bytes32[] memory leaves = new bytes32[](SYNC_COMMITTEE_SIZE);
         for (uint256 i = 0; i < SYNC_COMMITTEE_SIZE; i++) {
-            leaves[i] = _pubkeyHash64(ClprBls12381.compressG1(uncompressedPubkeys[i]));
+            leaves[i] = pubkeyLeafFromUncompressed(uncompressedPubkeys[i]);
         }
-        bytes32 pubkeysRoot = merkleize(leaves);
-        return sha256(abi.encodePacked(pubkeysRoot, _pubkeyHash64(ClprBls12381.compressG1(uncompressedAggregate))));
+        return syncCommitteeRootFromPubkeysRoot(merkleize(leaves), uncompressedAggregate);
+    }
+
+    /// @notice SSZ leaf of one committee member, `sha256(compressG1(key) || 16 zero bytes)`, from its
+    ///         UNCOMPRESSED (128-byte EIP-2537) key. A run of these leaves merkleizes to a subtree of the
+    ///         `pubkeys` vector, which is what lets the committee be processed in fixed-size chunks.
+    function pubkeyLeafFromUncompressed(bytes memory uncompressedPubkey) internal pure returns (bytes32) {
+        return _pubkeyHash64(ClprBls12381.compressG1(uncompressedPubkey));
+    }
+
+    /// @notice SSZ `hash_tree_root(SyncCommittee)` from the root of its `pubkeys` vector (512 leaves, see
+    ///         {pubkeyLeafFromUncompressed}) and the UNCOMPRESSED aggregate key.
+    function syncCommitteeRootFromPubkeysRoot(bytes32 pubkeysRoot, bytes memory uncompressedAggregate)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return sha256(abi.encodePacked(pubkeysRoot, pubkeyLeafFromUncompressed(uncompressedAggregate)));
     }
 
     /// @notice SSZ balanced-binary-tree merkleization over a power-of-two number of 32-byte leaves.

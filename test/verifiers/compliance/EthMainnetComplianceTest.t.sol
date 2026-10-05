@@ -106,8 +106,8 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
     ///      "wrong network" rejection at the config proof level via those fields. The closest
     ///      structural "different chain" probe is a committee with 48-byte compressed BLS keys
     ///      (the beacon-native format used by non-EIP-2537 implementations) rather than the
-    ///      128-byte uncompressed format this verifier requires. `_decodeCommitteeWithLen(128)`
-    ///      rejects a 48-byte key with `InvalidCommittee`.
+    ///      128-byte uncompressed format this verifier requires. `_committee` rejects a 48-byte
+    ///      key with `InvalidCommittee`.
     function _wrongChainConfigVector() internal pure override returns (bytes memory configProof, bytes32 channelId) {
         bytes[] memory compressedKeys = _compressedKeys(SYNC_COMMITTEE_SIZE); // 48 bytes each
         ClprTypes.LedgerConfiguration memory lc;

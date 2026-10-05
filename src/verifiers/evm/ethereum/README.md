@@ -69,7 +69,7 @@ gvr32 ‖ forkVersion4 ‖ channelId32 ‖ aggregatePubkey128 ‖ committeeMerkl
 | 196 | `committeeMerkleRoot` | 32 | keccak Merkle root over the 512 uncompressed member pubkeys. Per bundle the relay supplies only the **non-signers'** keys (proof item 9), each authenticated against this root. |
 | 228 | `codeHash` | 32 | The `keccak256` hash of the expected contract code. |
 
-260 bytes means the service's per-bundle anchor SLOAD and per-rotation SSTORE shrink from ~2,055 storage slots to 8. Only a **rotation** bundle carries a full committee — namely the *next* one — whose Merkle root (once its SSZ branch verifies) goes into the successor anchor.
+260 bytes means the service's per-bundle anchor SLOAD and per-rotation SSTORE shrink from ~2,055 storage slots to 8. Only a **rotation** bundle carries a full committee — namely the *next* one — whose Merkle root (once its SSZ branch verifies) goes into the successor anchor. The config and rotation committees can also be supplied staged (16 chunk roots, see §6).
 
 ---
 
@@ -83,7 +83,7 @@ The bundle proof is a **top-level RLP list of 10 items**:
 | 1 | `syncAggregate` | `[bits(64 B), signature(256 B uncompressed G2)]` |
 | 2 | `executionStateRoot` | 32-byte execution-layer state root (the SSZ leaf) |
 | 3 | `executionBranch` | 9 SSZ sibling hashes (gindex 802) |
-| 4 | `nextCommittee` | rotation committee `[uncompressedPubkeys[512], uncompressedAgg128]` (128 B EIP-2537 keys), or an empty RLP **string** if absent. The contract derives the compressed form on-chain to rebuild the SSZ root. |
+| 4 | `nextCommittee` | rotation committee `[uncompressedPubkeys[512], uncompressedAgg128]` (128 B EIP-2537 keys), its staged form `[chunkRoots[16], uncompressedAgg128]` (see *Staged committee input* in §6), or an empty RLP **string** if absent. The contract derives the compressed form on-chain to rebuild the SSZ root. |
 | 5 | `nextCommitteeBranch` | 6 SSZ siblings (gindex 87), or an empty RLP **list** if absent |
 | 6 | `accountProof` | MPT account proof against `executionStateRoot` |
 | 7 | `storageProof` | 4 × `[slotKey, proofNodes]` (ACK-only) or 5 (with outbound messages) against the account `storageRoot` |
@@ -101,7 +101,7 @@ This is the core of [`verifyBundle`](./EthMainnetVerifier.sol):
 ```mermaid
 flowchart TD
     START(["verifyBundle(proofBytes, trustAnchor)"]) --> A
-    A["Decode trust anchor (flat 228 B)\ngvr, forkVersion, channelId,\naggregate, committeeMerkleRoot\n+ decode 10-item payload"] --> S2
+    A["Decode trust anchor (flat 260 B)\ngvr, forkVersion, channelId,\naggregate, committeeMerkleRoot\n+ decode 10-item payload"] --> S2
     S2["Step 2 · beacon header\nhash_tree_root → beaconBlockRoot"] --> S3
     S3["Step 3 · BLS (EIP-2537)\nparticipants by bits ≥ ⅔\nnon-signer keys (item 9) Merkle-\nauthenticated vs committeeMerkleRoot\ndomain = f(forkVersion, gvr)\nsigningRoot = sha256(root ∥ domain)\naggregateVerifyComplement(...)"] --> S4
     S4["Step 4 · execution state root\nSSZ verifyProof(stateRoot, branch,\n  bodyRoot, gindex 802)"] --> S5
@@ -146,6 +146,36 @@ The execution `state_root` and `next_sync_committee` sit at fixed positions in S
 | `next_sync_committee` | `stateRoot` | **87** | 6 / 23 |
 
 The committee root is `sha256(merkleize(512 × sha256(pad64(pubkey48))) ∥ sha256(pad64(aggregate48)))` over the **compressed** 48-byte keys (the beacon-native encoding the proof commits to). The relayer ships only the **uncompressed** next committee, so `syncCommitteeRootFromUncompressed` derives each compressed key on-chain (`compressG1`, the cheap direction) and merkleizes — reconstructing that exact root. Matching the proven root authenticates the uncompressed keys in one pass (fail-closed: `compressG1` is injective, so a wrong key can't reproduce the committed root); no separate compressed committee or compress-and-compare bind is needed. The successor anchor then stores only the **keccak Merkle root** over those uncompressed keys ([ClprCommitteeMerkle.root](../../libraries/proof/beacon/ClprCommitteeMerkle.sol)) plus the new aggregate — not the keys themselves.
+
+### Staged committee input
+
+The full committee is 64 KB of keys. Some ledgers cap the serialized call trace of a transaction (Hedera:
+`contracts.maxSerializedTraceDataBytes`, 262,144 B by default, covering every call frame's input and output,
+precompile calls included). A `completeChannel` or a rotation `submitBundle` that carries the full committee
+records it in the Service call, the delegatecall into its logic module and the verifier call, plus 257
+`BLS12_G1ADD` on-curve checks and, for a rotation, the per-key SSZ hashing. That comes to roughly 330 KB for the
+config and 520 KB for a rotation, and the node fails such a transaction after executing it.
+
+Both committee inputs therefore also accept a **staged** form:
+
+1. `stageCommitteeChunk(bytes keys)` takes 32 consecutive uncompressed keys (4 KB). It checks each on G1 (the
+   same `ClprBeaconBls.requireOnCurveG1`) and records `stagedCommitteeChunk[chunkRoot] = sszChunkRoot`.
+   `chunkRoot` is the keccak subtree root of the 32 keys, a level-5 node of the `ClprCommitteeMerkle` tree.
+   `sszChunkRoot` is the SSZ root of the same 32 leaves of the beacon `pubkeys` vector. Staging is
+   permissionless and idempotent; `committeeChunkRoots(keys)` computes both roots without storing them.
+2. A committee item may then be `[chunkRoots16, aggregate]` instead of `[pubkeys512, aggregate]`:
+   - in the config, `verifyConfig` folds the 16 keccak roots into the committee Merkle root;
+   - in a rotation bundle (payload item 4), `verifyBundle` also merkleizes the 16 recorded SSZ roots into the
+     `pubkeys` root, adds the aggregate leaf and proves that committee root against the header's `stateRoot`
+     with the unchanged gindex-87 branch.
+   Every named chunk must be staged (`CommitteeChunkNotStaged`), and the aggregate is checked on G1. Order is
+   positional in both trees, so a swapped or substituted chunk changes the SSZ root and fails the branch.
+
+Both forms produce the same trust anchor byte for byte: same Merkle root, same aggregate, same period id. Bundles
+without a rotation are unaffected. On Hedera the staged flow is one 16-transaction staging round per committee
+(about 25 KB of trace each), then a rotation bundle whose rotation step adds about 12 KB of trace. Parity, guards,
+gas and trace estimates are in
+[EthStagedCommittee.t.sol](../../../../test/verifiers/evm/ethereum/EthStagedCommittee.t.sol).
 
 ### Step 5 & 6 — EVM state proofs (MPT)
 
@@ -212,8 +242,46 @@ graph TD
 | Block authentication | QBFT committed seals in `extraData` | Sync-committee BLS over the attested beacon header |
 | Signature scheme | ECDSA secp256k1 (`ecrecover`) | BLS12-381 aggregate (EIP-2537, uncompressed points) |
 | Execution state commitment | `stateRoot` field of the EVM block header | execution `state_root` proven **directly** via SSZ branch (no EVM header) |
-| Trust anchor | validator address set | flat 228 B: `gvr ‖ forkVersion ‖ channelId ‖ aggregate ‖ committeeMerkleRoot` |
+| Trust anchor | validator address set | flat 260 B: `gvr ‖ forkVersion ‖ channelId ‖ aggregate ‖ committeeMerkleRoot ‖ codeHash` |
 | Peer contract identity | from proof | constructor immutables (`address`, `codeHash`) |
 | Storage slots | fixed, caller-derived from `channelId` | fixed, caller-derived from `channelId` |
 | Rotation | on validator-set change | SSZ `next_sync_committee` branch (period change) |
 | Hash functions | keccak256 (MPT) | sha256 (SSZ) + keccak256 (MPT) |
+
+---
+
+## 10. Building proofs from live beacon data
+
+[`buildEthLiveProof.ts`](../../../../test/e2e/relay/buildEthLiveProof.ts) builds `verifyBundle` inputs from a real beacon chain and execution RPC. It defaults to Sepolia. It fetches `light_client/finality_update`, `light_client/bootstrap/{finalized root}` (plus `light_client/updates` when the signature slot is in the next period), `beacon/genesis`, `config/spec`, and `eth_getProof`. It then produces the 10-item bundle and the 260-byte anchor:
+
+| Verifier input | Live source and derivation |
+|---|---|
+| committee keys (anchor root, non-signer entries) | `current_sync_committee.pubkeys`: 48-byte compressed keys decompressed to 128-byte EIP-2537 G1 points. The bootstrap branch is checked against the header `state_root` (gindex 86). The published aggregate is checked to equal Σ keys. |
+| `committeeMerkleRoot`, item 9 | keccak tree over the uncompressed keys ([ClprCommitteeMerkle](../../libraries/proof/beacon/ClprCommitteeMerkle.sol)). One `key ‖ 9 siblings` entry per clear bit, in ascending order. |
+| `forkVersion` | `compute_fork_version(epoch(max(signature_slot, 1) − 1))` over the `config/spec` schedule. On Sepolia Fulu this is `0x90000075`. |
+| `gvr` | `genesis_validators_root` (Sepolia: `0xd8ea…8078`) |
+| item 1 signature | `sync_committee_signature`: a 96-byte compressed G2 point decompressed to a 256-byte uncompressed point. The builder also checks the pairing off-chain before encoding. |
+| items 2–3 | The 17-field `ExecutionPayloadHeader` tree (Deneb/Electra/Fulu: 32 leaves, depth 5, `state_root` at index 2) is rebuilt from the light-client header. It gives 5 siblings. These are followed by the light-client `execution_branch` (4 siblings, gindex 25), for depth 9 and gindex `25·32 + 2 = 802`. That is exactly `GINDEX_EXECUTION_STATE_ROOT_IN_BODY`. |
+| item 6 (and 7) | `eth_getProof` at `attested_header.execution.block_number`. The builder checks the block's `stateRoot`/`hash` against the light-client header. |
+
+**Signed header.** The verifier authenticates the beacon header that the sync committee signed (`attested_header`) and proves state from it. The builder uses the update's finalized header only to locate the bootstrap committee.
+
+**Fixture and test.** [`test/e2e/fixtures/sepolia-live/capture.json`](../../../../test/e2e/fixtures/sepolia-live/capture.json) holds one captured Sepolia (Fulu) dataset: the raw API responses. The builder is pure over it, so the test is deterministic offline:
+
+```sh
+forge build
+npm run test:e2e:eth-live      # replay the fixture on anvil
+npm run eth-live:refresh       # re-capture (waits ≤ 10 min for a partial-participation aggregate)
+```
+
+The spec calls the **unmodified production `verifyBundle`**. There is no ClprService on Sepolia yet, so the bundle targets the Sepolia deposit contract and pins that contract's real code hash in the anchor. The channel slots derived from `channelId` are empty there. As a result the storage step checks genuine MPT exclusion proofs and returns zeroed metadata. Every cryptographic link runs on real data. If any other code hash is pinned (for example, a ClprService's), the call reverts with `CodeHashMismatch`, after the BLS and SSZ checks have already passed. A real `next_sync_committee` rotation (gindex 87, Fulu `BeaconState`) is checked through `EthMainnetVerifierProofHarness`. Its attested block is older than a non-archive node's `eth_getProof` window, so it cannot be part of a full bundle.
+
+Measured on the captured Sepolia fixture (slot 11254195, 486/512 participation, 26 non-signers, 9-node account proof):
+
+| | |
+|---|---|
+| `verifyBundle` `eth_estimateGas` | 1,645,052 (21,000 base + 291,516 calldata + ~1.33M execution) |
+| `proofBytes` / full calldata | 18,587 B / 19,140 B (the 26 non-signer entries are 26 × 419 B ≈ 10.9 KB) |
+| rotation (`_verifyRotation` via harness) | ~4.84M gas incl. calldata; the rotation items are 66,902 B |
+
+**Compatibility.** The verifier's constants match the live Electra/Fulu layouts: body gindex 25 → payload-header depth 5 → 802, `next_sync_committee` gindex 87 (depth 6), and 8,192 slots per period. The `forkVersion` in the anchor is static and carried through rotation, so signatures made after a fork-version change need a config update first. BPO forks do not change the fork version. Gloas (EIP-7732) moves the execution payload out of `BeaconBlockBody`, so that fork would need new SSZ constants. The builder rejects light-client forks other than `electra`/`fulu`.

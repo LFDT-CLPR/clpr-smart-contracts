@@ -68,7 +68,7 @@ abstract contract EthCommitteeFixtures is Test {
         return out;
     }
 
-    /// RLP `[pubkeys, aggregate]` committee — the wire shape `_decodeCommittee` expects.
+    /// RLP `[pubkeys, aggregate]` committee — the full wire shape `_committee` accepts.
     function _encodeCommittee(bytes[] memory pubkeys, bytes memory agg) internal pure returns (bytes memory) {
         bytes[] memory enc = new bytes[](pubkeys.length);
         for (uint256 i = 0; i < pubkeys.length; i++) {

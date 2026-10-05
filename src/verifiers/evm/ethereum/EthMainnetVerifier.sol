@@ -24,6 +24,18 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 /// through every rotation) binds the storage proof to a single CLPR channel so proven slots
 /// cannot be substituted positionally.
 ///
+/// ## Staged committee input
+/// A committee (the config committee or a rotation's next committee) can be supplied either in full,
+/// `[uncompressed pubkeys512, aggregate]`, or STAGED, `[chunkRoots16, aggregate]`. Staging splits the
+/// 64 KB of keys over 16 small {stageCommitteeChunk} transactions of 32 keys each: every key is checked
+/// on G1 there, and the chunk is recorded under its keccak subtree root (a level-5 node of the
+/// {ClprCommitteeMerkle} tree) together with its SSZ subtree root (32 leaves of the beacon `pubkeys`
+/// vector). A staged committee then folds the 16 recorded roots into exactly the roots the full form
+/// computes from the 512 keys, so both forms yield the same trust anchor. Ledgers that cap the
+/// per-transaction call trace (Hedera: `contracts.maxSerializedTraceDataBytes`) need the staged form,
+/// because the full form carries the 64 KB committee through every call frame. Staging is
+/// permissionless: a record only states which keys a subtree root stands for and that they are on G1.
+///
 /// ## Bundle proof (top-level RLP list, 10 items)
 /// ```
 /// [ 0: attestedHeader        [slot, proposerIndex, parentRoot, stateRoot, bodyRoot]
@@ -31,11 +43,12 @@ import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 ///   2: executionStateRoot32  the execution-layer state root (leaf proven into bodyRoot)
 ///   3: executionBranch       9 SSZ siblings (execution_payload.state_root, gindex 802)
 ///   4: nextCommittee         rotation committee `[uncompressed pubkeys512, aggregate]` (128-byte
-///                            EIP-2537 keys), or empty (RLP string) if absent. The contract re-derives
-///                            the beacon-native compressed form on-chain (`compressG1`, the cheap
-///                            direction) to reconstruct the SSZ root the `nextCommitteeBranch` proof
-///                            commits to; the successor anchor stores the keccak Merkle root over
-///                            the uncompressed keys.
+///                            EIP-2537 keys) or its staged form `[chunkRoots16, aggregate]`, or empty
+///                            (RLP string) if absent. The contract re-derives the beacon-native
+///                            compressed form on-chain (`compressG1`, the cheap direction; at staging
+///                            time for the staged form) to reconstruct the SSZ root the
+///                            `nextCommitteeBranch` proof commits to; the successor anchor stores the
+///                            keccak Merkle root over the uncompressed keys.
 ///   5: nextCommitteeBranch   6 SSZ siblings (gindex 87), or empty (RLP list) if absent
 ///   6: accountProof          MPT account proof against executionStateRoot32
 ///   7: storageProof          5 or 6 × [slotNumber, proofNodes] for the channelId-derived slots
@@ -146,6 +159,20 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     uint256 internal constant ENTRY_RLP_PREFIX_LENGTH = 3;
     uint256 internal constant ENTRY_RLP_LENGTH = ENTRY_RLP_PREFIX_LENGTH + ClprCommitteeMerkle.ENTRY_LENGTH; // 419
 
+    // ── Staged committee input ──────────────────────────────────────────────
+    /// @dev Keys per staged chunk: 32 × 128 B = 4 KB per {stageCommitteeChunk} call.
+    uint256 internal constant STAGED_CHUNK_KEYS = 32;
+    /// @dev Chunks per committee; the staged committee form lists this many chunk roots.
+    uint256 internal constant STAGED_CHUNKS = SYNC_COMMITTEE_SIZE / STAGED_CHUNK_KEYS; // 16
+
+    /// @notice Staged committee chunks: keccak subtree root of 32 consecutive uncompressed keys (a level-5
+    ///         node of the {ClprCommitteeMerkle} tree) => SSZ subtree root of the same 32 keys (32 leaves
+    ///         of the beacon `pubkeys` vector). Zero means not staged. Written by {stageCommitteeChunk}.
+    mapping(bytes32 chunkRoot => bytes32 sszChunkRoot) public stagedCommitteeChunk;
+
+    /// @notice A 32-key committee chunk was checked on G1 and recorded.
+    event CommitteeChunkStaged(bytes32 indexed chunkRoot, bytes32 sszChunkRoot, address indexed stager);
+
     // ── Errors ───────────────────────────────────────────────────────────────
     error InvalidTrustAnchor();
     error InvalidPayloadShape();
@@ -165,6 +192,10 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     ///      MANDATORY security check: without it a relay could pass a forged point as a
     ///      "non-signer" and steer the complement aggregation to any key it controls.
     error NonSignerProofInvalid(uint256 index);
+    /// @dev {stageCommitteeChunk} input is not exactly 32 concatenated 128-byte keys.
+    error CommitteeChunkInvalid();
+    /// @dev A staged committee names a chunk root that {stageCommitteeChunk} has not recorded.
+    error CommitteeChunkNotStaged(uint256 index, bytes32 chunkRoot);
 
     struct BeaconHeader {
         uint64 slot;
@@ -172,6 +203,29 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes32 parentRoot;
         bytes32 stateRoot;
         bytes32 bodyRoot;
+    }
+
+    /// @notice Stage 32 consecutive committee keys (32 × 128-byte uncompressed EIP-2537 G1, concatenated)
+    ///         for the staged committee form: checks every key on G1 and records the chunk's keccak and
+    ///         SSZ subtree roots (see {stagedCommitteeChunk}). Idempotent and permissionless.
+    /// @return chunkRoot the keccak subtree root a staged committee names for these keys.
+    /// @return sszChunkRoot the SSZ subtree root recorded for it.
+    function stageCommitteeChunk(bytes calldata keys) external returns (bytes32 chunkRoot, bytes32 sszChunkRoot) {
+        bytes[] memory k = _splitChunk(keys);
+        // Same G1ADD on-curve check the full form runs; with an even key count the "aggregate" slot is
+        // paired with the point at infinity, so the all-zero encoding of that point fills it.
+        ClprBeaconBls.requireOnCurveG1(k, new bytes(BLS_PUBKEY_LENGTH));
+        (chunkRoot, sszChunkRoot) = _chunkRoots(k);
+        if (stagedCommitteeChunk[chunkRoot] == bytes32(0)) {
+            stagedCommitteeChunk[chunkRoot] = sszChunkRoot;
+            emit CommitteeChunkStaged(chunkRoot, sszChunkRoot, msg.sender);
+        }
+    }
+
+    /// @notice The roots {stageCommitteeChunk} would record for `keys`, without checking or storing
+    ///         anything (for relays building a staged committee).
+    function committeeChunkRoots(bytes calldata keys) external pure returns (bytes32 chunkRoot, bytes32 sszChunkRoot) {
+        return _chunkRoots(_splitChunk(keys));
     }
 
     /// @inheritdoc IClprVerifier
@@ -271,6 +325,8 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     /// @dev configProofBytes is RLP `[slot, syncCommittee, gvr, forkVersion, ledgerConfiguration]`.
     ///      The full committee can only be carried in the payload (it cannot be a constructor
     ///      immutable), so the empty-input bootstrap returns defaults with no genesis anchor.
+    ///      `syncCommittee` is the full `[pubkeys512, aggregate]` or the staged `[chunkRoots16, aggregate]`
+    ///      (see "Staged committee input"); both give the same anchor.
     function verifyConfig(bytes calldata configProofBytes, bytes32 channelId, bytes calldata endpointManifestProofBytes)
         external
         view
@@ -295,8 +351,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
 
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 slot = uint64(RLP.readUint256(cfg[CONFIG_IDX_SLOT]));
-        (bytes[] memory pubkeys, bytes memory aggregatePubkey) = _decodeCommittee(cfg[CONFIG_IDX_COMMITTEE]);
-        ClprBeaconBls.requireOnCurveG1(pubkeys, aggregatePubkey);
+        (bytes32 committeeRoot,, bytes memory aggregatePubkey) = _committee(cfg[CONFIG_IDX_COMMITTEE], false);
         bytes32 gvr = RLP.readBytes32(cfg[CONFIG_IDX_GVR]);
         bytes memory forkVersion = RLP.readBytes(cfg[CONFIG_IDX_FORK_VERSION]);
         if (forkVersion.length != FORK_VERSION_LENGTH) revert InvalidConfigPayload();
@@ -305,7 +360,8 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         ClprProtobuf.decodeControlMessage(RLP.readBytes(cfg[CONFIG_IDX_LEDGER])).config;
 
         bytes32 codeHash = RLP.readBytes32(cfg[CONFIG_IDX_CODE_HASH]);
-        initialTrustAnchor = _encodeTrustAnchor(pubkeys, aggregatePubkey, gvr, forkVersion, channelId, codeHash);
+        initialTrustAnchor =
+            _encodeTrustAnchorWithRoot(committeeRoot, aggregatePubkey, gvr, forkVersion, channelId, codeHash);
         serviceAddress = lc.serviceAddress;
         channelContext = ClprTypes.encodeChannelContext(
             ClprTypes.ChannelContext({channelId: channelId, remoteServiceAddress: serviceAddress})
@@ -322,7 +378,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
             // Verify the endpoint-manifest storage proof (when supplied) against a beacon proof signed
             // by this config committee; empty proof → empty manifest (bring-up).
             _verifyConfigEndpointManifest(
-                endpointManifestProofBytes, pubkeys, aggregatePubkey, forkVersion, gvr, serviceAddress, codeHash
+                endpointManifestProofBytes, committeeRoot, aggregatePubkey, forkVersion, gvr, serviceAddress, codeHash
             )
         );
     }
@@ -336,7 +392,7 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     ///      populates the Channel via Step 1b (same as the other EVM verifiers).
     function _verifyConfigEndpointManifest(
         bytes calldata proofBytes,
-        bytes[] memory pubkeys,
+        bytes32 committeeRoot,
         bytes memory aggregatePubkey,
         bytes memory forkVersion,
         bytes32 gvr,
@@ -348,8 +404,6 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes memory proofMem = proofBytes;
         Memory.Slice[] memory p = RLP.decodeList(proofMem);
         if (p.length != CONFIG_MANIFEST_PROOF_FIELDS) revert InvalidConfigPayload();
-        // Only pay the 512-key Merkle root once the proof shape is known-good.
-        bytes32 committeeRoot = ClprCommitteeMerkle.root(pubkeys);
 
         // Attested beacon header → SSZ root, then BLS supermajority against the config committee.
         BeaconHeader memory header = _decodeBeaconHeader(p[CM_IDX_ATTESTED_HEADER]);
@@ -414,6 +468,9 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     ///        3. All of the pubkeys & aggregate are on the curve.
     ///      (Earlier the relayer also shipped the compressed committee and a separate compress-and-compare
     ///       bind; that was redundant — dropping it removes ~25 KB of calldata + the bind loop.)
+    ///      The staged form `[chunkRoots16, aggregate]` takes steps 1 and 3 per chunk at staging time
+    ///      ({stageCommitteeChunk}); here it only folds the 16 recorded SSZ subtree roots into the same
+    ///      committee root, which the same branch check then authenticates.
     function _verifyRotation(
         Memory.Slice nextCommitteeItem,
         Memory.Slice nextBranchItem,
@@ -428,13 +485,11 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         if (committeeAbsent != branchAbsent) revert RotationPairMismatch();
         if (committeeAbsent) return new bytes(0);
 
-        (bytes[] memory nextPubkeys, bytes memory nextAggregate) = _decodeCommittee(nextCommitteeItem);
+        // On-curve checks, the beacon-committed SSZ root (reconstructed from the uncompressed keys,
+        // compressing each) and the keccak Merkle root of the next committee, in either input form.
+        (bytes32 merkleRoot, bytes32 committeeRoot, bytes memory nextAggregate) = _committee(nextCommitteeItem, true);
 
-        ClprBeaconBls.requireOnCurveG1(nextPubkeys, nextAggregate);
-
-        // Reconstruct the beacon-committed SSZ root from the uncompressed keys (compressing each on the
-        // fly) and prove it against the attested state — this authenticates the uncompressed keys.
-        bytes32 committeeRoot = ClprBeaconSsz.syncCommitteeRootFromUncompressed(nextPubkeys, nextAggregate);
+        // Prove the SSZ root against the header's state root: this authenticates the uncompressed keys.
         bytes32[] memory branch = _decodeBranch(nextBranchItem, NEXT_COMMITTEE_BRANCH_DEPTH);
         if (!ClprBeaconSsz.verifyProof(
                 committeeRoot, branch, stateRoot, ClprBeaconSsz.GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE
@@ -443,7 +498,84 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         }
         // Successor anchor commits to the uncompressed keys via the keccak Merkle root (the keys
         // themselves are re-supplied per bundle for non-signers only, authenticated against it).
-        newTrustAnchor = _encodeTrustAnchor(nextPubkeys, nextAggregate, gvr, forkVersion, channelId, codeHash);
+        newTrustAnchor = _encodeTrustAnchorWithRoot(merkleRoot, nextAggregate, gvr, forkVersion, channelId, codeHash);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //   Internal: committee input (full or staged)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @dev Decode a committee item in either input form and return its keccak Merkle root (what the
+    ///      anchor commits to), its SSZ `hash_tree_root` (only when `withSszRoot`; zero otherwise) and its
+    ///      aggregate key. Every key and the aggregate end up checked on G1:
+    ///        - full `[pubkeys512, aggregate]`: all 513 points here;
+    ///        - staged `[chunkRoots16, aggregate]`: chunk `i` names the {stageCommitteeChunk} record of
+    ///          keys `32i .. 32i+31` (checked there), the aggregate is checked here.
+    function _committee(Memory.Slice committeeItem, bool withSszRoot)
+        internal
+        view
+        returns (bytes32 merkleRoot, bytes32 sszRoot, bytes memory aggregatePubkey)
+    {
+        Memory.Slice[] memory committee = RLP.readList(committeeItem);
+        if (committee.length != COMMITTEE_FIELDS) revert InvalidCommittee();
+        Memory.Slice[] memory items = RLP.readList(committee[0]);
+
+        if (items.length == SYNC_COMMITTEE_SIZE) {
+            bytes[] memory pubkeys = new bytes[](SYNC_COMMITTEE_SIZE);
+            for (uint256 i = 0; i < SYNC_COMMITTEE_SIZE; i++) {
+                pubkeys[i] = RLP.readBytes(items[i]);
+                if (pubkeys[i].length != BLS_PUBKEY_LENGTH) revert InvalidCommittee();
+            }
+            aggregatePubkey = _decodeAggregate(committee[1]);
+            ClprBeaconBls.requireOnCurveG1(pubkeys, aggregatePubkey);
+            if (withSszRoot) sszRoot = ClprBeaconSsz.syncCommitteeRootFromUncompressed(pubkeys, aggregatePubkey);
+            merkleRoot = ClprCommitteeMerkle.root(pubkeys);
+        } else if (items.length == STAGED_CHUNKS) {
+            bytes32[] memory chunkRoots = new bytes32[](STAGED_CHUNKS);
+            bytes32[] memory sszChunkRoots = new bytes32[](STAGED_CHUNKS);
+            for (uint256 i = 0; i < STAGED_CHUNKS; i++) {
+                chunkRoots[i] = RLP.readBytes32(items[i]);
+                sszChunkRoots[i] = stagedCommitteeChunk[chunkRoots[i]];
+                if (sszChunkRoots[i] == bytes32(0)) revert CommitteeChunkNotStaged(i, chunkRoots[i]);
+            }
+            aggregatePubkey = _decodeAggregate(committee[1]);
+            ClprBeaconBls.requireOnCurveG1(new bytes[](0), aggregatePubkey);
+            if (withSszRoot) {
+                sszRoot = ClprBeaconSsz.syncCommitteeRootFromPubkeysRoot(
+                    ClprBeaconSsz.merkleize(sszChunkRoots), aggregatePubkey
+                );
+            }
+            merkleRoot = ClprCommitteeMerkle.fold(chunkRoots);
+        } else {
+            revert InvalidCommittee();
+        }
+    }
+
+    function _decodeAggregate(Memory.Slice item) private pure returns (bytes memory aggregatePubkey) {
+        aggregatePubkey = RLP.readBytes(item);
+        if (aggregatePubkey.length != BLS_PUBKEY_LENGTH) revert InvalidCommittee();
+    }
+
+    /// @dev `keys` (exactly 32 concatenated 128-byte keys) as 32 separate keys.
+    function _splitChunk(bytes calldata keys) private pure returns (bytes[] memory k) {
+        if (keys.length != STAGED_CHUNK_KEYS * BLS_PUBKEY_LENGTH) revert CommitteeChunkInvalid();
+        k = new bytes[](STAGED_CHUNK_KEYS);
+        for (uint256 i = 0; i < STAGED_CHUNK_KEYS; i++) {
+            k[i] = keys[i * BLS_PUBKEY_LENGTH:(i + 1) * BLS_PUBKEY_LENGTH];
+        }
+    }
+
+    /// @dev keccak subtree root ({ClprCommitteeMerkle} leaves `keccak256(key)`) and SSZ subtree root
+    ///      (leaves `sha256(compressG1(key) ‖ 0^16)`) of one 32-key chunk.
+    function _chunkRoots(bytes[] memory keys) private pure returns (bytes32 chunkRoot, bytes32 sszChunkRoot) {
+        bytes32[] memory leaves = new bytes32[](STAGED_CHUNK_KEYS);
+        bytes32[] memory sszLeaves = new bytes32[](STAGED_CHUNK_KEYS);
+        for (uint256 i = 0; i < STAGED_CHUNK_KEYS; i++) {
+            leaves[i] = keccak256(keys[i]);
+            sszLeaves[i] = ClprBeaconSsz.pubkeyLeafFromUncompressed(keys[i]);
+        }
+        chunkRoot = ClprCommitteeMerkle.fold(leaves);
+        sszChunkRoot = ClprBeaconSsz.merkleize(sszLeaves);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -581,36 +713,6 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
     //   Internal: decoders
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// @dev Decode an `[pubkeys[512], aggregate]` committee whose keys are uncompressed (128-byte).
-    function _decodeCommittee(Memory.Slice committeeItem)
-        internal
-        pure
-        returns (bytes[] memory pubkeys, bytes memory aggregatePubkey)
-    {
-        return _decodeCommitteeWithLen(committeeItem, BLS_PUBKEY_LENGTH);
-    }
-
-    /// @dev Decode an `[pubkeys[512], aggregate]` committee enforcing a fixed per-key byte length
-    ///      (128 uncompressed, or 48 compressed for the beacon-native rotation committee).
-    function _decodeCommitteeWithLen(Memory.Slice committeeItem, uint256 pubkeyLen)
-        internal
-        pure
-        returns (bytes[] memory pubkeys, bytes memory aggregatePubkey)
-    {
-        Memory.Slice[] memory committee = RLP.readList(committeeItem);
-        if (committee.length != COMMITTEE_FIELDS) revert InvalidCommittee();
-
-        Memory.Slice[] memory pubkeyItems = RLP.readList(committee[0]);
-        if (pubkeyItems.length != SYNC_COMMITTEE_SIZE) revert InvalidCommittee();
-        pubkeys = new bytes[](SYNC_COMMITTEE_SIZE);
-        for (uint256 i = 0; i < SYNC_COMMITTEE_SIZE; i++) {
-            pubkeys[i] = RLP.readBytes(pubkeyItems[i]);
-            if (pubkeys[i].length != pubkeyLen) revert InvalidCommittee();
-        }
-        aggregatePubkey = RLP.readBytes(committee[1]);
-        if (aggregatePubkey.length != pubkeyLen) revert InvalidCommittee();
-    }
-
     function _decodeBeaconHeader(Memory.Slice headerItem) internal pure returns (BeaconHeader memory header) {
         Memory.Slice[] memory fields = RLP.readList(headerItem);
         if (fields.length != HEADER_FIELDS) revert InvalidBeaconHeader();
@@ -652,9 +754,21 @@ contract EthMainnetVerifier is ClprEvmBundleVerifier {
         bytes32 channelId,
         bytes32 codeHash
     ) internal pure returns (bytes memory anchor) {
-        // Lengths are enforced upstream (_decodeCommittee / verifyConfig): 512 keys × 128 bytes,
-        // 128-byte aggregate, 4-byte forkVersion.
-        bytes32 committeeRoot = ClprCommitteeMerkle.root(pubkeys);
+        return _encodeTrustAnchorWithRoot(
+            ClprCommitteeMerkle.root(pubkeys), aggregatePubkey, gvr, forkVersion, channelId, codeHash
+        );
+    }
+
+    /// @dev {_encodeTrustAnchor} for a committee given by its keccak Merkle root.
+    function _encodeTrustAnchorWithRoot(
+        bytes32 committeeRoot,
+        bytes memory aggregatePubkey,
+        bytes32 gvr,
+        bytes memory forkVersion,
+        bytes32 channelId,
+        bytes32 codeHash
+    ) internal pure returns (bytes memory anchor) {
+        // Lengths are enforced upstream (_committee / verifyConfig): 128-byte aggregate, 4-byte forkVersion.
         anchor = new bytes(TRUST_ANCHOR_LENGTH);
         uint256 keyLen = BLS_PUBKEY_LENGTH; // inline assembly only accepts direct number constants
         assembly ("memory-safe") {
