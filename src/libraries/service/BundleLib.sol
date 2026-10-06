@@ -306,7 +306,7 @@ library BundleLib {
 
         // ── Step 7: Response ordering pre-scan ───────────────────────
         (OrderingOutcome outcome, uint64 nextExpected) =
-            _checkResponseOrdering(ctx, channel, messagePayloads, _messageQueues);
+            _checkResponseOrdering(ctx, channel, metadata, messagePayloads, _messageQueues);
         if (outcome != OrderingOutcome.Ok) {
             if (channel.status == ClprTypes.ChannelStatus.CLOSING) {
                 // A CLOSING channel receiving out-of-order responses is unrecoverable — revert.
@@ -482,8 +482,8 @@ library BundleLib {
         /// A REPLY in this bundle is backward/duplicate, targets an unsent message, or skips
         /// an earlier live DATA - the proof itself is malformed.
         StructuralViolation,
-        /// The ack covers a live DATA message with no REPLY for it: the peer's state
-        /// is ahead of what's been relayed back.
+        /// The bundle reaches the end of the peer's queue, yet the ack covers a live DATA
+        /// message with no REPLY for it.
         AwaitingReply
     }
 
@@ -515,11 +515,15 @@ library BundleLib {
     ///      a spurious backward-reply violation, pausing the channel and dropping the genuinely
     ///      new messages that follow it in the same bundle.
     ///
-    /// @return outcome see OrderingOutcome.
-    /// @return nextExpectedReplyId
+    ///      AwaitingReply is reported only when the bundle reaches the end of the peer's queue.
+    ///      A prefix bundle returns Ok even if its ack covers live DATA that has no REPLY yet.
+    ///
+    /// @return outcome Ok, or the reason Step 7 must skip dispatch (see OrderingOutcome).
+    /// @return nextExpectedReplyId Reply cursor to commit to the channel; 0 unless the outcome is Ok.
     function _checkResponseOrdering(
         BundleContext memory ctx,
         ClprTypes.Channel memory channel,
+        ClprTypes.QueueMetadata memory metadata,
         bytes[] memory messagePayloads,
         mapping(bytes32 => mapping(uint64 => ClprTypes.MessageValue)) storage _messageQueues
     ) internal view returns (OrderingOutcome, uint64) {
@@ -567,6 +571,13 @@ library BundleLib {
                 nextExpectedReplyId++;
             }
         }
+
+        // The peer enqueues each REPLY in the transaction that receives its DATA, so an acked DATA
+        // without a REPLY is conclusive only once the bundle reaches the end of the peer's queue;
+        // short of that, the missing REPLYs are among the messages the peer has yet to relay.
+        uint64 tail = messagePayloads.length > 0 ? metadata.lastMessageId : channel.receivedMessageId;
+
+        if (uint256(tail) + 1 < metadata.nextMessageId) return (OrderingOutcome.Ok, nextExpectedReplyId);
 
         // After processing all inbound REPLYs, verify that every newly-acked outbound DATA
         // (ids in range [old nextExpectedReplyId ... newAckedMessageId]) has received its REPLY.
