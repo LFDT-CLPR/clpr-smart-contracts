@@ -607,11 +607,11 @@ of validators.
 
 | Scenario | Execution | Calldata |
 |---|---|---|
-| `verifyBundle`, steady state | 229,177 | 18,284 |
-| `verifyBundle`, one rotation | 416,821 | 29,444 |
-| `verifyBundle`, two rotations | 603,124 | 40,456 |
-| `verifyConfig` | 219,430 | 11,780 |
-| BLS verification only (`verifyMinSig`) | 131,672 | — |
+| `verifyBundle`, steady state | 229,289 | 18,284 |
+| `verifyBundle`, one rotation | 417,228 | 29,444 |
+| `verifyBundle`, two rotations | 603,624 | 40,432 |
+| `verifyConfig` | 219,523 | 11,780 |
+| BLS verification only (`verifyMinSig`) | 131,765 | — |
 
 The rotation rows use a synthetic boundary header. A real boundary header is larger, because its
 `extraData` holds the DKG outcome, which grows with the validator count. On mainnet, with 15

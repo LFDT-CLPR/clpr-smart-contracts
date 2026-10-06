@@ -34,6 +34,17 @@ log_benchmarks:
       "BLS aggregateVerifyComplement 512 (0 nonP)": 218662
       "SSZ syncCommitteeRootFromUncompressed 512": 1136563
 
+  - name: Tempo verifier (BLS hot paths and full calls)
+    match_path: test/verifiers/tempo/TempoGasReport.t.sol
+    metrics:
+      "hashToG1": 26559
+      "verifyMinSig (hashToG1 + pairing)": 131765
+      "certified header, mainnet tip": 191961
+      "verifyBundle steady state": 229289
+      "verifyBundle, 1 rotation": 417228
+      "verifyBundle, 2 rotations": 603624
+      "verifyConfig": 219523
+
 # End-to-end function gas from `forge test --gas-report`, keyed by contract +
 # function + column (contract-aware: ClprService.submitBundle is distinct from
 # BundleLogic.submitBundle). column ∈ {min, avg, median, max, calls}.
