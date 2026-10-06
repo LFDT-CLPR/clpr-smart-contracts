@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 import {ClprBeaconBls} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconBls.sol";
 
 /// @dev External wrapper so `vm.expectRevert` can catch reverts from the internal library calls.
@@ -35,9 +36,6 @@ contract ClprBeaconBlsTest is Test {
     bytes internal constant G1_GEN_Y =
         hex"08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1";
 
-    address internal constant BLS12_G2ADD = address(0x0d);
-    address internal constant BLS12_G1MSM = address(0x0c);
-
     BlsHarness internal harness;
 
     function setUp() public {
@@ -51,14 +49,14 @@ contract ClprBeaconBlsTest is Test {
 
     /// @dev G2 point addition via the EIP-2537 precompile (used to build a "2 signers" signature).
     function _g2Add(bytes memory a, bytes memory b) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = BLS12_G2ADD.staticcall(abi.encodePacked(a, b));
+        (bool ok, bytes memory out) = ClprBls12381.BLS12_G2ADD.staticcall(abi.encodePacked(a, b));
         require(ok && out.length == 256, "g2add failed");
         return out;
     }
 
     /// @dev `n·G1` via the EIP-2537 G1MSM precompile — the committee aggregate of `n` sk=1 members.
     function _g1Mul(uint256 n) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = BLS12_G1MSM.staticcall(abi.encodePacked(_generator(), bytes32(n)));
+        (bool ok, bytes memory out) = ClprBls12381.BLS12_G1MSM.staticcall(abi.encodePacked(_generator(), bytes32(n)));
         require(ok && out.length == 128, "g1msm failed");
         return out;
     }

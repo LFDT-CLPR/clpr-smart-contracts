@@ -13,8 +13,6 @@ import {EthMainnetVerifierTestHarness} from "@test/verifiers/evm/ethereum/EthVer
 ///      compliance. One home, so the fixture the correctness tests verify is the same one the gas
 ///      benchmarks measure and the compliance adapter feeds to the verifier.
 abstract contract EthCommitteeFixtures is Test {
-    address internal constant BLS12_G2MSM = address(0x0e);
-    address internal constant BLS12_G1MSM = address(0x0c);
     uint256 internal constant SYNC_COMMITTEE_SIZE = 512;
     uint256 internal constant NEXT_COMMITTEE_BRANCH_DEPTH = 6;
     uint256 internal constant SUPERMAJORITY = 342; // ceil(2/3 · 512)
@@ -46,7 +44,8 @@ abstract contract EthCommitteeFixtures is Test {
     }
 
     function _memberKey(uint256 sk) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = BLS12_G1MSM.staticcall(abi.encodePacked(genUncompressed, bytes32(sk)));
+        (bool ok, bytes memory out) =
+            ClprBls12381.BLS12_G1MSM.staticcall(abi.encodePacked(genUncompressed, bytes32(sk)));
         assertTrue(ok, "G1MSM member key failed");
         assertEq(out.length, 128, "member key length");
         return out;
@@ -91,7 +90,7 @@ abstract contract EthCommitteeFixtures is Test {
     /// Aggregate signature over `signingRoot` by `n` members of the committee at secret key `sk`.
     function _aggSig(bytes32 signingRoot, uint256 n, uint256 sk) internal view returns (bytes memory) {
         bytes memory h = ClprBeaconBls.hashToG2(signingRoot); // 256-byte uncompressed G2
-        (bool ok, bytes memory out) = BLS12_G2MSM.staticcall(abi.encodePacked(h, bytes32(n * sk)));
+        (bool ok, bytes memory out) = ClprBls12381.BLS12_G2MSM.staticcall(abi.encodePacked(h, bytes32(n * sk)));
         assertTrue(ok, "G2MSM failed");
         assertEq(out.length, 256, "sig length");
         return out;
@@ -106,7 +105,7 @@ abstract contract EthCommitteeFixtures is Test {
     /// Full-committee aggregate pubkey of the committee at secret key `sk`: `(512·sk)·G1`.
     function _committeeAggregate(uint256 sk) internal view returns (bytes memory) {
         (bool ok, bytes memory out) =
-            BLS12_G1MSM.staticcall(abi.encodePacked(genUncompressed, bytes32(SYNC_COMMITTEE_SIZE * sk)));
+            ClprBls12381.BLS12_G1MSM.staticcall(abi.encodePacked(genUncompressed, bytes32(SYNC_COMMITTEE_SIZE * sk)));
         assertTrue(ok, "G1MSM aggregate failed");
         assertEq(out.length, 128, "aggregate length");
         return out;

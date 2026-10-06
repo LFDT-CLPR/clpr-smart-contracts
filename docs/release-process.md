@@ -29,7 +29,7 @@ Packaged contracts: `ClprService`, the five logic modules (`ChannelLogic`,
 `MessagingLogic`, `BundleLogic`, `ConnectorLogic`, `AdminLogic`), `BundleDecodeHelper`,
 and the production verifiers (the legacy `QBFTVerifier` and the two QBFT mode verifiers,
 `QbftHeaderModeVerifier` and `QbftContractModeVerifier`; `HieroVerifier`, `TSSVerifier`,
-`EthMainnetVerifier`, `SeiCometBftVerifier`, `Ed25519Verifier`).
+`EthMainnetVerifier`, `SeiCometBftVerifier`, `Ed25519Verifier`, `TempoVerifier`).
 
 The Hiero verifier's on-chain dependencies ship alongside it — `PoseidonPermuteA`,
 `PoseidonPermuteB`, `PoseidonBN254Contract`, and `WRAPSVerifierContract`. A

@@ -115,8 +115,8 @@ It has no mode byte. Its size does not change with the size of the validator set
 | 5 to 12 | identity | bytes (256) | the key, as an uncompressed EIP-2537 G2 point |
 
 The anchor stores the full key in uncompressed form. The key is one point, so it costs less to
-store it than to send it in each bundle. The verifier makes a new anchor when a bundle has one or
-more rotations, also when a rotation keeps the key.
+store it than to send it in each bundle. The verifier makes a new anchor only when the rotations change
+the key. A rotation that keeps the key still verifies, but the anchor does not move.
 
 The verifier rejects an anchor with `InvalidTrustAnchor` in three cases: the anchor is not 416 bytes,
 the key is not 256 bytes, or `L` is less than 2.
@@ -126,6 +126,13 @@ certificate is at least the epoch of the anchor block. A reshare keeps the key, 
 valid until a full DKG replaces it. After a full DKG, the old key does not verify the signature. The
 relay then adds the rotations. Because a reshare keeps the key, a threshold of past share holders of
 the key can also sign later certificates.
+
+The anchor does not record the last epoch of its key. Thus, until a rotation moves the anchor past a
+full DKG, a threshold of past share holders of the anchor key can sign a certificate for any later
+block. They can also sign a false boundary block that names a key of their own. The verifier then
+puts that key in the anchor, and correct certificates fail from then on. The channel does not
+recover. The verifier sees only one block at each height, so it cannot find the false block. To keep
+this window short, send the rotation soon after each full DKG.
 
 **The key identifies the chain.** The key is the output of the DKG of one network. Two networks
 cannot have the same key unless they share the validators and the ceremony. Thus a testnet
@@ -148,7 +155,7 @@ precompiles.
 | key at a rotation | the `extraData` of the boundary header (96 bytes) | the relay (256 bytes) | `compressG2(uncompressed) == committed key` |
 | key at setup | the config descriptor (96 bytes) | the config descriptor (256 bytes) | `compressG2(uncompressed) == compressed` |
 
-`ClprBls12381.compressG1` compresses a G1 point. `ClprTempoBls.compressG2` uses the same rule on
+`ClprBls12381.compressG1` compresses a G1 point. `ClprBls12381.compressG2` uses the same rule on
 Fp2. Its sign flag comes from `y.c1`, or from `y.c0` if `y.c1` is zero. This is the zkcrypto and
 blst convention that Tempo uses. Neither function uses a precompile.
 
@@ -458,7 +465,7 @@ reverts with `InvalidPayloadShape`. A different field count reverts with `Invali
 
 - The descriptor has 4 items, else `InvalidTrustAnchorFields`.
 - `epochLength` is at least 2 and fits in 64 bits, else `InvalidEpochLength`.
-- The key forms are 256 and 96 bytes, else `InvalidTrustAnchorFields`.
+- The key forms are 256 and 96 bytes, else `InvalidKeyLength`.
 - `compressG2(identityUncompressed)` equals `identityCompressed`, else `KeyEncodingMismatch`.
 - The key is not the point at infinity, else `InfinityPoint`.
 - The service address is 20 bytes, else `InvalidServiceAddressLength`.
@@ -563,7 +570,7 @@ costs gas. A replayed old boundary block fails the height rule.
 | `RotationNotEpochBoundary` | a rotation header is not the last block of an epoch |
 | `InvalidDkgOutcome` | the coefficient count in `extraData` is 0, or `extraData` ends before the key |
 | `OutcomeEpochMismatch` | the outcome epoch is not the epoch of the boundary block plus 1 |
-| `InvalidTrustAnchorFields` | the new key is not 256 bytes, or the committed key is not 96 bytes |
+| `InvalidKeyLength` | the new key is not 256 bytes, or the committed key is not 96 bytes |
 | `KeyEncodingMismatch` | `compressG2(newKey)` is not the committed key |
 | `InfinityPoint` | the key or the signature is the point at infinity |
 | `CurrentHeaderBehindWalk` | the current block is not after the anchor block and all rotations |
@@ -600,9 +607,9 @@ of validators.
 
 | Scenario | Execution | Calldata |
 |---|---|---|
-| `verifyBundle`, steady state | 228,810 | 18,284 |
-| `verifyBundle`, one rotation | 416,440 | 29,444 |
-| `verifyBundle`, two rotations | 602,729 | 40,456 |
+| `verifyBundle`, steady state | 229,177 | 18,284 |
+| `verifyBundle`, one rotation | 416,821 | 29,444 |
+| `verifyBundle`, two rotations | 603,124 | 40,456 |
 | `verifyConfig` | 219,430 | 11,780 |
 | BLS verification only (`verifyMinSig`) | 131,672 | — |
 

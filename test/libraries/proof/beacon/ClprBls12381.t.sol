@@ -31,4 +31,32 @@ contract ClprBls12381Test is Test {
         expected[0] = bytes1(uint8(0xc0)); // compressed + infinity
         assertEq(keccak256(got), keccak256(expected), "infinity -> 0xc0 prefix");
     }
+
+    function test_halfModulus_isHalfOfFieldModulus() public pure {
+        (uint256 pHi, uint256 pLo) = _fieldModulus();
+        uint256 carry = ClprBls12381.P_HALF_LO >> 255;
+        assertEq(ClprBls12381.P_HALF_HI * 2 + carry, pHi, "2 * P_HALF + 1 == p, high word");
+        assertEq((ClprBls12381.P_HALF_LO << 1) + 1, pLo, "2 * P_HALF + 1 == p, low word");
+    }
+
+    /// @dev (p - 1) / 2 comes from the modulus here, not from P_HALF, so a wrong constant fails.
+    function test_compressG1_signFlagFlipsAboveHalfModulus() public pure {
+        (uint256 pHi, uint256 pLo) = _fieldModulus();
+        uint256 halfHi = pHi >> 1;
+        uint256 halfLo = (pLo >> 1) | (pHi << 255);
+        assertEq(uint8(ClprBls12381.compressG1(_withY(halfHi, halfLo))[0]) & 0x20, 0, "y = (p - 1) / 2");
+        assertEq(uint8(ClprBls12381.compressG1(_withY(halfHi, halfLo + 1))[0]) & 0x20, 0x20, "y = (p + 1) / 2");
+    }
+
+    function _fieldModulus() internal pure returns (uint256 hi, uint256 lo) {
+        bytes memory m = ClprBls12381.FIELD_MODULUS;
+        assembly ("memory-safe") {
+            hi := shr(128, mload(add(m, 0x20)))
+            lo := mload(add(m, 0x30))
+        }
+    }
+
+    function _withY(uint256 yHi, uint256 yLo) internal pure returns (bytes memory) {
+        return abi.encodePacked(bytes16(0), G1_GEN_X, yHi, yLo); // 32-byte yHi = 16 zero bytes + top of y
+    }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.10;
 
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 
 interface IWRAPSVerifier {
     function verify(bytes calldata abProof, bytes calldata hintsVk, bytes calldata ledgerId, bool skipPoseidon)
@@ -19,25 +20,6 @@ contract TSSVerifier {
 
     /// @dev Hash-to-curve domain-separation tag for the Hiero TSS BLS scheme.
     bytes internal constant HIERO_DST = "BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
-
-    /// @dev EIP-2537 wire format lengths.
-    uint256 internal constant G1_LEN = 128; // (x, y) where each is Fp
-    uint256 internal constant G2_LEN = 256; // (x, y) where each is Fp2
-
-    // Precompile addresses
-
-    address internal constant MODEXP_PRECOMPILE = address(0x05);
-    address internal constant BLS12_G1MSM = address(0x0c);
-    address internal constant BLS12_G2ADD = address(0x0d);
-    address internal constant BLS12_G2MSM = address(0x0e);
-    address internal constant BLS12_PAIRING = address(0x0f);
-    address internal constant BLS12_MAP_FP2_TO_G2 = address(0x11);
-
-    // Pre-computed BLS12-381 constants (EIP-2537 wire format)
-
-    /// @dev BLS12-381 base-field prime `p`, in EIP-2537 Fp encoding (64 bytes, top 16 bytes zero).
-    bytes internal constant BLS_PRIME =
-        hex"000000000000000000000000000000001a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab";
 
     uint256 constant HINTS_VK_LEN = 1096;
     uint256 constant HINTS_SIG_LEN = 1632;
@@ -97,12 +79,6 @@ contract TSSVerifier {
     // BLS12-381 Fr modulus (scalar field order).
 
     uint256 internal constant BLS_FR_ORDER = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
-
-    // BLS12-381 Fp half = (p − 1) / 2, split into top 16 bytes / low 32 bytes
-    // for the y-sign check when compressing G1 / G2 points.
-
-    uint256 internal constant BLS_FP_HALF_HI = 0x0d0088f51cbff34d258dd3db21a5d66b;
-    uint256 internal constant BLS_FP_HALF_LO = 0xb23ba5c279d2fadf3b3986a07b587b3120f5ffff58a9ffffdcff7fffffffd555;
 
     // hinTS verification protocol constants.
 
@@ -526,9 +502,9 @@ contract TSSVerifier {
             lo32 := calldataload(add(src.offset, add(fpOffset, 16)))
         }
         uint256 hi = hi32 >> 128; // upper 16 bytes of the 48-byte BE value
-        if (hi > BLS_FP_HALF_HI) return true;
-        if (hi < BLS_FP_HALF_HI) return false;
-        return lo32 > BLS_FP_HALF_LO;
+        if (hi > ClprBls12381.P_HALF_HI) return true;
+        if (hi < ClprBls12381.P_HALF_HI) return false;
+        return lo32 > ClprBls12381.P_HALF_LO;
     }
 
     /// @dev True iff the 48-byte Fp value at `src[fpOffset:fpOffset+48]` is zero.
@@ -666,8 +642,8 @@ contract TSSVerifier {
             uint256(1), // exp = 1
             BLS_FR_ORDER // mod = r (32 BE)
         );
-        (bool ok, bytes memory out) = MODEXP_PRECOMPILE.staticcall(modexpInput);
-        if (!ok || out.length != 32) revert ClprHieroPrecompileFailure(MODEXP_PRECOMPILE);
+        (bool ok, bytes memory out) = ClprBls12381.MODEXP.staticcall(modexpInput);
+        if (!ok || out.length != 32) revert ClprHieroPrecompileFailure(ClprBls12381.MODEXP);
         // casting to 'bytes32' is safe because there is a check above for out.length to equal 32
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint256(bytes32(out));
@@ -697,7 +673,7 @@ contract TSSVerifier {
     ///      at `src[offset:offset+96]` to EIP-2537 G1 wire format (128 B:
     ///      16-byte zero pad || x_BE(48) || 16-byte zero pad || y_BE(48)).
     function _arkG1ToEip2537(bytes calldata src, uint256 offset) internal pure returns (bytes memory out) {
-        out = new bytes(G1_LEN); // 128, zero-initialized — the 16-byte pads stay zero
+        out = new bytes(ClprBls12381.G1_POINT_LENGTH); // 128, zero-initialized — the 16-byte pads stay zero
         assembly ("memory-safe") {
             let srcPtr := add(src.offset, offset)
             let dstPtr := add(out, 0x20)
@@ -715,7 +691,7 @@ contract TSSVerifier {
     ///      Note the c0/c1 swap: ArkWorks stores imaginary first, EIP-2537 wants
     ///      real (c0) first.
     function _arkG2ToEip2537(bytes calldata src, uint256 offset) internal pure returns (bytes memory out) {
-        out = new bytes(G2_LEN); // 256, zero-initialized
+        out = new bytes(ClprBls12381.G2_POINT_LENGTH); // 256, zero-initialized
         assembly ("memory-safe") {
             let srcPtr := add(src.offset, offset)
             let dstPtr := add(out, 0x20)
@@ -734,23 +710,27 @@ contract TSSVerifier {
     ///      is `(G1_128 || scalar_32)+`. Output is a single G1 point.
     function _g1Msm(bytes memory input) internal view returns (bytes memory out) {
         bool ok;
-        (ok, out) = BLS12_G1MSM.staticcall(input);
-        if (!ok || out.length != G1_LEN) revert ClprHieroPrecompileFailure(BLS12_G1MSM);
+        (ok, out) = ClprBls12381.BLS12_G1MSM.staticcall(input);
+        if (!ok || out.length != ClprBls12381.G1_POINT_LENGTH) {
+            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_G1MSM);
+        }
     }
 
     /// @dev Wrapper for EIP-2537 G2 multi-scalar multiplication (0x0e).
     function _g2Msm(bytes memory input) internal view returns (bytes memory out) {
         bool ok;
-        (ok, out) = BLS12_G2MSM.staticcall(input);
-        if (!ok || out.length != G2_LEN) revert ClprHieroPrecompileFailure(BLS12_G2MSM);
+        (ok, out) = ClprBls12381.BLS12_G2MSM.staticcall(input);
+        if (!ok || out.length != ClprBls12381.G2_POINT_LENGTH) {
+            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_G2MSM);
+        }
     }
 
     /// @dev Wrapper for EIP-2537 pairing check (0x0f). Returns true iff the
     ///      product of pairings evaluates to one in Fp12 (precompile returns
     ///      32-byte word = 1).
     function _pairing(bytes memory input) internal view returns (bool) {
-        (bool ok, bytes memory out) = BLS12_PAIRING.staticcall(input);
-        if (!ok) revert ClprHieroPrecompileFailure(BLS12_PAIRING);
+        (bool ok, bytes memory out) = ClprBls12381.BLS12_PAIRING_CHECK.staticcall(input);
+        if (!ok) revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_PAIRING_CHECK);
         // casting to 'bytes32' is safe because bls pairing precompile returns always 32 bytes output
         // forge-lint: disable-next-line(unsafe-typecast)
         return out.length == 32 && uint256(bytes32(out)) == 1;
@@ -768,7 +748,7 @@ contract TSSVerifier {
     ///      For a non-infinity BLS12-381 G1 point, y ≠ 0, so p − y is always valid.
     ///      Pure arithmetic replaces the previous G1MSM call (12 000 gas → ~50 gas).
     function _negG1Eip(bytes memory g1Eip) internal pure returns (bytes memory neg) {
-        neg = new bytes(G1_LEN); // 128 bytes, zero-initialised
+        neg = new bytes(ClprBls12381.G1_POINT_LENGTH); // 128 bytes, zero-initialised
         assembly ("memory-safe") {
             let src := add(g1Eip, 0x20)
             let dst := add(neg, 0x20)
@@ -808,8 +788,8 @@ contract TSSVerifier {
     /// @dev base^exp mod BLS_FR_ORDER via the MODEXP precompile.
     function _frPow(uint256 base, uint256 exp) internal view returns (uint256) {
         bytes memory input = abi.encodePacked(uint256(32), uint256(32), uint256(32), base, exp, BLS_FR_ORDER);
-        (bool ok, bytes memory out) = MODEXP_PRECOMPILE.staticcall(input);
-        if (!ok || out.length != 32) revert ClprHieroPrecompileFailure(MODEXP_PRECOMPILE);
+        (bool ok, bytes memory out) = ClprBls12381.MODEXP.staticcall(input);
+        if (!ok || out.length != 32) revert ClprHieroPrecompileFailure(ClprBls12381.MODEXP);
         // casting to 'bytes32' is safe because there is a check above for out.length to equal 32
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint256(bytes32(out));
@@ -905,21 +885,26 @@ contract TSSVerifier {
             mstore(add(dst, 0x20), mload(add(src, 0x20)))
         }
         // EIP-198 modexp input: lenBase || lenExp || lenMod || base || exp || mod
-        bytes memory input = abi.encodePacked(uint256(64), uint256(32), uint256(64), base, uint256(1), BLS_PRIME);
-        (bool ok, bytes memory out) = MODEXP_PRECOMPILE.staticcall(input);
-        if (!ok || out.length != 64) revert ClprHieroPrecompileFailure(MODEXP_PRECOMPILE);
+        bytes memory input =
+            abi.encodePacked(uint256(64), uint256(32), uint256(64), base, uint256(1), ClprBls12381.FIELD_MODULUS_FP);
+        (bool ok, bytes memory out) = ClprBls12381.MODEXP.staticcall(input);
+        if (!ok || out.length != 64) revert ClprHieroPrecompileFailure(ClprBls12381.MODEXP);
         return out;
     }
 
     function _mapFp2ToG2(bytes memory u) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = BLS12_MAP_FP2_TO_G2.staticcall(u);
-        if (!ok || out.length != G2_LEN) revert ClprHieroPrecompileFailure(BLS12_MAP_FP2_TO_G2);
+        (bool ok, bytes memory out) = ClprBls12381.BLS12_MAP_FP2_TO_G2.staticcall(u);
+        if (!ok || out.length != ClprBls12381.G2_POINT_LENGTH) {
+            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_MAP_FP2_TO_G2);
+        }
         return out;
     }
 
     function _g2Add(bytes memory a, bytes memory b) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = BLS12_G2ADD.staticcall(bytes.concat(a, b));
-        if (!ok || out.length != G2_LEN) revert ClprHieroPrecompileFailure(BLS12_G2ADD);
+        (bool ok, bytes memory out) = ClprBls12381.BLS12_G2ADD.staticcall(bytes.concat(a, b));
+        if (!ok || out.length != ClprBls12381.G2_POINT_LENGTH) {
+            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_G2ADD);
+        }
         return out;
     }
 

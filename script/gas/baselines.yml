@@ -107,3 +107,22 @@ gas_report_benchmarks:
     function: verifyConfig
     column: min
     baseline: 182930
+  # Tempo, calling verifier directly
+  - name: TempoVerifier.verifyBundle (steady state)
+    match_path: test/verifiers/tempo/TempoGasUsage.t.sol
+    contract: TempoVerifier
+    function: verifyBundle
+    column: min
+    baseline: 229289
+  - name: TempoVerifier.verifyBundle (1 rotation)
+    match_path: test/verifiers/tempo/TempoGasUsage.t.sol
+    contract: TempoVerifier
+    function: verifyBundle
+    column: max
+    baseline: 417228
+  - name: TempoVerifier.verifyConfig (success-only path)
+    match_path: test/verifiers/tempo/TempoGasUsage.t.sol
+    contract: TempoVerifier
+    function: verifyConfig
+    column: min
+    baseline: 219523
