@@ -63,6 +63,8 @@ contract StubClprVerifierTest is Test {
         assertEq(outMeta.receivedMessageId, meta.receivedMessageId);
         assertEq(outMeta.receivedRunningHash, meta.receivedRunningHash);
         assertEq(uint8(outMeta.state), uint8(meta.state));
+        assertEq(outMeta.lastMessageId, meta.lastMessageId);
+        assertEq(outMeta.lastMessageRunningHash, meta.lastMessageRunningHash);
 
         assertEq(outPayloads.length, payloads.length);
         assertEq(outPayloads[0], payloads[0]);
@@ -94,6 +96,8 @@ contract StubClprVerifierTest is Test {
         assertEq(outMeta.sentRunningHash, meta.sentRunningHash);
         assertEq(outMeta.receivedMessageId, meta.receivedMessageId);
         assertEq(uint8(outMeta.state), uint8(meta.state));
+        assertEq(outMeta.lastMessageId, 0);
+        assertEq(outMeta.lastMessageRunningHash, bytes32(0));
         assertEq(outPayloads.length, 0);
         assertEq(anchor.length, 0);
     }
@@ -124,6 +128,8 @@ contract StubClprVerifierTest is Test {
         assertEq(outMeta.nextMessageId, meta.nextMessageId);
         assertEq(outMeta.receivedMessageId, meta.receivedMessageId);
         assertEq(uint8(outMeta.state), uint8(meta.state));
+        assertEq(outMeta.lastMessageId, meta.lastMessageId);
+        assertEq(outMeta.lastMessageRunningHash, meta.lastMessageRunningHash);
 
         assertEq(outPayloads.length, 3);
         assertEq(outPayloads[0], payloads[0]);
