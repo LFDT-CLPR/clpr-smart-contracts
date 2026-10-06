@@ -62,6 +62,7 @@ import {
     deployQbftVerifier,
     deploySeiVerifierStack,
     deployEthMainnetVerifier,
+    deployTempoVerifier,
     hieroVerifierStackToEnv,
     seiVerifierStackToEnv,
     loadLedgerIdBytes
@@ -81,7 +82,8 @@ type Mode =
     | "hiero-verifier"
     | "qbft-verifier"
     | "sei-verifier"
-    | "eth-mainnet-verifier";
+    | "eth-mainnet-verifier"
+    | "tempo-verifier";
 
 const VALID_MODES: Mode[] = [
     "all",
@@ -93,7 +95,8 @@ const VALID_MODES: Mode[] = [
     "hiero-verifier",
     "qbft-verifier",
     "sei-verifier",
-    "eth-mainnet-verifier"
+    "eth-mainnet-verifier",
+    "tempo-verifier"
 ];
 
 /** Output formats. Only "json" today; enum-shaped so more can be added later. */
@@ -343,6 +346,9 @@ async function main(): Promise<void> {
         case "eth-mainnet-verifier":
             console.error("[Deploy]   Deploy Ethereum mainnet verifier (1 contract) against existing ClprService");
             break;
+        case "tempo-verifier":
+            console.error("[Deploy]   Deploy Tempo verifier (1 contract) against existing ClprService");
+            break;
     }
     console.error("");
 
@@ -389,6 +395,9 @@ async function main(): Promise<void> {
             );
             break;
         case "eth-mainnet-verifier":
+            requireEnv(["PRIVATE_KEY", "CLPR_SERVICE"], envFile);
+            break;
+        case "tempo-verifier":
             requireEnv(["PRIVATE_KEY", "CLPR_SERVICE"], envFile);
             break;
     }
@@ -506,6 +515,13 @@ async function main(): Promise<void> {
             addresses = {ETH_MAINNET_VERIFIER: result.ethMainnetVerifier};
             console.error("=========================================");
             console.error(`  EthMainnetVerifier → ${result.ethMainnetVerifier} (env: ETH_MAINNET_VERIFIER)`);
+            break;
+        }
+        case "tempo-verifier": {
+            const result = await deployTempoVerifier(clients);
+            addresses = {TEMPO_VERIFIER: result.tempoVerifier};
+            console.error("=========================================");
+            console.error(`  TempoVerifier → ${result.tempoVerifier} (env: TEMPO_VERIFIER)`);
             break;
         }
     }

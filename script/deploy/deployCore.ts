@@ -390,6 +390,21 @@ export function seiVerifierStackToEnv(
     };
 }
 
+export interface TempoVerifierDeployed {
+    tempoVerifier: `0x${string}`;
+}
+
+export async function deployTempoVerifier(clients: DeployClients): Promise<TempoVerifierDeployed> {
+    console.error("[Deploy] =========================================");
+    console.error("[Deploy] Deploying Tempo Verifier");
+    console.error("[Deploy] =========================================");
+
+    const tempoVerifier = envAddress("TEMPO_VERIFIER") ?? (console.error("[Deploy] Deploying TempoVerifier"), await deployArtifact(clients, "TempoVerifier"));
+
+    console.error("[Deploy] ✓ Tempo Verifier deployed successfully");
+    return {tempoVerifier};
+}
+
 // ── Ethereum Mainnet Verifier ──────────────────────────────────────────
 
 export interface EthMainnetVerifierDeployed {

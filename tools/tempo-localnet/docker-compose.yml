@@ -1,0 +1,118 @@
+services:
+  node0:
+    image: ghcr.io/tempoxyz/tempo@sha256:d3bc5a3f2a70911911d09d06cfa9e20d50f7bc7a8427983ceaa900c05840e73c
+    container_name: tempo-node0
+    ports:
+      - "18545:8545"
+    volumes:
+      - ./localnet:/localnet
+    networks:
+      tempo-net:
+        ipv4_address: 172.30.0.11
+    command:
+      - node
+      - --chain=/localnet/genesis.json
+      - --datadir=/data/node
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.api=all
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8545
+      - --ws.api=all
+      - --consensus.signing-key=/localnet/172.30.0.11:8000/signing.key
+      - --consensus.secret=/localnet/172.30.0.11:8000/secret.txt
+      - --consensus.signing-share=/localnet/172.30.0.11:8000/signing.share
+      - --consensus.listen-address=172.30.0.11:8000
+      - --consensus.metrics-address=0.0.0.0:8002
+      - --trusted-peers=enode://93342e04a9873ee0c9b76519a9c7e8a1603e9489bb209c7415e279f8eec4b66b49bd1f89389552e13cc86a3a9482a3e916f99833d868afb7561254637fad478d@172.30.0.11:8001,enode://12c4c202cf4a4bb1b4de27ce4c6b2cf5c143dda953d3c4ca6d6b5e53b515964c0a1ad7aacd48cd1cc80f345847115737b4f709a29d413771fe4b6a6503161d58@172.30.0.12:8001,enode://9a56db1bbc0bee91732672d9936a0bf90dfeff6b6935f5a73e42e10f2921091a38677edb6a1f023b42860e76bf610e5d84f965485d99bf39416e533e0c390840@172.30.0.13:8001
+      - --port=8001
+      - --discovery.port=8001
+      - --discovery.v5.port=8004
+      - --p2p-secret-key=/localnet/172.30.0.11:8000/enode.key
+      - --authrpc.port=8003
+      - --consensus.use-local-defaults
+      - --consensus.bypass-ip-check
+      - --log.stdout.filter=info
+      - --rpc.eth-proof-window=1000000
+  node1:
+    image: ghcr.io/tempoxyz/tempo@sha256:d3bc5a3f2a70911911d09d06cfa9e20d50f7bc7a8427983ceaa900c05840e73c
+    container_name: tempo-node1
+    ports:
+      - "18546:8545"
+    volumes:
+      - ./localnet:/localnet
+    networks:
+      tempo-net:
+        ipv4_address: 172.30.0.12
+    command:
+      - node
+      - --chain=/localnet/genesis.json
+      - --datadir=/data/node
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.api=all
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8545
+      - --ws.api=all
+      - --consensus.signing-key=/localnet/172.30.0.12:8000/signing.key
+      - --consensus.secret=/localnet/172.30.0.12:8000/secret.txt
+      - --consensus.signing-share=/localnet/172.30.0.12:8000/signing.share
+      - --consensus.listen-address=172.30.0.12:8000
+      - --consensus.metrics-address=0.0.0.0:8002
+      - --trusted-peers=enode://93342e04a9873ee0c9b76519a9c7e8a1603e9489bb209c7415e279f8eec4b66b49bd1f89389552e13cc86a3a9482a3e916f99833d868afb7561254637fad478d@172.30.0.11:8001,enode://12c4c202cf4a4bb1b4de27ce4c6b2cf5c143dda953d3c4ca6d6b5e53b515964c0a1ad7aacd48cd1cc80f345847115737b4f709a29d413771fe4b6a6503161d58@172.30.0.12:8001,enode://9a56db1bbc0bee91732672d9936a0bf90dfeff6b6935f5a73e42e10f2921091a38677edb6a1f023b42860e76bf610e5d84f965485d99bf39416e533e0c390840@172.30.0.13:8001
+      - --port=8001
+      - --discovery.port=8001
+      - --discovery.v5.port=8004
+      - --p2p-secret-key=/localnet/172.30.0.12:8000/enode.key
+      - --authrpc.port=8003
+      - --consensus.use-local-defaults
+      - --consensus.bypass-ip-check
+      - --log.stdout.filter=info
+      - --rpc.eth-proof-window=1000000
+  node2:
+    image: ghcr.io/tempoxyz/tempo@sha256:d3bc5a3f2a70911911d09d06cfa9e20d50f7bc7a8427983ceaa900c05840e73c
+    container_name: tempo-node2
+    ports:
+      - "18547:8545"
+    volumes:
+      - ./localnet:/localnet
+    networks:
+      tempo-net:
+        ipv4_address: 172.30.0.13
+    command:
+      - node
+      - --chain=/localnet/genesis.json
+      - --datadir=/data/node
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.api=all
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8545
+      - --ws.api=all
+      - --consensus.signing-key=/localnet/172.30.0.13:8000/signing.key
+      - --consensus.secret=/localnet/172.30.0.13:8000/secret.txt
+      - --consensus.signing-share=/localnet/172.30.0.13:8000/signing.share
+      - --consensus.listen-address=172.30.0.13:8000
+      - --consensus.metrics-address=0.0.0.0:8002
+      - --trusted-peers=enode://93342e04a9873ee0c9b76519a9c7e8a1603e9489bb209c7415e279f8eec4b66b49bd1f89389552e13cc86a3a9482a3e916f99833d868afb7561254637fad478d@172.30.0.11:8001,enode://12c4c202cf4a4bb1b4de27ce4c6b2cf5c143dda953d3c4ca6d6b5e53b515964c0a1ad7aacd48cd1cc80f345847115737b4f709a29d413771fe4b6a6503161d58@172.30.0.12:8001,enode://9a56db1bbc0bee91732672d9936a0bf90dfeff6b6935f5a73e42e10f2921091a38677edb6a1f023b42860e76bf610e5d84f965485d99bf39416e533e0c390840@172.30.0.13:8001
+      - --port=8001
+      - --discovery.port=8001
+      - --discovery.v5.port=8004
+      - --p2p-secret-key=/localnet/172.30.0.13:8000/enode.key
+      - --authrpc.port=8003
+      - --consensus.use-local-defaults
+      - --consensus.bypass-ip-check
+      - --log.stdout.filter=info
+      - --rpc.eth-proof-window=1000000
+networks:
+  tempo-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
