@@ -182,7 +182,7 @@
       "label": "economicConfig",
       "offset": 0,
       "slot": "31",
-      "type": "t_struct(EconomicConfig)2198_storage"
+      "type": "t_struct(EconomicConfig)2201_storage"
     },
     {
       "astId": 8,
@@ -591,7 +591,7 @@
         }
       ]
     },
-    "t_struct(EconomicConfig)2198_storage": {
+    "t_struct(EconomicConfig)2201_storage": {
       "encoding": "inplace",
       "label": "struct ClprTypes.EconomicConfig",
       "numberOfBytes": "224",
@@ -683,6 +683,14 @@
           "offset": 20,
           "slot": "6",
           "type": "t_uint32"
+        },
+        {
+          "astId": 2200,
+          "contract": "src/ClprService.sol:ClprService",
+          "label": "connectorPaymentGasLimit",
+          "offset": 24,
+          "slot": "6",
+          "type": "t_uint64"
         }
       ]
     },

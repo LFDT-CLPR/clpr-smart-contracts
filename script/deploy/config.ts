@@ -26,6 +26,7 @@ export interface EconomicConfig {
     connectorInboundGasStipend: bigint;
     maxChannels: number;
     maxConnectors: number;
+    connectorPaymentGasLimit: bigint;
 }
 
 /// Mirrors `script/ClprConfig.sol` defaults.
@@ -50,7 +51,8 @@ export const defaultEconomicConfig: EconomicConfig = {
     connectorQueueQuotaPct: 50,
     connectorInboundGasStipend: 500_000n,
     maxChannels: 0,
-    maxConnectors: 0
+    maxConnectors: 0,
+    connectorPaymentGasLimit: 200_000n
 };
 
 export interface ClprModules {
@@ -119,7 +121,11 @@ export function loadDeployParams(privateKey: string): DeployParams {
             defaultEconomicConfig.connectorInboundGasStipend
         ),
         maxChannels: envNumber("ECON_MAX_CHANNELS", defaultEconomicConfig.maxChannels),
-        maxConnectors: envNumber("ECON_MAX_CONNECTORS", defaultEconomicConfig.maxConnectors)
+        maxConnectors: envNumber("ECON_MAX_CONNECTORS", defaultEconomicConfig.maxConnectors),
+        connectorPaymentGasLimit: envBigInt(
+            "ECON_CONNECTOR_PAYMENT_GAS_LIMIT",
+            defaultEconomicConfig.connectorPaymentGasLimit
+        )
     };
 
     const serviceAddressRaw = process.env.SERVICE_ADDRESS ?? "";

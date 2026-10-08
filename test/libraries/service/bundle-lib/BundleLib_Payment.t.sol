@@ -9,8 +9,52 @@ import {MockClprConnector} from "@test/mocks/MockClprConnector.sol";
 import {ConnectorRegistrar} from "@test/helpers/ConnectorRegistrar.sol";
 import {ClprTestBase} from "@test/helpers/ClprTestBase.sol";
 import {BundleLibTestBase} from "@test/libraries/service/bundle-lib/BundleLibTestBase.sol";
+import {GasProbeApplication} from "@test/security/GasProbes.sol";
 
 contract BundleLib_PaymentTest is BundleLibTestBase {
+    /// The payment's budget does not follow `maxGasPerMessage`: a ledger that lowers its per-message
+    /// budget below what a payment costs does not slash a funded connector.
+    function test_aLowMaxGasPerMessageDoesNotSlashAFundedConnector() public {
+        _registerTestConnector();
+        ClprTypes.LedgerConfiguration memory cfg = service.getLedgerConfiguration();
+        cfg.throttles.maxGasPerMessage = 9_000;
+        service.updateLedgerConfiguration(cfg.serviceAddress, cfg.throttles, cfg.trustAnchor, cfg.trustAnchorId);
+        vm.txGasPrice(1 gwei);
+        uint256 before = address(this).balance;
+
+        _submitSingleInboundMessage(
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F")
+        );
+
+        assertEq(service.getConnector(channelId, connectorId).slashCount, 0, "a funded connector must not be slashed");
+        assertGt(address(this).balance, before, "and it pays");
+    }
+
+    /// The charge covers building the application's calldata, not only the call itself. A larger
+    /// message costs more to encode, and the connector pays that difference.
+    function test_charge_coversEncodingTheApplicationCall() public {
+        _registerTestConnector();
+        vm.txGasPrice(1 gwei);
+        // The probe's own work does not depend on the message size.
+        GasProbeApplication probe = new GasProbeApplication();
+
+        uint256 small = _chargeFor(probe, new bytes(4));
+        uint256 large = _chargeFor(probe, new bytes(900));
+
+        // Encoding 896 more bytes costs about 200 gas.
+        assertGe(large - small, 100 gwei, "the charge must include encoding the call");
+    }
+
+    function _chargeFor(GasProbeApplication probe, bytes memory messageData) private returns (uint256 charged) {
+        uint256 snapshot = vm.snapshotState();
+        uint256 before = address(this).balance;
+        _submitSingleInboundMessage(
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(probe)), hex"AA01BB02", messageData)
+        );
+        charged = address(this).balance - before;
+        vm.revertToState(snapshot);
+    }
+
     function test_payReverts() public {
         _registerTestConnector();
         ClprTypes.Connector memory connBefore = service.getConnector(channelId, connectorId);

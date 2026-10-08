@@ -54,7 +54,8 @@ abstract contract ClprTestBase is Test {
         connectorQueueQuotaPct: 50,
         connectorInboundGasStipend: 500_000,
         maxChannels: 0,
-        maxConnectors: 0
+        maxConnectors: 0,
+        connectorPaymentGasLimit: 200_000
     });
 
     function setUp() public virtual {
@@ -213,7 +214,8 @@ abstract contract ClprTestBase is Test {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
     }
 

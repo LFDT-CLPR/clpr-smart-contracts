@@ -4,7 +4,10 @@ import {SOLO_MAX_GAS_PER_MESSAGE} from "../backend/solo/solo.js";
 const DEFAULT_PEER_THROTTLES = {
     maxMessagesPerBundle: 100n,
     maxMessagePayloadBytes: 16_384n,
-    maxGasPerMessage: 5_000_000n,
+    // The protocol default. Every callback is guaranteed its budget, less the CALL's own cost, so a
+    // bundle needs `budget + budget / 63` of gas left at each one, which `ferryCore`'s 5M submit gas
+    // must cover.
+    maxGasPerMessage: 1_000_000n,
     maxQueueDepth: 1_024n,
     maxSyncBytes: 1_000_000n,
     maxLocalEndpoints: 0n, // 0 = unlimited
@@ -30,7 +33,8 @@ const DEFAULT_ECON = {
     connectorQueueQuotaPct: 50,
     connectorInboundGasStipend: 200_000n,
     maxChannels: 0,
-    maxConnectors: 0
+    maxConnectors: 0,
+    connectorPaymentGasLimit: 200_000n
 } as const;
 
 export {DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES, DEFAULT_ECON, ZERO_BYTES32};

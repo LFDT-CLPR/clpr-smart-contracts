@@ -344,15 +344,28 @@ library ClprTypes {
         uint256 penaltyMultiplier;
         uint32 slashBanThreshold;
         uint32 connectorQueueQuotaPct;
-        /// @dev Gas stipend for IClprConnector.onInboundMessage callbacks. Intentionally
-        ///      smaller than throttles.maxGasPerMessage — the inbound hook is a
-        ///      notification for state tracking, not message handling.
+        /// @dev Gas forwarded to each IClprConnector.onInboundMessage notification, less the CALL's own
+        ///      cost; 0 means onInboundMessage is not called. If `stipend + stipend / 63` exceeds what the
+        ///      chain's per-transaction gas cap leaves after proof verification, every bundle that notifies a
+        ///      connector reverts.
         uint64 connectorInboundGasStipend;
         /// @dev Maximum number of channels allowed. 0 means no limit.
         uint32 maxChannels;
         /// @dev Maximum number of connectors allowed across all channels. 0 means no limit.
         uint32 maxConnectors;
+        /// @dev Gas forwarded to each IClprConnector.payForExecution call, less the CALL's own cost; a payment
+        ///      that runs out of it fails the charge, which for an inbound DATA message slashes the connector.
+        ///      At least `MIN_CONNECTOR_PAYMENT_GAS_LIMIT`. If `limit + limit / 63` exceeds what the chain's
+        ///      per-transaction gas cap leaves after proof verification, every bundle that charges a connector
+        ///      reverts.
+        uint64 connectorPaymentGasLimit;
     }
+
+    /// @notice Smallest `EconomicConfig.connectorPaymentGasLimit` the configuration accepts.
+    /// @dev Keeps the limit well above a plain transfer back to the service (about 9,500 gas): a limit too
+    ///      small for any payment would fail every charge, slashing even a funded connector for each inbound
+    ///      DATA message.
+    uint256 internal constant MIN_CONNECTOR_PAYMENT_GAS_LIMIT = 50_000;
 
     /// @dev Decoded fields from a protobuf ClprMessage (DATA type)
     struct DecodedDataMessage {

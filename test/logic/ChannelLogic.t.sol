@@ -416,7 +416,8 @@ contract ClprService_Channel is ClprServiceTestBase {
             connectorInboundGasStipend: 500_000,
             // forge-lint: disable-next-line(unsafe-typecast)
             maxChannels: uint32(maxConn),
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
     }
 

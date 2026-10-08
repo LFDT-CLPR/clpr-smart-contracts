@@ -90,16 +90,44 @@ looks up the connector on the channel. A missing connector gets a
    `affordableGas = connectorContract.balance * 100 / ((100 + endpointMarginPercent) * tx.gasprice)`.
    If this is 0, the connector is slashed, the reply is `CONNECTOR_UNDERFUNDED`,
    and the application is not called. Otherwise the application gets
-   `min(throttles.maxGasPerMessage, affordableGas)` gas. With `tx.gasprice == 0`
-   there is no bound and no charge.
+   `min(throttles.maxGasPerMessage, affordableGas)` gas, less the CALL's own
+   cost, or the bundle reverts
+   with `ExactGasCall.InsufficientGasForCall` (see *Reentrancy & ordering* in
+   `bundle-flow.md`). A return that is not an ABI-encoded `bytes` is recorded as
+   `APPLICATION_ERROR` with the raw data. With `tx.gasprice == 0` there is no
+   bound and no charge.
 2. **Charge the gas used.** With `c = gasUsed * tx.gasprice`, the charge is
    `c + c * endpointMarginPercent / 100`. When it is non-zero,
-   `ConnectorLib.charge` calls `IClprConnector.payForExecution(charge)` and
+   `ConnectorLib.charge` calls `IClprConnector.payForExecution(charge)` with
+   `economicConfig.connectorPaymentGasLimit` gas, less the CALL's own cost, and
    compares the router's ETH balance before and after. The charge fails if the
    connector's balance is below the charge, if the call reverts, or if the
    balance delta is not exactly the charge. A failed charge slashes the
-   connector and does not change the reply status.
+   connector and does not change the reply status. `initialize` and
+   `updateEconomicConfiguration` reject a payment budget below
+   `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT` (50,000) with
+   `ClprInvalidConfiguration`.
 3. **Pay the submitter.** A successful charge goes to the bundle submitter (E-8).
+4. **Notify the connector.** `onInboundMessage` gets
+   `economicConfig.connectorInboundGasStipend` gas (E-6). With a stipend of 0 it
+   is not called.
+
+The platform-agnostic spec charges the connector by debiting a balance the service
+holds, so it has no payment call and no budget for one. Both connector hooks are
+EVM-only, and each has its own budget:
+
+- `connectorPaymentGasLimit` bounds the payment. It is the only budget whose
+  shortfall slashes a connector, so it has a floor. `throttles.maxGasPerMessage`
+  stays the application's budget, as the spec defines it, and lowering it never
+  changes which connectors are slashed.
+- `connectorInboundGasStipend` bounds the notification, whose failure only emits
+  an event. The operator sizes it, and 0 turns the notification off.
+
+None of the three budgets is charged to the connector beyond the application's
+measured gas. One DATA message can use up to
+`maxGasPerMessage + connectorPaymentGasLimit + connectorInboundGasStipend` in
+callbacks, plus the service's own work, and `maxMessagesPerBundle` must leave room
+for that within the chain's per-transaction gas cap.
 
 `EconomicConfig.messageExecutionCost` is not read by any code path; the charge
 is based on gas used.
@@ -223,13 +251,15 @@ function authorizeOutboundMessage(
 
 /// Called during submitBundle when an inbound DATA dispatch has a non-zero charge (E-2),
 /// including when the application call reverted (APPLICATION_ERROR). Must transfer exactly
-/// `amount` wei to msg.sender (the router); any other outcome slashes the connector.
+/// `amount` wei to msg.sender (the router); any other outcome slashes the connector. Gas is
+/// economicConfig.connectorPaymentGasLimit, less the CALL's own cost, or the bundle reverts.
 function payForExecution(uint256 amount) external;
 
 /// Called for each decoded inbound DATA message whose connector is registered and not
 /// underfunded, after the charge attempt and whether or not the charge succeeded, when the
-/// connector contract has code. Gas is
-/// capped at economicConfig.connectorInboundGasStipend. A revert is caught and emits
+/// connector contract has code and the stipend is not 0. Gas is
+/// economicConfig.connectorInboundGasStipend, less the CALL's own cost, or the bundle reverts. A revert is
+/// caught and emits
 /// BundleLib.ConnectorInboundCallbackFailed.
 function onInboundMessage(
     bytes32 channelId,

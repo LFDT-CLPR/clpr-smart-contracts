@@ -54,7 +54,8 @@ export async function applyInitialConfig(
                 connectorQueueQuotaPct: params.econ.connectorQueueQuotaPct,
                 connectorInboundGasStipend: params.econ.connectorInboundGasStipend,
                 maxChannels: params.econ.maxChannels,
-                maxConnectors: params.econ.maxConnectors
+                maxConnectors: params.econ.maxConnectors,
+                connectorPaymentGasLimit: params.econ.connectorPaymentGasLimit
             }
         ]
     });

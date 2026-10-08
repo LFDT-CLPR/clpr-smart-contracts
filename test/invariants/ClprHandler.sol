@@ -424,7 +424,8 @@ contract ClprHandler is Test {
             connectorQueueQuotaPct: quotaPct,
             connectorInboundGasStipend: 500_000,
             maxChannels: maxChannels,
-            maxConnectors: maxConnectors
+            maxConnectors: maxConnectors,
+            connectorPaymentGasLimit: 200_000
         });
         vm.prank(OWNER);
         try SERVICE.updateEconomicConfiguration(econ) {
@@ -736,7 +737,8 @@ contract ClprHandler is Test {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: maxChannels,
-            maxConnectors: maxConnectors
+            maxConnectors: maxConnectors,
+            connectorPaymentGasLimit: 200_000
         });
         vm.prank(OWNER);
         try SERVICE.updateEconomicConfiguration(econ) {

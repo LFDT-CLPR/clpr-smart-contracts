@@ -48,6 +48,22 @@ contract BundleLib_ReplyChargeTest is BundleLibTestBase {
         assertEq(app.getResponseCallCount(), 1);
     }
 
+    /// The reply-path payment has the same budget as the DATA-path one, `connectorPaymentGasLimit`:
+    /// a stipend of 0, which only turns the inbound notification off, does not stop it.
+    function test_reply_zeroStipend_stillCharged() public {
+        _registerTestConnector();
+        _sendFromApp();
+        ClprTypes.EconomicConfig memory econ = service.getEconomicConfig();
+        econ.connectorInboundGasStipend = 0;
+        service.updateEconomicConfiguration(econ);
+        vm.txGasPrice(1 gwei);
+        uint256 connectorBefore = address(connector).balance;
+
+        _submitReply(ClprTypes.ReplyStatus.SUCCESS);
+
+        assertGt(connectorBefore - address(connector).balance, 0, "the connector must still pay for its callback");
+    }
+
     function test_reply_chargeIncludesMargin() public {
         _registerTestConnector();
         _sendFromApp();

@@ -101,11 +101,11 @@ contract AdminLogic is LogicModuleBase {
     ///      setClprEnabled(true) will succeed. Reverts with ClprAlreadyInitialized()
     ///      if called more than once. Does not itself enable the service; call
     ///      setClprEnabled(true) separately once the applied config has been verified.
+    ///      Validates `throttles` as {updateLedgerConfiguration} and `econConfig` as
+    ///      {updateEconomicConfiguration} do.
     /// @param serviceAddress ABI-encoded on-chain address of this CLPR service.
-    /// @param throttles Initial throttle parameters.
     /// @param trustAnchor Raw trust anchor bytes (e.g. a BLS public key). Empty to clear.
     /// @param trustAnchorId Identifier for the trust anchor. Must pair with trustAnchor.
-    /// @param econConfig Initial economic configuration.
     function initialize(
         bytes calldata serviceAddress,
         ClprTypes.Throttles calldata throttles,
@@ -124,12 +124,14 @@ contract AdminLogic is LogicModuleBase {
     /// @notice Update the local ledger configuration.
     /// @dev Owner-only. Replaces serviceAddress, throttles, trustAnchor, and trustAnchorId
     ///      atomically. `nanosSinceEpoch` is set to block.timestamp converted to nanoseconds;
-    ///      peers use it to detect config staleness. `trustAnchor` and `trustAnchorId` must
-    ///      both be empty or both be non-empty. Emits {LedgerConfigurationUpdated}.
+    ///      peers use it to detect config staleness. Reverts with {ClprInvalidConfiguration} unless
+    ///      `trustAnchor` and `trustAnchorId` are both empty or both non-empty, and every throttle
+    ///      except `maxLocalEndpoints` and `maxPeerEndpoints` is non-zero. Emits {LedgerConfigurationUpdated}.
+    ///      Each application callback gets at most `throttles.maxGasPerMessage` gas. If
+    ///      `maxGasPerMessage + maxGasPerMessage / 63` exceeds what the chain's per-transaction gas cap
+    ///      leaves after proof verification, a callback that gets the full amount reverts its bundle.
     /// @param serviceAddress ABI-encoded on-chain address of this CLPR service.
-    /// @param throttles New throttle parameters to apply.
     /// @param trustAnchor Raw trust anchor bytes (e.g. a BLS public key). Empty to clear.
-    /// @param trustAnchorId Identifier for the trust anchor. Must pair with trustAnchor.
     function updateLedgerConfiguration(
         bytes calldata serviceAddress,
         ClprTypes.Throttles calldata throttles,
@@ -140,9 +142,9 @@ contract AdminLogic is LogicModuleBase {
     }
 
     /// @notice Replace the economic configuration.
-    /// @dev Owner-only (via onlyService). `connectorQueueQuotaPct` must be strictly less than 100.
-    ///      Emits {EconomicConfigurationUpdated}.
-    /// @param config New economic configuration to apply.
+    /// @dev Owner-only (via onlyService). Reverts with {ClprInvalidConfiguration} unless
+    ///      `connectorQueueQuotaPct` is below 100 and `connectorPaymentGasLimit` is at least
+    ///      `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT`. Emits {EconomicConfigurationUpdated}.
     function updateEconomicConfiguration(ClprTypes.EconomicConfig calldata config) external onlyService whenEnabled {
         _setEconomicConfiguration(config);
     }
@@ -177,6 +179,9 @@ contract AdminLogic is LogicModuleBase {
 
     function _setEconomicConfiguration(ClprTypes.EconomicConfig calldata config) private {
         if (config.connectorQueueQuotaPct >= 100) revert ClprTypes.ClprInvalidConfiguration();
+        if (config.connectorPaymentGasLimit < ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT) {
+            revert ClprTypes.ClprInvalidConfiguration();
+        }
         economicConfig = config;
         emit EconomicConfigurationUpdated();
     }

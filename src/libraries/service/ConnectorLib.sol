@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {IClprConnector} from "@hiero-ledger/clpr/interfaces/IClprConnector.sol";
 import {ECDSA} from "@hiero-ledger/clpr/libraries/crypto/ECDSA.sol";
+import {ExactGasCall} from "@hiero-ledger/clpr/libraries/service/ExactGasCall.sol";
 
 /// @title ConnectorLib
 /// @notice Stateless library for connector registration, stake management, charging, and slashing.
@@ -127,10 +128,12 @@ library ConnectorLib {
     // ── Charge ────────────────────────────────────────────────────────
 
     /// @notice Pull payment from connector contract for inbound message execution.
-    /// @dev Calls IClprConnector.payForExecution; the connector sends ETH to address(this)
-    ///      (ClprService, since this is an internal library). Forwards to `recipient`; falls back
-    ///      to `fallbackRecipient` (owner) if the transfer fails. If both reject, credits
-    ///      `pendingWithdrawals[recipient]` so the recipient can pull later.
+    /// @dev Calls IClprConnector.payForExecution with `gasLimit` gas, less the CALL's own cost, reverting with
+    ///      `ExactGasCall.InsufficientGasForCall` if that cannot be forwarded; every other failure
+    ///      returns false. The connector sends ETH to address(this) (ClprService, since this is an
+    ///      internal library). Forwards to `recipient`; falls back to `fallbackRecipient` (owner) if
+    ///      the transfer fails. If both reject, credits `pendingWithdrawals[recipient]` so the
+    ///      recipient can pull later.
     function charge(
         mapping(bytes32 => ClprTypes.Connector) storage connectors,
         mapping(bytes32 => bool) storage connectorExists,
@@ -139,7 +142,8 @@ library ConnectorLib {
         bytes32 channelId,
         bytes32 connectorId,
         uint256 amount,
-        address recipient
+        address recipient,
+        uint256 gasLimit
     ) internal returns (bool success) {
         bytes32 key = _connectorKey(channelId, connectorId);
         if (!connectorExists[key]) return false;
@@ -148,11 +152,12 @@ library ConnectorLib {
         if (connectorContract.balance < amount) return false;
 
         uint256 before = address(this).balance;
-        try IClprConnector(connectorContract).payForExecution(amount) {
-            if (address(this).balance != before + amount) return false;
-        } catch {
-            return false;
-        }
+        // The balance delta, not the return data, decides whether the connector paid.
+        // slither-disable-next-line unused-return
+        (bool paid,,) = ExactGasCall.callWithExactGas(
+            connectorContract, gasLimit, abi.encodeCall(IClprConnector.payForExecution, (amount)), false
+        );
+        if (!paid || address(this).balance != before + amount) return false;
 
         _transferWithFallback(pendingWithdrawals, recipient, fallbackRecipient, amount);
         emit ConnectorCharged(key, amount, recipient);

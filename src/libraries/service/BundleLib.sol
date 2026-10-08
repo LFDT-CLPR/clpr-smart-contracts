@@ -9,6 +9,7 @@ import {BundleDecodeHelper} from "@hiero-ledger/clpr/libraries/codec/BundleDecod
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {IClprApplication} from "@hiero-ledger/clpr/interfaces/IClprApplication.sol";
 import {IClprConnector} from "@hiero-ledger/clpr/interfaces/IClprConnector.sol";
+import {ExactGasCall} from "@hiero-ledger/clpr/libraries/service/ExactGasCall.sol";
 
 /// @title BundleLib
 /// @notice Implements the 12-step bundle submission algorithm for the CLPR protocol.
@@ -752,8 +753,7 @@ library BundleLib {
         }
     }
 
-    /// @dev Process a DATA message using a pre-decoded struct.
-    ///      Charges actual gas used (× gasPrice × margin factor) rather than a fixed cost; all paid to the submitter.
+    /// @dev Charges actual gas used (× gasPrice × margin factor) rather than a fixed cost; all paid to the submitter.
     function _processDataMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.Channel memory channel,
@@ -766,7 +766,6 @@ library BundleLib {
         mapping(bytes32 => bool) storage _connectorExists,
         mapping(address => uint256) storage _pendingWithdrawals
     ) internal {
-        // Look up connector
         if (!ConnectorLib.has(_connectorExists, ctx.channelId, data.connectorId)) {
             _enqueueReplyAndEmit(
                 ctx, channel, receivedMsgId, ClprTypes.ReplyStatus.CONNECTOR_NOT_FOUND, "", _messageQueues
@@ -776,13 +775,11 @@ library BundleLib {
 
         // Bound the gas forwarded to the application by what the connector can actually pay for,
         // so the endpoint never performs work it cannot recover the cost of.
-        //
 
         address connectorContract =
             ConnectorLib.getContract(_connectors, _connectorExists, ctx.channelId, data.connectorId);
         uint256 gasLimit = ctx.throttles.maxGasPerMessage;
-        // tx.gasprice == 0 (some test/L2 environments) means execution is free — nothing to
-        // charge, so no affordability bound applies and the division is skipped.
+        // tx.gasprice == 0 (some test/L2 environments) leaves nothing to charge, so no affordability bound applies.
         if (tx.gasprice > 0) {
             uint256 affordableGas =
                 connectorContract.balance * 100 / ((100 + uint256(ctx.econ.endpointMarginPercent)) * tx.gasprice);
@@ -796,27 +793,29 @@ library BundleLib {
             if (affordableGas < gasLimit) gasLimit = affordableGas;
         }
 
-        // Dispatch to application
         address targetApp = _bytesToAddress(data.targetApplication);
-        ClprTypes.ReplyStatus replyStatus = ClprTypes.ReplyStatus.APPLICATION_ERROR;
-        bytes memory responseData;
-        uint256 gasUsed;
-
-        if (targetApp.code.length != 0) {
-            uint256 gasBefore = gasleft();
-            try IClprApplication(targetApp).onClprMessage{gas: gasLimit}(
-                ctx.channelId, data.sender, data.messageData
-            ) returns (
-                bytes memory response
-            ) {
-                replyStatus = ClprTypes.ReplyStatus.SUCCESS;
-                responseData = response;
-            } catch (bytes memory reason) {
-                // Forward the raw revert reason to the peer so it can decode the error.
-                responseData = reason;
-            }
-            gasUsed = gasBefore - gasleft();
+        if (targetApp.code.length == 0) {
+            _notifyConnectorInbound(ctx, connectorContract, receivedMsgId, data);
+            _enqueueReplyAndEmit(
+                ctx, channel, receivedMsgId, ClprTypes.ReplyStatus.APPLICATION_ERROR, "", _messageQueues
+            );
+            return;
         }
+
+        // Read before the calldata is encoded: the connector is charged for encoding the call through
+        // decoding its return.
+        uint256 gasBefore = gasleft();
+        // A failed call is never well-formed, so `success` adds nothing here.
+        // slither-disable-next-line unused-return
+        (, bool wellFormed, bytes memory responseData) = ExactGasCall.callWithExactGas(
+            targetApp,
+            gasLimit,
+            abi.encodeCall(IClprApplication.onClprMessage, (ctx.channelId, data.sender, data.messageData)),
+            true
+        );
+        uint256 gasUsed = gasBefore - gasleft();
+        ClprTypes.ReplyStatus replyStatus =
+            wellFormed ? ClprTypes.ReplyStatus.SUCCESS : ClprTypes.ReplyStatus.APPLICATION_ERROR;
 
         uint256 totalCharge = _executionCharge(ctx, gasUsed);
         if (totalCharge > 0) {
@@ -828,18 +827,17 @@ library BundleLib {
                 ctx.channelId,
                 data.connectorId,
                 totalCharge,
-                ctx.bundleSubmitter
+                ctx.bundleSubmitter,
+                ctx.econ.connectorPaymentGasLimit
             );
             if (!charged) {
                 _slashConnector(ctx, data.connectorId, _connectors, _connectorExists, _pendingWithdrawals);
             }
         }
 
-        // Best-effort inbound notification to the connector contract. A revert here
-        // does not block message processing — the connector has already been charged.
+        // Best-effort: a connector revert does not block message processing.
         _notifyConnectorInbound(ctx, connectorContract, receivedMsgId, data);
 
-        // Enqueue reply
         _enqueueReplyAndEmit(ctx, channel, receivedMsgId, replyStatus, responseData, _messageQueues);
     }
 
@@ -849,19 +847,25 @@ library BundleLib {
         uint64 receivedMsgId,
         ClprTypes.DecodedDataMessage memory data
     ) internal {
-        if (connectorContract.code.length == 0) return;
-        try IClprConnector(connectorContract).onInboundMessage{gas: ctx.econ.connectorInboundGasStipend}(
-            ctx.channelId, receivedMsgId, data.sender, data.targetApplication, data.messageData
-        ) {}
-        catch {
-            emit ConnectorInboundCallbackFailed(ctx.channelId, receivedMsgId);
-        }
+        // A call with no gas would fail and emit ConnectorInboundCallbackFailed for every message.
+        if (connectorContract.code.length == 0 || ctx.econ.connectorInboundGasStipend == 0) return;
+        // onInboundMessage returns nothing, so only `success` is kept.
+        // slither-disable-next-line unused-return
+        (bool success,,) = ExactGasCall.callWithExactGas(
+            connectorContract,
+            ctx.econ.connectorInboundGasStipend,
+            abi.encodeCall(
+                IClprConnector.onInboundMessage,
+                (ctx.channelId, receivedMsgId, data.sender, data.targetApplication, data.messageData)
+            ),
+            false
+        );
+        if (!success) emit ConnectorInboundCallbackFailed(ctx.channelId, receivedMsgId);
     }
 
-    /// @dev Process a REPLY message using a pre-decoded struct.
-    ///      Uses connectorIdForReply to decrement inflight and slash even when the
-    ///      original DATA payload has been redacted (zeroed). Charges the source connector
-    ///      for the gas the sender's onClprResponse callback used, plus margin, paid to the submitter.
+    /// @dev Uses connectorIdForReply to slash even when the original DATA payload has been redacted.
+    ///      Charges the source connector for the gas the sender's onClprResponse callback used, plus
+    ///      margin, paid to the submitter.
     function _processReplyMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.DecodedReply memory reply,
@@ -872,7 +876,6 @@ library BundleLib {
         mapping(bytes32 => mapping(bytes32 => uint32)) storage _connectorQueueCounts,
         mapping(address => uint256) storage _pendingWithdrawals
     ) internal {
-        // Fetch original outbound message
         ClprTypes.MessageValue memory message = _messageQueues[ctx.channelId][reply.messageId];
 
         // Delete original immediately (before callback). Note: channel state updates are batched
@@ -909,8 +912,6 @@ library BundleLib {
             _slashConnector(ctx, connectorId, _connectors, _connectorExists, _pendingWithdrawals);
         }
 
-        // Best-effort callback to sender application (only if sender is a 20-byte address).
-        //
         // REENTRANCY INVARIANT: this hands control to untrusted application code while
         // channel state is mid-update. The storage maps touched above (message slot,
         // inflight/quota counters) are already written, but `channel` is an in-memory copy —
@@ -925,10 +926,17 @@ library BundleLib {
         uint256 gasUsed;
         if (senderBytes.length == 20 && _bytesToAddress(senderBytes).code.length > 0) {
             uint256 gasBefore = gasleft();
-            try IClprApplication(_bytesToAddress(senderBytes)).onClprResponse{gas: ctx.throttles.maxGasPerMessage}(
-                ctx.channelId, reply.messageId, uint8(reply.status), reply.messageReplyData
-            ) {}
-                catch {}
+            // Best-effort: a failed onClprResponse does not undo the delivered reply.
+            // slither-disable-next-line unused-return
+            ExactGasCall.callWithExactGas(
+                _bytesToAddress(senderBytes),
+                ctx.throttles.maxGasPerMessage,
+                abi.encodeCall(
+                    IClprApplication.onClprResponse,
+                    (ctx.channelId, reply.messageId, uint8(reply.status), reply.messageReplyData)
+                ),
+                false
+            );
             gasUsed = gasBefore - gasleft();
         }
 
@@ -945,7 +953,8 @@ library BundleLib {
                 ctx.channelId,
                 connectorId,
                 totalCharge,
-                ctx.bundleSubmitter
+                ctx.bundleSubmitter,
+                ctx.econ.connectorPaymentGasLimit
             );
         }
 

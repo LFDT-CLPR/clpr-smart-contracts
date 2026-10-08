@@ -197,10 +197,27 @@ maxGasPerMessage, maxQueueDepth, maxSyncBytes, maxLocalEndpoints,
 maxPeerEndpoints)`; the economic tuple is `(messageExecutionCost,
 endpointMarginPercent, minLockedStake, minEndpointBond, basePenalty,
 penaltyMultiplier, slashBanThreshold, connectorQueueQuotaPct,
-connectorInboundGasStipend, maxChannels, maxConnectors)`, amounts in wei. Run
+connectorInboundGasStipend, maxChannels, maxConnectors,
+connectorPaymentGasLimit)`, amounts in wei. Run
 each call through the signing procedure below, with this `DATA` in place of its
 step 1 (`DATA=$(cast calldata "setClprEnabled(bool)" true)` for the second
 call), re-reading the Safe nonce for the second one.
+
+`connectorInboundGasStipend` is all the gas a connector's `onInboundMessage`
+notification receives; 0 turns the notification off. No minimum is enforced, so
+size it for the connectors on the channel. A connector's `payForExecution`
+receives `connectorPaymentGasLimit`. Below 50,000 the call reverts with
+`ClprInvalidConfiguration`; at or above it, a connector whose payment needs more
+is slashed on every charge, so check the registered connectors before lowering it.
+
+Raising a budget has a limit too. A callback that gets its full budget
+(`throttles.maxGasPerMessage` for the application, `connectorPaymentGasLimit` for
+`payForExecution`, or `connectorInboundGasStipend` for `onInboundMessage`) needs
+`budget + budget / 63`
+of gas left when it is called, after
+proof verification. If that cannot fit the chain's per-transaction gas cap
+(2^24 on Osaka chains, 15M on Hedera), such bundles revert with
+`InsufficientGasForCall` until the budget is lowered.
 
 ### Signing and executing with `cast`
 

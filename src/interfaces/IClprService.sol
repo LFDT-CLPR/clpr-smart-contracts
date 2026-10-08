@@ -117,13 +117,11 @@ interface IClprService {
     /// @notice Submit an inbound bundle for processing on the given channel.
     /// @dev Permissionless: any caller may submit. Bundle correctness is secured
     ///      entirely by the channel's verifier; there is no endpoint-registration
-    ///      gate and no endpoint signature. Delegates the 12-step processing algorithm
-    ///      to the BundleProcessor; msg.sender is recorded as the bundle submitter and
+    ///      gate and no endpoint signature. `msg.sender` is recorded as the bundle submitter and
     ///      is the sole recipient of connector charges and slash proceeds for messages
-    ///      in this bundle. Anyone who submits a bundle carrying data or response
-    ///      messages is reimbursed by the affected connectors.
+    ///      in this bundle. Reverts with `ExactGasCall.InsufficientGasForCall` when the gas left
+    ///      cannot give a callback its budget, less the CALL's own cost, under the EIP-150 63/64 rule.
     ///
-    /// @param channelId The channel the bundle is for
     /// @param proofBytes Opaque proof bytes passed to the channel's verifier
     function submitBundle(bytes32 channelId, bytes calldata proofBytes) external;
 
@@ -294,11 +292,12 @@ interface IClprService {
     /// @dev Owner-only. Not gated by the enabled check — must be called before
     ///      {setClprEnabled} will succeed. Reverts with {ClprAlreadyInitialized}
     ///      if called more than once. Does not itself enable the service.
+    ///      Reverts with {ClprInvalidConfiguration} when a throttle other than `maxLocalEndpoints` and
+    ///      `maxPeerEndpoints` is zero, `econConfig.connectorQueueQuotaPct` is 100 or more, or
+    ///      `econConfig.connectorPaymentGasLimit` is below `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT`.
     /// @param serviceAddress ABI-encoded on-chain address of this CLPR service.
-    /// @param throttles Initial throttle parameters.
     /// @param trustAnchor Raw trust anchor bytes. Empty to clear.
     /// @param trustAnchorId Identifier for the trust anchor. Must pair with trustAnchor.
-    /// @param econConfig Initial economic configuration.
     function initialize(
         bytes calldata serviceAddress,
         ClprTypes.Throttles calldata throttles,

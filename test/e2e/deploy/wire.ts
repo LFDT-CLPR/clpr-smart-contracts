@@ -59,7 +59,8 @@ export async function wireConfig(opts: {
                 connectorQueueQuotaPct: econ.connectorQueueQuotaPct,
                 connectorInboundGasStipend: econ.connectorInboundGasStipend,
                 maxChannels: econ.maxChannels,
-                maxConnectors: econ.maxConnectors
+                maxConnectors: econ.maxConnectors,
+                connectorPaymentGasLimit: econ.connectorPaymentGasLimit
             }
         ]
     });

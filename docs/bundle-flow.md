@@ -246,14 +246,15 @@ if tx.gasprice > 0:
     gasLimit = min(gasLimit, affordableGas)
 status = APPLICATION_ERROR
 if targetApplication is 20 bytes with code:
-    try onClprMessage{gas: gasLimit}(channelId, sender, messageData)
-        on success:                             status = SUCCESS, data = returned bytes
+    callWithExactGas(onClprMessage, gasLimit)   # too little gas left: revert the bundle
+        on success, well-formed bytes:          status = SUCCESS, data = returned bytes
+        on success, malformed return:           data = raw return bytes
         on revert:                              data = raw revert bytes
     gasUsed = gasBefore - gasleft()
 totalCharge = gasUsed*tx.gasprice * (1 + margin/100)   # actual cost, not a ceiling
-if totalCharge > 0 and ConnectorLib.charge(totalCharge) fails:
+if totalCharge > 0 and ConnectorLib.charge(totalCharge) fails:   # payForExecution, connectorPaymentGasLimit gas
                                                 slash    # reply status unchanged
-best-effort onInboundMessage{gas: connectorInboundGasStipend}   # always, not only on success
+if stipend > 0: best-effort onInboundMessage, stipend gas   # not only on success
 enqueue reply(status, data)
 ```
 
@@ -291,8 +292,8 @@ Looks up the original outbound message by `replyId`:
   `MessagingLogic.redactMessage`;
 - if the status is `CONNECTOR_NOT_FOUND` or `CONNECTOR_UNDERFUNDED`,
   **source-side slash** of the local connector (also for a redacted original);
-- best-effort `IClprApplication.onClprResponse` to the original sender, capped
-  at `throttles.maxGasPerMessage`, only when the sender is exactly 20 bytes,
+- best-effort `IClprApplication.onClprResponse` to the original sender, with
+  `throttles.maxGasPerMessage` gas, only when the sender is exactly 20 bytes,
   has bytecode, and the original payload is still live — a redacted original
   carries no recoverable sender;
 - emits `ReplyDelivered`.
@@ -311,12 +312,22 @@ Looks up the original outbound message by `replyId`:
   That is acceptable only because no CLPR view serves another contract as an
   on-chain oracle (the REENTRANCY INVARIANT note in
   `_processReplyMessageDecoded`).
-- Application calls are capped at `min(throttles.maxGasPerMessage,
-  affordableGas)`, so the submitter never performs work the connector's
-  balance cannot pay for.
-- Connector inbound notifications have a smaller stipend
-  (`economicConfig.connectorInboundGasStipend`) and are best-effort; a failure
-  emits `ConnectorInboundCallbackFailed`.
+- Application calls get `min(throttles.maxGasPerMessage, affordableGas)`, so the
+  submitter never performs work the connector's balance cannot pay for.
+  `payForExecution` gets `economicConfig.connectorPaymentGasLimit`. The connector's inbound
+  notification gets `economicConfig.connectorInboundGasStipend`, is not called
+  when that is 0, and emits `ConnectorInboundCallbackFailed` when it fails.
+- Every callback gets its budget, less the CALL's own cost, or not at all.
+  `ExactGasCall.callWithExactGas` reverts the bundle with `InsufficientGasForCall`
+  when the remaining gas is below `budget + budget / 63`, the least that forwards
+  the budget under the EIP-150 63/64 rule, so a submitter cannot choose a
+  transaction gas that starves a callback while the bundle still applies. The
+  CALL's own cost (account access under EIP-2929 and, for an EIP-7702 account,
+  its delegate) comes out of the budget, so no fixed overhead depends on the
+  chain's gas schedule. An honest submitter needs `budget + budget / 63` of gas
+  left at each callback. An `eth_estimateGas` without fee fields
+  runs at gas price 0, which skips the affordability bound and the charge, so it
+  can under-estimate; size the gas from the configured budgets instead.
 
 ## Slashing
 

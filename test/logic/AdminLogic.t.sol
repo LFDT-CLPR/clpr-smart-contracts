@@ -241,7 +241,8 @@ contract EndpointManagerTest is ClprTestBase {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
         service.initialize(hex"1234", defaultThrottles, "", "", econ);
         service.setClprEnabled(true);
@@ -304,6 +305,47 @@ contract ClprService_Configuration is ClprServiceTestBase {
         ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
         econ.connectorQueueQuotaPct = 99;
         service.updateEconomicConfiguration(econ);
+    }
+
+    /// The stipend only funds the inbound notification, so any value is the operator's call; 0 turns
+    /// the notification off.
+    function test_updateEconomicConfiguration_acceptsAZeroStipend() public {
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorInboundGasStipend = 0;
+        service.updateEconomicConfiguration(econ);
+        assertEq(service.getEconomicConfig().connectorInboundGasStipend, 0);
+    }
+
+    /// A payment budget too small for `payForExecution` would fail every charge and slash every
+    /// funded connector.
+    function testFuzz_updateEconomicConfiguration_revert_paymentGasLimitBelowMinimum(uint256 seed) public {
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorPaymentGasLimit = uint64(bound(seed, 0, ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT - 1));
+        vm.expectRevert(ClprTypes.ClprInvalidConfiguration.selector);
+        service.updateEconomicConfiguration(econ);
+    }
+
+    function test_updateEconomicConfiguration_succeeds_paymentGasLimitAtMinimum() public {
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorPaymentGasLimit = uint64(ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT);
+        service.updateEconomicConfiguration(econ);
+        assertEq(service.getEconomicConfig().connectorPaymentGasLimit, ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT);
+    }
+
+    function test_initialize_revert_paymentGasLimitBelowMinimum() public {
+        ClprService freshService = _deployClprService(1, "eip155:1337");
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorPaymentGasLimit = uint64(ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT - 1);
+        vm.expectRevert(ClprTypes.ClprInvalidConfiguration.selector);
+        freshService.initialize(hex"1234", defaultThrottles, "", "", econ);
+    }
+
+    function test_initialize_acceptsAZeroStipend() public {
+        ClprService freshService = _deployClprService(1, "eip155:1337");
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorInboundGasStipend = 0;
+        freshService.initialize(hex"1234", defaultThrottles, "", "", econ);
+        assertEq(freshService.getEconomicConfig().connectorInboundGasStipend, 0);
     }
 
     // ── Endpoint validation at manifest intake (was: seed endpoints) ───

@@ -68,7 +68,8 @@ contract ClprInvariantTest is StdInvariant, Test {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
         service.initialize(hex"1234", throttles, "", "", econ);
         service.setClprEnabled(true);
@@ -378,9 +379,10 @@ contract ClprInvariantTest is StdInvariant, Test {
                 penaltyMultiplier: 1,
                 slashBanThreshold: 1,
                 connectorQueueQuotaPct: 1,
-                connectorInboundGasStipend: 1,
+                connectorInboundGasStipend: 500_000,
                 maxChannels: 0,
-                maxConnectors: 0
+                maxConnectors: 0,
+                connectorPaymentGasLimit: 200_000
             })
         );
     }
@@ -497,9 +499,10 @@ contract ClprInvariantTest is StdInvariant, Test {
                 penaltyMultiplier: 1,
                 slashBanThreshold: 1,
                 connectorQueueQuotaPct: 1,
-                connectorInboundGasStipend: 1,
+                connectorInboundGasStipend: 500_000,
                 maxChannels: 0,
-                maxConnectors: 0
+                maxConnectors: 0,
+                connectorPaymentGasLimit: 200_000
             })
         );
     }

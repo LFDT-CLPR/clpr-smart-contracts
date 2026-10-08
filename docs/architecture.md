@@ -126,8 +126,8 @@ counters (`channelCount`, `connectorCount`, `endpointCount`),
 | Interface | Methods | Called from |
 |---|---|---|
 | `IClprVerifier` | `verifyConfig(configProof, channelId, endpointManifestProof)` → `(channelContext, chainId, serviceAddress, peerConfigNanos, throttles, initialTrustAnchor, initialTrustAnchorId, endpointManifest)` during `completeChannel`; `verifyBundle(proofBytes, trustAnchor, channelContext)` → `(metadata, messagePayloads, newTrustAnchor, newTrustAnchorId, newEndpointManifest)` during `submitBundle`. Both are `view`, so they run as STATICCALLs | `ChannelLogic._createChannel`, `BundleLib._validateAndPrepare` |
-| `IClprApplication` | `onClprMessage` (gas-bounded; return value becomes the REPLY payload), `onClprResponse` (best-effort, gas `throttles.maxGasPerMessage`) | `BundleLib._processDataMessageDecoded`, `BundleLib._processReplyMessageDecoded` |
-| `IClprConnector` | `authorizeOutboundMessage` (during `sendMessage`), `payForExecution` (pull payment for inbound DATA), `onInboundMessage` (best-effort, gas `economicConfig.connectorInboundGasStipend`) | `MessagingLogic._authorizeConnector`, `ConnectorLib.charge`, `BundleLib._notifyConnectorInbound` |
+| `IClprApplication` | `onClprMessage` (gas-bounded; return value becomes the REPLY payload), `onClprResponse` (best-effort, gas `throttles.maxGasPerMessage`). Each gets its gas, less the CALL's own cost, or the bundle reverts (`ExactGasCall`) | `BundleLib._processDataMessageDecoded`, `BundleLib._processReplyMessageDecoded` |
+| `IClprConnector` | `authorizeOutboundMessage` (during `sendMessage`), `payForExecution` (pull payment for inbound DATA, gas `economicConfig.connectorPaymentGasLimit`), `onInboundMessage` (best-effort, gas `economicConfig.connectorInboundGasStipend`; not called when that is 0). `payForExecution` and `onInboundMessage` each get their gas, less the CALL's own cost, or the bundle reverts (`ExactGasCall`) | `MessagingLogic._authorizeConnector`, `ConnectorLib.charge`, `BundleLib._notifyConnectorInbound` |
 
 ## Storage (`ClprServiceStorage.sol`)
 
@@ -160,7 +160,7 @@ Listed in **slot order**, as `storage-layout.json` pins them:
 | 17–21 | `_endpointManifest` | `EndpointManifestState` | Local endpoint registry: `version` (17), `commitment` (18), `entries`, `liveAccounts`, `liveCounter`. `ManifestLib` operates on it. EVM verifiers prove slot 18 (`ClprEvmBundleVerifier.ENDPOINT_MANIFEST_COMMITMENT_SLOT`) |
 | 22 | `_peerEndpointManifests` | `mapping(bytes32 ⇒ ClprEndpointManifest)` | Cached peer manifest per channel; set at `completeChannel`, refreshed by BundleLib Step 1b; truncated to `throttles.maxPeerEndpoints` |
 | 23–30 | `_config` | `LedgerConfiguration` | `protocolVersion`, local `chainId`, `serviceAddress`, `nanosSinceEpoch`, `throttles`, `trustAnchor`, `trustAnchorId` |
-| 31–37 | `economicConfig` | `EconomicConfig` | Execution cost, margin, stake/bond minima, penalty params, queue quota, inbound gas stipend, channel/connector caps |
+| 31–37 | `economicConfig` | `EconomicConfig` | Execution cost, margin, stake/bond minima, penalty params, queue quota, inbound gas stipend, channel/connector caps, payment gas limit |
 | 38 | `_owner` | `address` | `Ownable` owner (router only); read by `_getOwner()` |
 
 > ⚠ Two distinct hashes for connector lookup coexist. The `Connector` record
