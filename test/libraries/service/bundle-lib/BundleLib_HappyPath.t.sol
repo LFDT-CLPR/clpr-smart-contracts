@@ -186,14 +186,4 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
     }
 
     receive() external payable {}
-
-    /// @dev An inbound REDACTED message (destination side) generates a REDACTED reply.
-    function test_inboundRedactedMessage_generatesRedactedReply() public {
-        bytes memory redacted = ClprProtobuf.encodeRedactedMessage(sha256("original payload"));
-        _submitSingleInboundMessage(redacted);
-
-        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 1);
-        ClprTypes.DecodedReply memory decoded = ClprProtobuf.decodeReplyMessage(reply.payload);
-        assertEq(uint8(decoded.status), uint8(ClprTypes.ReplyStatus.REDACTED), "REDACTED reply status");
-    }
 }

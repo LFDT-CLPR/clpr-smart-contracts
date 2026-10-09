@@ -86,7 +86,7 @@ flowchart TD
 | 7 | Response-ordering pre-scan over the new payloads (see below). **Violation: CLOSING → revert `ClprBundleVerificationFailed`; ACTIVE → PAUSED (emits `ChannelStatusChanged`); PAUSED or DRAINED → status unchanged.** In the two non-reverting cases the channel is written back with its Step 1b/1c updates and processing stops: nothing is dispatched and neither cursor advances. Otherwise `channel.nextExpectedReplyId` takes the scan's result | `_validateAndPrepare`, `_checkResponseOrdering` |
 | 8 | Auto-resume: PAUSED → ACTIVE (emits `ChannelStatusChanged`) | `_applyBundle` |
 | 9a | Lazy config propagation: only when `channel.status == ACTIVE` (Step 8 already resolves PAUSED), if `_config.nanosSinceEpoch > channel.lastConfigTimestamp`, update `lastConfigTimestamp` and enqueue `ClprProtobuf.encodeControlMessage(_config)` as a CONTROL message. CLOSING or DRAINED channels are skipped | `_applyBundle` → `_enqueueMessage` |
-| 9b | For outbound ids in `(oldAcked, newAcked]`, delete queued CONTROL and REPLY slots. DATA slots, redacted or not, stay until their REPLY arrives | `_deleteAckedNonDataMessages` |
+| 9b | For outbound ids in `(oldAcked, newAcked]`, delete queued CONTROL and REPLY slots. DATA slots stay until their REPLY arrives | `_deleteAckedNonDataMessages` |
 | 10 | Per-message dispatch of the new payloads, with inbound ids from `expectedFirstId` | `_dispatchMessages` |
 | — | If there were new messages, `receivedMessageId = expectedFirstId + newMessageCount − 1` and `receivedRunningHash` = the Step 5 result; `ackedMessageId = metadata.receivedMessageId` | `_applyBundle` |
 | 11 | State machine: apply `_stepStatus(channel.status, metadata.state, dataAcked, allAcked)` until it is stable, emitting `ChannelStatusChanged` per hop; then emit `BundleProcessed(channelId, receivedMessageId, ackedMessageId, messagePayloads.length)` | `_applyStateMachine` → `_stepStatus` |
@@ -147,7 +147,7 @@ REPLY (other types are skipped here):
   violation;
 - `replyId < nextExpectedReplyId` → duplicate, skipped;
 - advance `nextExpectedReplyId` to `replyId`; passing over a slot that still
-  holds live DATA → violation. CONTROL, REPLY, redacted and deleted slots are
+  holds live DATA → violation. CONTROL, REPLY and deleted slots are
   passed over silently;
 - step past `replyId` and past any following non-DATA slots.
 
@@ -195,8 +195,7 @@ about the sender:
 - **Any other DATA decode failure** (truncated input, varint overflow, wrong
   wire type, a `connectorId` that is not 32 bytes) → per-message recovery:
   `BundleParseFailed` plus an `APPLICATION_ERROR` reply with empty data. The
-  rest of the bundle processes, and the source application can react (e.g.
-  redact the malformed message).
+  rest of the bundle processes, and the source application can react.
 - **Malformed REPLY message** → the ENTIRE bundle reverts (it is decoded without
   `try/catch`, in Step 7 and again in dispatch). A reply that cannot be decoded
   can never be matched against the outbound queue, so response ordering could
@@ -262,8 +261,7 @@ enqueue reply(status, data)
 `economicConfig.endpointMarginPercent`. Things here that are easy to get wrong:
 
 - There is **no channel-status check** on this path: a CLOSING or DRAINED
-  channel still calls the application and enqueues the reply. The
-  `CHANNEL_CLOSED` reply status exists in `ReplyStatus` but is never produced.
+  channel still calls the application and enqueues the reply.
 - Charging is by **actual execution cost**, computed after the call from
   `gasBefore - gasleft()`, on both the success and the revert path.
   `economicConfig.messageExecutionCost` plays no part.
@@ -274,28 +272,21 @@ enqueue reply(status, data)
 The reply is enqueued outbound by `_enqueueReplyAndEmit`, which also emits
 `MessageDispatched`.
 
-### REDACTED
-
-A `ClprRedactedMessage` from the peer produces a `ReplyStatus.REDACTED` reply
-and no application or connector call.
-
 ### REPLY (`_processReplyMessageDecoded`)
 
 Looks up the original outbound message by `replyId`:
 
 - the queued slot is read and **deleted immediately**, before any callback;
-- the connector is identified by `MessageValue.connectorIdForReply`, which
-  survives redaction. A `bytes32(0)` value (a CONTROL/REPLY original, or an
-  empty slot) emits `ReplyDelivered` and returns;
-- `_connectorInflightCount` and `_connectorQueueCounts` are decremented **only**
-  for a still-live DATA payload — redacted slots were already decremented by
-  `MessagingLogic.redactMessage`;
+- the connector is identified by `MessageValue.connectorIdForReply`. A
+  `bytes32(0)` value (a CONTROL/REPLY original, or an empty slot) emits
+  `ReplyDelivered` and returns;
+- `_connectorInflightCount` and `_connectorQueueCounts` are decremented for the
+  DATA original;
 - if the status is `CONNECTOR_NOT_FOUND` or `CONNECTOR_UNDERFUNDED`,
-  **source-side slash** of the local connector (also for a redacted original);
+  **source-side slash** of the local connector;
 - best-effort `IClprApplication.onClprResponse` to the original sender, with
-  `throttles.maxGasPerMessage` gas, only when the sender is exactly 20 bytes,
-  has bytecode, and the original payload is still live — a redacted original
-  carries no recoverable sender;
+  `throttles.maxGasPerMessage` gas, only when the sender is exactly 20 bytes and
+  has bytecode;
 - emits `ReplyDelivered`.
 
 ## Reentrancy & ordering
@@ -363,7 +354,7 @@ bundle is subtracted from `_connectorCount` at Step 12.
 - **DATA messages aren't deleted on ack.** DATA slots survive ack so the peer's
   REPLY can still be matched against a live payload for sender recovery and
   quota/in-flight accounting. The connectorId itself is kept separately in
-  `MessageValue.connectorIdForReply`, so redaction does not lose it.
+  `MessageValue.connectorIdForReply`.
   `_deleteAckedNonDataMessages` is named accurately.
 - **`BundleProcessed.messageCount`** is `messagePayloads.length`, leading
   duplicates included.

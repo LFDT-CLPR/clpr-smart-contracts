@@ -5,9 +5,8 @@ import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 
 /// @title IClprService
 /// @notice The main entry point for the CLPR cross-ledger messaging protocol.
-/// @dev This interface intentionally excludes owner-only methods (configuration,
-///      channel close, message redaction) and BundleProcessor-only privileged
-///      accessors. It is the stable contract that external callers — applications,
+/// @dev This interface intentionally excludes the owner-only configuration updates and channel close.
+///      It is the stable contract that external callers — applications,
 ///      connector contracts, bundle submitters, and integrators — should code
 ///      against. Implementations are expected to enforce reentrancy protection on
 ///      the state-modifying entry points (sendMessage, submitBundle).
@@ -191,11 +190,8 @@ interface IClprService {
     function getEconomicConfig() external returns (ClprTypes.EconomicConfig memory);
 
     /// @notice Retrieve a message from a channel's queue.
-    /// @dev Returns a zero-valued struct if the message does not exist or has
-    ///      been redacted; callers should check `payload.length` if they need
-    ///      to distinguish those cases.
-    /// @param channelId The channel identifier
-    /// @param messageId The message identifier within the queue
+    /// @dev Zero-valued (empty `payload`) for an unsent ID and once the slot is pruned: a DATA
+    ///      message when its REPLY is processed, a CONTROL/REPLY message when the peer acknowledges it.
     /// @return The stored message value (payload + running hash after processing)
     function getMessage(bytes32 channelId, uint64 messageId) external returns (ClprTypes.MessageValue memory);
 
@@ -277,14 +273,13 @@ interface IClprService {
     ///      (registerChannel, completeChannel, closeChannel,
     ///      registerConnector, completeConnector, removeConnector,
     ///      topUpConnectorStake, registerEndpoint, addEndpoint, removeEndpoint,
-    ///      updateEndpointManifest, sendMessage, submitBundle, redactMessage,
+    ///      updateEndpointManifest, sendMessage, submitBundle,
     ///      updateLedgerConfiguration, updateEconomicConfiguration) reverts
     ///      with {ClprDisabled}. Read-only views and {setClprEnabled} itself are
     ///      not gated by the enabled check, so the owner can always re-enable the
     ///      service. {setClprEnabled} reverts with {ClprNotInitialized} unless
     ///      {initialize} has already been called — once it has, this never blocks
     ///      again (there is no un-initializing).
-    /// @param enabled true to enable the service; false to disable it.
     function setClprEnabled(bool enabled) external;
 
     /// @notice One-time bootstrap: apply the first ledger + economic configuration

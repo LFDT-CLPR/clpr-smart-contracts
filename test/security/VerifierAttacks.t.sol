@@ -53,10 +53,7 @@ contract VerifierAttacksTest is BundleLogicTestBase, SecurityAssertions {
         _submitBundleWithAnchor(channelId, _slice(inbound, 0, 1), 1, _runningHashThrough(inbound, 1));
         assertEq(service.getChannel(channelId).verifier, original, "bundle processing must not rebind the verifier");
 
-        // Note the inbound DATA above already queued a REPLY at id 1, so the DATA message this
-        // sends is not id 1 — and only DATA is redactable.
-        uint64 outboundId =
-            service.sendMessage(channelId, connectorId, abi.encodePacked(address(connector)), "outbound");
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(connector)), "outbound");
         assertEq(service.getChannel(channelId).verifier, original, "sendMessage must not rebind the verifier");
 
         ClprTypes.Throttles memory throttles = defaultThrottles;
@@ -66,9 +63,6 @@ contract VerifierAttacksTest is BundleLogicTestBase, SecurityAssertions {
 
         service.updateEconomicConfiguration(defaultEcon);
         assertEq(service.getChannel(channelId).verifier, original, "economic config must not rebind the verifier");
-
-        service.redactMessage(channelId, outboundId);
-        assertEq(service.getChannel(channelId).verifier, original, "redaction must not rebind the verifier");
 
         service.closeChannel(channelId);
         assertEq(service.getChannel(channelId).verifier, original, "closing must not rebind the verifier");

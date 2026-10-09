@@ -140,19 +140,6 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
         console.log("getMessage       :", gasGetMessage);
     }
 
-    function test_gas_redactMessage() public {
-        // Send a message first
-        bytes memory messageData = hex"48454C4C4F";
-        uint64 msgId = service.sendMessage(channelId, connectorAddr, abi.encodePacked(address(app)), messageData);
-
-        uint256 g0 = gasleft();
-        service.redactMessage(channelId, msgId);
-        uint256 gasRedactMessage = g0 - gasleft();
-
-        console.log("=== MessagingLogic Gas Benchmark ===");
-        console.log("redactMessage    :", gasRedactMessage);
-    }
-
     // ═══════════════════════════════════════════════════════════════════
     // Gas Benchmarks: ConnectorLib
     // ═══════════════════════════════════════════════════════════════════

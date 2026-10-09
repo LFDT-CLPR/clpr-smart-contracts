@@ -93,7 +93,7 @@ contract ClprInvariantTest is StdInvariant, Test {
     }
 
     function _targetHandlerMutators(address h) internal {
-        bytes4[] memory selectors = new bytes4[](26);
+        bytes4[] memory selectors = new bytes4[](25);
         selectors[0] = ClprHandler.registerChannel.selector;
         selectors[1] = ClprHandler.completeChannel.selector;
         selectors[2] = ClprHandler.closeChannel.selector;
@@ -112,15 +112,14 @@ contract ClprInvariantTest is StdInvariant, Test {
         selectors[14] = ClprHandler.submitInboundBundle.selector;
         selectors[15] = ClprHandler.submitAckBundle.selector;
         selectors[16] = ClprHandler.collectPending.selector;
-        selectors[17] = ClprHandler.redactMessage.selector;
-        selectors[18] = ClprHandler.setVerifierRevert.selector;
-        selectors[19] = ClprHandler.setTightResourceCaps.selector;
-        selectors[20] = ClprHandler.attemptCompleteAtChannelCap.selector;
-        selectors[21] = ClprHandler.attemptRegisterAtConnectorCap.selector;
-        selectors[22] = ClprHandler.probeReEnableWhenDisabled.selector;
-        selectors[23] = ClprHandler.collectPendingWhileDisabled.selector;
-        selectors[24] = ClprHandler.submitInboundSlashPendingEthRejector.selector;
-        selectors[25] = ClprHandler.submitInboundChargeFailSlashPendingEthRejector.selector;
+        selectors[17] = ClprHandler.setVerifierRevert.selector;
+        selectors[18] = ClprHandler.setTightResourceCaps.selector;
+        selectors[19] = ClprHandler.attemptCompleteAtChannelCap.selector;
+        selectors[20] = ClprHandler.attemptRegisterAtConnectorCap.selector;
+        selectors[21] = ClprHandler.probeReEnableWhenDisabled.selector;
+        selectors[22] = ClprHandler.collectPendingWhileDisabled.selector;
+        selectors[23] = ClprHandler.submitInboundSlashPendingEthRejector.selector;
+        selectors[24] = ClprHandler.submitInboundChargeFailSlashPendingEthRejector.selector;
         targetSelector(FuzzSelector({addr: h, selectors: selectors}));
     }
 
@@ -468,18 +467,6 @@ contract ClprInvariantTest is StdInvariant, Test {
         service.updateLedgerConfiguration(hex"01", throttles, "", "");
     }
 
-    function invariant_aclKillSwitch_redactMessage() external {
-        if (_clprEnabled()) return;
-        for (uint256 i = 0; i < handler.channelLen(); i++) {
-            (bytes32 channelId,,,, bool completed) = handler.getChannel(i);
-            if (!completed) continue;
-            vm.prank(address(this));
-            vm.expectRevert(ClprTypes.ClprDisabled.selector);
-            service.redactMessage(channelId, 1);
-            return;
-        }
-    }
-
     function invariant_aclSetClprEnabledRequiresOwner() external {
         vm.prank(aclProbe);
         vm.expectRevert();
@@ -542,17 +529,6 @@ contract ClprInvariantTest is StdInvariant, Test {
             vm.prank(aclProbe);
             vm.expectRevert();
             service.removeConnector(channelId, connectorId, aclProbe);
-            return;
-        }
-    }
-
-    function invariant_aclRedactMessageRequiresOwner() external {
-        for (uint256 i = 0; i < handler.channelLen(); i++) {
-            (bytes32 channelId,,,, bool completed) = handler.getChannel(i);
-            if (!completed) continue;
-            vm.prank(aclProbe);
-            vm.expectRevert();
-            service.redactMessage(channelId, 1);
             return;
         }
     }

@@ -308,24 +308,6 @@ contract ConnectorManagerTest is ClprTestBase {
         service.removeConnector(channelId, cid, address(0x20));
     }
 
-    function test_removeConnector_succeedsAfterRedact() public {
-        _register(1 ether);
-        _setupChannelForInflightTest();
-
-        uint64 msgId = service.sendMessage(channelId, cid, abi.encodePacked(address(0xDEAD)), hex"01");
-
-        // Owner redacts the DATA message → inflight counter decremented so removeConnector can succeed
-        service.redactMessage(channelId, msgId);
-
-        // removeConnector must now succeed
-        address recipient = address(0x40);
-        vm.prank(admin);
-        service.removeConnector(channelId, cid, recipient);
-
-        assertFalse(service.hasConnector(channelId, cid));
-        assertEq(recipient.balance, 1 ether);
-    }
-
     function test_removeConnector_succeeds_afterInflightReplyProcessed() public {
         _register(1 ether);
         _setupChannelForInflightTest();

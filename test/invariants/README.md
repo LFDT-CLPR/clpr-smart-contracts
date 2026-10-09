@@ -82,7 +82,6 @@ Listed in `_targetHandlerMutators()` — **not** fuzzed: view getters, `syncPend
 | `collectPending`                                                   | Pull-payment when `pendingWithdrawals > 0`                        |
 | `collectPendingWhileDisabled`                                      | Same while kill switch off (sets INV-KILL ghosts)                 |
 | `probeReEnableWhenDisabled`                                        | Owner `setClprEnabled(true)` then `false` while disabled          |
-| `redactMessage`                                                    | Owner redacts a queued message id                                 |
 | `setVerifierRevert`                                                | Toggle mock verifier revert (**no** `reconcileEth`)               |
 | `setTightResourceCaps`                                             | Low `maxChannels` / `maxConnectors`                            |
 | `attemptCompleteAtChannelCap` / `attemptRegisterAtConnectorCap` | Exercise cap boundaries                                           |
@@ -146,7 +145,7 @@ Full `forge test` also runs `ClprStorageLayoutGuardTest` and unit tests.
 
 When kill switch is **off**, one mutating call per test (early return if enabled). Expect `ClprDisabled`:
 
-`invariant_aclKillSwitchWhenDisabled`, `_registerChannel`, `_registerEndpoint`, `_sendMessage`, `_submitBundle`, `_updateEconomic`, `_closeChannel`, `_completeChannel`, `_topUpBond`, `_removeEndpoint`, `_topUpConnectorStake`, `_removeConnector`, `_completeConnector`, `_updateLedger`, `_redactMessage`.
+`invariant_aclKillSwitchWhenDisabled`, `_registerChannel`, `_registerEndpoint`, `_sendMessage`, `_submitBundle`, `_updateEconomic`, `_closeChannel`, `_completeChannel`, `_topUpBond`, `_removeEndpoint`, `_topUpConnectorStake`, `_removeConnector`, `_completeConnector`, `_updateLedger`.
 
 When kill switch is **on** or regardless of switch — wrong caller probes using `aclProbe` (or `address(this)` where owner is required):
 
@@ -158,7 +157,6 @@ When kill switch is **on** or regardless of switch — wrong caller probes using
 | `invariant_aclUpdateLedgerRequiresOwner`              | any                                                      |
 | `invariant_aclCloseChannelRequiresOwner`           | any                                                      |
 | `invariant_aclRemoveConnectorRequiresAdmin`           | any                                                      |
-| `invariant_aclRedactMessageRequiresOwner`             | any                                                      |
 | `invariant_aclSubmitBundleRequiresRegisteredEndpoint` | `ClprEndpointNotRegistered` (only if kill switch **on**) |
 
 

@@ -12,7 +12,7 @@ import {BundleLogicTestBase} from "@test/logic/bundle-logic/BundleLogicTestBase.
 ///
 /// Key behavioral changes covered:
 ///  1. DATA messages on CLOSING/DRAINED channels are dispatched normally
-///     (no CHANNEL_CLOSED; Connector charged; real Response generated).
+///     (Connector charged; real Response generated).
 ///  2. Peer status CLOSED triggers local ACTIVE/PAUSED → CLOSING.
 ///  3. CLOSING → DRAINED fires when all outbound DATA messages are acked
 ///     (Response Messages for the peer's DATA may still be in-flight).
@@ -74,7 +74,7 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
 
     /// @notice A DATA message arriving on a CLOSING channel must be dispatched
     ///         to the application, generate a real Response Message, and charge the
-    ///         Connector — not generate a CHANNEL_CLOSED reply (spec §4.2).
+    ///         Connector.
     function test_dataMessage_onClosingChannel_dispatchedNormally() public {
         // Keep one outbound DATA message unacked so admin-close stays at CLOSING
         // rather than advancing immediately to DRAINED.
@@ -89,14 +89,11 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
         // The app must have been called.
         assertEq(app.getMessageCallCount(), 1, "application must be dispatched");
 
-        // A real Response Message (not CHANNEL_CLOSED) must be queued.
+        // A real Response Message must be queued.
         ClprTypes.MessageValue memory reply = service.getMessage(channelId, replyMsgId);
         assertTrue(reply.payload.length > 0, "reply must be queued");
         ClprTypes.DecodedReply memory decoded = ClprProtobuf.decodeReplyMessage(reply.payload);
         assertEq(decoded.messageId, 1, "reply is for inbound message 1");
-        assertTrue(
-            uint8(decoded.status) != uint8(ClprTypes.ReplyStatus.CHANNEL_CLOSED), "reply must NOT be CHANNEL_CLOSED"
-        );
         assertEq(uint8(decoded.status), uint8(ClprTypes.ReplyStatus.SUCCESS), "reply must be SUCCESS");
     }
 
@@ -135,9 +132,7 @@ contract BundleLogic_ClosingLogic is BundleLogicTestBase {
         ClprTypes.MessageValue memory reply = service.getMessage(channelId, replyMsgId);
         assertTrue(reply.payload.length > 0, "reply must be queued");
         ClprTypes.DecodedReply memory decoded = ClprProtobuf.decodeReplyMessage(reply.payload);
-        assertTrue(
-            uint8(decoded.status) != uint8(ClprTypes.ReplyStatus.CHANNEL_CLOSED), "reply must NOT be CHANNEL_CLOSED"
-        );
+        assertEq(uint8(decoded.status), uint8(ClprTypes.ReplyStatus.SUCCESS), "reply must be SUCCESS");
     }
 
     // ── Test 2: Peer status CLOSED triggers local ACTIVE → CLOSING ───────────

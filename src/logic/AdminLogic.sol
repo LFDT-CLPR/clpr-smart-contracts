@@ -76,18 +76,14 @@ contract AdminLogic is LogicModuleBase {
     // ── Kill switch ────────────────────────────────────────────────────────
 
     /// @notice Enable or disable all mutating operations on the service.
-    /// @dev Owner-only (via). Emits {ClprEnabledChanged}. When disabled, every mutating
+    /// @dev Owner-only (via onlyService). Emits {ClprEnabledChanged}. When disabled, every mutating
     ///      op (registerChannel, completeChannel, closeChannel,
-    ///      registerConnector, removeConnector, topUpConnectorStake,
+    ///      registerConnector, completeConnector, removeConnector, topUpConnectorStake,
     ///      registerEndpoint, addEndpoint, removeEndpoint, updateEndpointManifest,
-    ///      sendMessage, submitBundle, redactMessage,
+    ///      sendMessage, submitBundle,
     ///      updateLedgerConfiguration, updateEconomicConfiguration)
     ///      reverts with ClprDisabled(). Read-only views are not affected.
-    ///      Reverts with ClprNotInitialized() unless initialize() has already been
-    ///      called (calling with enabled = false pre-initialize would be a no-op
-    ///      anyway, since _clprEnabled starts false and initialize() is the only
-    ///      path to true).
-    /// @param enabled True to enable all mutating ops, false to disable them.
+    ///      Reverts with ClprNotInitialized() unless initialize() has already been called.
     function setClprEnabled(bool enabled) external onlyService whenInitialized {
         _clprEnabled = enabled;
         emit ClprEnabledChanged(enabled);

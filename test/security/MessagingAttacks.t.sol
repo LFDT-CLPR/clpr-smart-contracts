@@ -11,10 +11,10 @@ import {ReentrantConnector} from "@test/security/ReentrantConnector.sol";
 import {SecurityAssertions} from "@test/security/SecurityAssertions.sol";
 
 /// @notice Attacks on the outbound messaging path: reentrancy through a connector callback, and
-///         redaction used as a lever against the hash chain and against connector accounting.
+///         early eviction of a connector that still has messages in flight.
 /// @dev The individual send-path guards — connector authorization, queue depth, per-connector
-///      quota, the payload and wedge limits, redaction's window checks — are asserted on their own
-///      by `MessagingLogic.t.sol`. These tests chain them.
+///      quota, the payload and wedge limits — are asserted on their own by `MessagingLogic.t.sol`.
+///      These tests chain them.
 contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     ReentrantConnector internal attackerConnector;
     bytes32 internal attackerConnectorId;
@@ -44,7 +44,7 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// reentrant second send would run against half-applied queue accounting. This attacker
     /// bubbles the inner revert verbatim, so the assertion is the guard's own selector rather
     /// than a wrapper string.
-    /// @custom:matrix-row M6
+    /// @custom:matrix-row M5
     function test_connectorCannotReenterSendMessage() public {
         _registerAttackerConnector();
 
@@ -62,7 +62,7 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
     /// The attacker swallows the inner revert so the outer send completes. Exactly one message
     /// must be enqueued: if the reentrant call had partially applied, the queue or the
     /// connector's in-flight count would be ahead of the message count.
-    /// @custom:matrix-row M6
+    /// @custom:matrix-row M5
     function test_swallowedReentry_enqueuesExactlyOneMessage() public {
         _registerAttackerConnector();
 
@@ -82,66 +82,14 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         );
     }
 
-    /// Redaction cannot be used to break the running-hash chain the peer verifies against.
-    ///
-    /// Redaction rewrites a live outbound payload to `sha256(original)`. The peer has already
-    /// hashed the original into its chain, so the local `sentRunningHash` must not move — if it
-    /// did, every later bundle would mismatch and the channel would wedge permanently. This
-    /// chains redaction with the reply path: after redacting, the peer's reply for that very
-    /// message must still be accepted.
-    /// @custom:matrix-row M10
-    function test_redactionPreservesTheHashChainAndStillAcceptsTheReply() public {
-        bytes memory target = abi.encodePacked(address(connector));
-        service.sendMessage(channelId, connectorId, target, "secret");
-        service.sendMessage(channelId, connectorId, target, "public");
-
-        bytes32 sentHashBefore = service.getChannel(channelId).sentRunningHash;
-        bytes memory originalPayload = service.getMessage(channelId, 1).payload;
-        bytes32 msg1HashBefore = service.getMessage(channelId, 1).runningHashAfterProcessing;
-
-        service.redactMessage(channelId, 1);
-
-        // The chain is untouched: only the payload was replaced.
-        assertEq(service.getChannel(channelId).sentRunningHash, sentHashBefore, "sentRunningHash must not move");
-        assertEq(
-            service.getMessage(channelId, 1).runningHashAfterProcessing,
-            msg1HashBefore,
-            "the message's own chain entry must not move"
-        );
-        assertEq(
-            service.getMessage(channelId, 1).payload,
-            ClprProtobuf.encodeRedactedMessage(sha256(originalPayload)),
-            "payload must be replaced by the hash marker"
-        );
-
-        // Redaction is one-way.
-        vm.expectRevert(ClprTypes.ClprMessageAlreadyRedacted.selector);
-        service.redactMessage(channelId, 1);
-
-        // And the peer's reply for the redacted message is still accepted, in order.
-        bytes[] memory replies = new bytes[](2);
-        replies[0] = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
-        replies[1] = ClprProtobuf.encodeReplyMessage(2, ClprTypes.ReplyStatus.SUCCESS, hex"");
-        _armBundleAnchor(replies, 2, _runningHashThrough(replies, 2), 2);
-        vm.prank(attacker);
-        service.submitBundle(channelId, hex"00FF");
-
-        assertEq(
-            uint8(_localSyncData(channelId).status),
-            uint8(ClprTypes.ChannelStatus.ACTIVE),
-            "the channel must stay ACTIVE: redaction must not look like an ordering violation"
-        );
-        assertEq(service.getChannel(channelId).ackedMessageId, 2, "both messages must be acked");
-    }
-
     /// The in-flight guard on connector eviction cannot be bypassed, and the stake is
     /// returned exactly once.
     ///
     /// A connector with messages in flight must not be evictable: its stake is what backs the
-    /// slashing of those messages. Redaction decrements the in-flight counter, so it is the
-    /// obvious route to unlocking an eviction early. This chains the two and then attacks the
-    /// refund path, where a double-release would live.
-    /// @custom:matrix-row M11
+    /// slashing of those messages. Only the peer's reply decrements the in-flight counter, so this
+    /// chains the guard with the reply path and then attacks the refund path, where a
+    /// double-release would live.
+    /// @custom:matrix-row M9
     function test_inflightGuardCannotBeBypassed_andStakeIsReturnedOnce() public {
         bytes memory target = abi.encodePacked(address(connector));
         service.sendMessage(channelId, connectorId, target, "in flight");
@@ -158,8 +106,12 @@ contract MessagingAttacksTest is BundleLogicTestBase, SecurityAssertions {
         uint256 stake = service.getConnector(channelId, connectorId).lockedStake;
         assertGt(stake, 0, "precondition: connector has stake at risk");
 
-        // Redaction clears the in-flight count, which is what makes eviction legal.
-        service.redactMessage(channelId, 1);
+        // The peer's reply clears the in-flight count, which is what makes eviction legal.
+        bytes[] memory replies = new bytes[](1);
+        replies[0] = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
+        _armBundleAnchor(replies, 1, _runningHashThrough(replies, 1), 1);
+        vm.prank(attacker);
+        service.submitBundle(channelId, hex"00FF");
 
         uint256 balanceBefore = owner.balance;
         service.removeConnector(channelId, connectorId, owner);

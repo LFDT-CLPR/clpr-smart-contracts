@@ -8,18 +8,15 @@ import {ConnectorLib} from "@hiero-ledger/clpr/libraries/service/ConnectorLib.so
 import {LogicModuleBase} from "@hiero-ledger/clpr/logic/base/LogicModuleBase.sol";
 
 /// @title MessagingLogic
-/// @notice Outbound message queueing, redaction, and connector quota enforcement.
+/// @notice Outbound message queueing and connector quota enforcement.
 /// @dev Executed via delegatecall from ClprService. Bundle submission lives in
 ///      BundleLogic to keep this contract below the EIP-170 24 KB bytecode limit.
 contract MessagingLogic is LogicModuleBase {
     constructor() {}
 
     /// @notice Returns the stored message value for a given channel and message ID.
-    /// @dev Returns an empty struct for IDs outside the live window. Redacted messages
-    ///      return a struct whose payload is an encoded ClprRedactedMessage carrying
-    ///      SHA-256(original_payload).
-    /// @param _channelId The channel the message belongs to.
-    /// @param messageId The message sequence number.
+    /// @dev Zero-valued for an unsent ID and once the slot is pruned: a DATA message when its
+    ///      REPLY is processed, a CONTROL/REPLY message when the peer acknowledges it.
     function getMessage(bytes32 _channelId, uint64 messageId) external view returns (ClprTypes.MessageValue memory) {
         return _messageQueues[_channelId][messageId];
     }
@@ -110,46 +107,6 @@ contract MessagingLogic is LogicModuleBase {
 
         messageId =
             _enqueueDataMessage(_channelId, channel, connectorId, connectorId, targetApplication, sender, messageData);
-    }
-
-    // submitBundle moved to BundleLogic to reduce bytecode size.
-
-    /// @notice Replace the payload of a queued DATA message with a ClprRedactedMessage marker (owner-only via onlyService).
-    /// @dev The payload is replaced with `ClprRedactedMessage { message_hash: SHA-256(original_payload) }` so
-    ///      the destination chain can verify the running hash chain without receiving the original content.
-    ///      Decrements connector queue and in-flight counters so the connector can be removed after redaction.
-    ///      The message slot is retained to preserve sequence numbering and running hash continuity.
-    ///      Reverts if the message is not a DATA message, has already been redacted, or if `messageId` is
-    ///      outside the live window (ackedMessageId, nextMessageId).
-    ///      Emits {MessageRedacted}.
-    /// @param _channelId The channel the message belongs to.
-    /// @param messageId Sequence number of the message to redact.
-    function redactMessage(bytes32 _channelId, uint64 messageId) external onlyService whenEnabled {
-        if (!_channelExists[_channelId]) revert ClprTypes.ClprChannelNotFound();
-        ClprTypes.Channel storage channel = _channels[_channelId];
-        if (messageId <= channel.ackedMessageId || messageId >= channel.nextMessageId) {
-            revert ClprTypes.ClprInvalidMessageId();
-        }
-
-        ClprTypes.MessageValue storage msg_ = _messageQueues[_channelId][messageId];
-        (bool known, ClprTypes.MessageType mt) = ClprProtobuf.tryGetMessageType(msg_.payload);
-        if (known && mt == ClprTypes.MessageType.REDACTED) revert ClprTypes.ClprMessageAlreadyRedacted();
-        if (!known || mt != ClprTypes.MessageType.DATA) revert ClprTypes.ClprMessageNotRedactable();
-
-        ClprTypes.DecodedDataMessage memory decoded = ClprProtobuf.decodeDataMessage(msg_.payload);
-        bytes32 connKey = decoded.connectorId;
-        bytes32 inflightKey = keccak256(abi.encodePacked(_channelId, connKey));
-
-        if (_connectorQueueCounts[_channelId][connKey] > 0) {
-            _connectorQueueCounts[_channelId][connKey]--;
-        }
-        // Decrement inflight so removeConnector cannot be blocked by a redacted-but-uncounted message.
-        if (_connectorInflightCount[inflightKey] > 0) {
-            _connectorInflightCount[inflightKey]--;
-        }
-
-        msg_.payload = ClprProtobuf.encodeRedactedMessage(sha256(msg_.payload));
-        emit MessageRedacted(_channelId, messageId);
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────

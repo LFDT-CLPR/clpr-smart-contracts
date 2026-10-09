@@ -18,9 +18,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
         ClprTypes.ManifestUpdateEntry[] memory adds = new ClprTypes.ManifestUpdateEntry[](0);
         address[] memory removals = new address[](0);
 
-        string[8] memory labels = [
+        string[7] memory labels = [
             "closeChannel",
-            "redactMessage",
             "setClprEnabled",
             "initialize",
             "updateLedgerConfiguration",
@@ -29,9 +28,8 @@ contract AccessControlAttacksTest is SecurityTestBase {
             "updateEndpointManifest"
         ];
 
-        bytes[8] memory calls = [
+        bytes[7] memory calls = [
             abi.encodeCall(service.closeChannel, (channelId)),
-            abi.encodeCall(service.redactMessage, (channelId, 1)),
             abi.encodeCall(service.setClprEnabled, (false)),
             abi.encodeCall(service.initialize, (hex"1234", throttles, "", "", defaultEcon)),
             abi.encodeCall(service.updateLedgerConfiguration, (hex"1234", throttles, "", "")),

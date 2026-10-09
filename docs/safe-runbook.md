@@ -150,7 +150,6 @@ logic module, which then runs against `ClprService`'s storage.
 | `addEndpoint(...)`, `updateEndpointManifest(...)` | `AdminLogic` | Admit endpoints to the live manifest. |
 | `removeEndpoint(address)` | `AdminLogic` | Not `onlyOwner`: callable by the registrant or the owner. |
 | `closeChannel(bytes32)` | `ChannelLogic` | |
-| `redactMessage(bytes32,uint64)` | `MessagingLogic` | |
 | `transferOwnership(address)`, `renounceOwnership()` | `Ownable` on `ClprService` | Single-step, not `Ownable2Step`. A transfer to a wrong address, or a renounce, permanently removes every owner-only action, including the kill switch. |
 
 Every logic-module function in this table except `initialize` and

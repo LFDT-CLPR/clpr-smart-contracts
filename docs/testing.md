@@ -57,7 +57,7 @@ The tree mirrors `src/`. Key entry points:
 |---|---|
 | `integration/IntegrationMock.t.sol`, `integration/IntegrationQBFT.t.sol` | Full lifecycle over `IntegrationTestBase`: register-connector → sendMessage → submitBundle → closeChannel, against `MockClprVerifier` and against `QbftHeaderModeVerifier` with the committed Besu QBFT fixtures |
 | `logic/ChannelLogic.t.sol` | Channel commit/reveal (incl. pubkey-length and signature reverts); close/closing lifecycle; peer throttles and peer endpoint roster at `completeChannel`; `deriveChannelId` chain sorting |
-| `logic/MessagingLogic.t.sol` | `sendMessage` gating (queue, quota, peer payload limit, `maxSyncBytes` wedge guard, reentrancy, sender stamping); `redactMessage` |
+| `logic/MessagingLogic.t.sol` | `sendMessage` gating (queue, quota, peer payload limit, `maxSyncBytes` wedge guard, reentrancy, sender stamping) |
 | `logic/ConnectorLogic.t.sol` | Self-authenticating commit/reveal happy/sad paths; replay protection; in-flight removal guard; stake top-up |
 | `logic/AdminLogic.t.sol` | Endpoint registration and two-step admission, bonds, removal (`EndpointManagerTest`); ledger/economic config validation (`ClprService_Configuration`); kill switch; `collectPending` pull-payment |
 | `logic/ManifestLib.t.sol`, `logic/PeerEndpointManifest.t.sol` | `ManifestLib` branch coverage (batch removal, full manifest); peer-manifest caching at `completeChannel`, Step 1b manifest updates, truncation to `maxPeerEndpoints`, manifest commitment coherence |
@@ -257,8 +257,8 @@ that needs it; do not expose internals on `ClprService` itself.
 
 ## Coverage gaps to be aware of
 
-- Alternative lifecycle paths (multi-bundle drain, peer-initiated close,
-  redact-then-bundle) are tested as fragments across
+- Alternative lifecycle paths (multi-bundle drain, peer-initiated close) are
+  tested as fragments across
   `test/logic/bundle-logic/` and `test/libraries/service/bundle-lib/` rather
   than as whole scenarios.
 - Two tests are tagged `B8` and `B9`

@@ -167,12 +167,6 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
         _delegate(_BUNDLE_LOGIC);
     }
 
-    /// @notice Erase a queued message's payload. Owner-only.
-    /// @dev See MessagingLogic.redactMessage for full semantics.
-    function redactMessage(bytes32, uint64) external onlyOwner {
-        _delegate(_MESSAGING_LOGIC);
-    }
-
     /// @inheritdoc IClprService
     function getMessage(bytes32, uint64) external returns (ClprTypes.MessageValue memory) {
         _delegate(_MESSAGING_LOGIC);

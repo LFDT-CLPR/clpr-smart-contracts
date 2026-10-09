@@ -94,7 +94,7 @@ equal to that constant by hand.
 ## Public ABI dispatch table
 
 Every external function on `ClprService`. `IClprService` declares most of them
-but omits `closeChannel`, `redactMessage`, the two configuration updates, the
+but omits `closeChannel`, the two configuration updates, the
 counters (`channelCount`, `connectorCount`, `endpointCount`),
 `pendingCommitments`, `pendingConnectorCommitments`, `pendingWithdrawals` and
 `collectPending`.
@@ -105,7 +105,6 @@ counters (`channelCount`, `connectorCount`, `endpointCount`),
 | `deriveChannelId`, `getChannel`, `getPeerEndpointManifest`, `getPeerEndpointRoster`, `pendingCommitments`, `channelCount` | `ChannelLogic` | None (read) | `getPeerEndpointRoster` is a derived view built on the fly from the cached peer manifest (nothing is stored in that shape); prefer `getPeerEndpointManifest` |
 | `closeChannel` | `ChannelLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | ACTIVE/PAUSED → CLOSING, DRAINED → CLOSED, or purges a pending commitment through the reverse index |
 | `sendMessage` | `MessagingLogic` | `nonReentrant` + `onlyService` + `whenEnabled` | Authorised by the source connector (`IClprConnector.authorizeOutboundMessage`); stamps `msg.sender` as the sender |
-| `redactMessage` | `MessagingLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | DATA messages in the window `(ackedMessageId, nextMessageId)` only |
 | `getMessage`, `getQueueDepth` | `MessagingLogic` | None (read) | `getQueueDepth` returns `{queueDepth, maxQueueDepth}` with depth = `nextMessageId − ackedMessageId − 1` |
 | `submitBundle` | `BundleLogic` | `nonReentrant` + `onlyService` + `whenEnabled` | **Permissionless.** `msg.sender` is the bundle submitter and receives connector charges and slash proceeds. Endpoint registration does not gate it |
 | `registerConnector`, `completeConnector` (payable), `topUpConnectorStake` (payable) | `ConnectorLogic` | `onlyService` + `whenEnabled` | — |
@@ -197,10 +196,8 @@ Listed in **slot order**, as `storage-layout.json` pins them:
   `connectorContract`; `lockedStake` is the slashable bond held in the router.
 - **`MessageValue`** — protobuf `payload`, `runningHashAfterProcessing`, and
   `connectorIdForReply` (the connectorId of an outbound DATA message, so REPLY
-  processing can decrement counters and slash source-side even after redaction;
-  `bytes32(0)` for CONTROL/REPLY). Redaction replaces the payload with
-  `ClprRedactedMessage { message_hash: sha256(original) }` and keeps the slot,
-  its id and its `runningHashAfterProcessing`.
+  processing can decrement counters and slash source-side; `bytes32(0)` for
+  CONTROL/REPLY).
 - **`QueueMetadata`** — `{nextMessageId, sentRunningHash, receivedMessageId,
   receivedRunningHash, state, endpointManifestVersion}`, the peer's view of the
   channel as returned by `verifyBundle`. `BundleLib` reads `nextMessageId`
@@ -236,7 +233,7 @@ Listed in **slot order**, as `storage-layout.json` pins them:
 | `ConnectorLib` | `libraries/service/` — connector reveal, charge, slash, `_transferWithFallback` | yes |
 | `ManifestLib` | `libraries/service/` — local endpoint manifest: register / admit / remove / batch update, version bump, commitment sync | yes (`EndpointManifestState`) |
 | `EndpointValidation` | `libraries/service/` — validation of endpoint IP addresses and DER TLS certificates | no (pure) |
-| `ClprProtobuf` + `ClprProtobufHelpers` | `libraries/codec/` — hand-rolled proto codec for DATA / REPLY / CONTROL / REDACTED, `ClprBundleContent`, and the endpoint manifest. Decoders revert `TruncatedInput` / `VarintOverflow` on malformed input and `ClprUnknownWireField` on unknown fields | no (pure) |
+| `ClprProtobuf` + `ClprProtobufHelpers` | `libraries/codec/` — hand-rolled proto codec for DATA / REPLY / CONTROL, `ClprBundleContent`, and the endpoint manifest. Decoders revert `TruncatedInput` / `VarintOverflow` on malformed input and `ClprUnknownWireField` on unknown fields | no (pure) |
 | `ClprConfigHash` | `libraries/codec/` — digests behind `getLedgerConfigurationHash` and `getChannelPeerConfigHash` | no (pure) |
 | `BundleDecodeHelper` | `libraries/codec/` — a deployed **contract**, not a library: exposes `decodeData` / `decodeReply` / `decodeControl` as external calls so `BundleLib._dispatchMessages` can `try/catch` a decode | n/a |
 | `ECDSA` | `libraries/crypto/` — EIP-191 `ecrecover` check against the `keccak256(pubKey)`-derived address, for channel and connector reveals | no |

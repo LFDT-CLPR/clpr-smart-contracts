@@ -108,9 +108,9 @@ contract BundleLib_ReplyChargeTest is BundleLibTestBase {
 
     function test_reply_noCallbackTarget_noCharge() public {
         _registerTestConnector();
-        // A redacted slot has no recoverable sender, so no callback runs and nothing is charged.
-        _sendFromApp();
-        service.redactMessage(channelId, 1);
+        // An EOA sender has no onClprResponse to call, so no callback runs and nothing is charged.
+        vm.prank(address(0xBEEF));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"01020304");
         vm.txGasPrice(1 gwei);
         uint256 connectorBefore = address(connector).balance;
 

@@ -142,7 +142,6 @@ abstract contract ClprServiceStorage is ReentrancyGuardTransient {
     );
     event LedgerConfigurationUpdated(uint96 nanosSinceEpoch);
     event EconomicConfigurationUpdated();
-    event MessageRedacted(bytes32 indexed channelId, uint64 messageId);
     /// @dev Emitted when a message payload cannot be decoded during bundle dispatch.
     ///      The channel transitions to PAUSED; remaining messages in the bundle are skipped.
     event BundleParseFailed(bytes32 indexed channelId, uint64 receivedMessageId);

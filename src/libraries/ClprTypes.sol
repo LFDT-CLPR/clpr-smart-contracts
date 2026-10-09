@@ -26,19 +26,15 @@ library ClprTypes {
         SUCCESS,
         APPLICATION_ERROR,
         CONNECTOR_NOT_FOUND,
-        CONNECTOR_UNDERFUNDED,
-        REDACTED,
-        CHANNEL_CLOSED,
-        NOT_HANDLED
+        CONNECTOR_UNDERFUNDED
     }
 
     /// @notice CLPR wire message discriminator. Maps to the `oneof` field number in
-    ///         `clpr_message.proto` (field 1 = DATA, 2 = REPLY, 3 = CONTROL, 4 = REDACTED).
+    ///         `clpr_message.proto` (field 1 = DATA, 2 = REPLY, 3 = CONTROL).
     enum MessageType {
         DATA,
         REPLY,
-        CONTROL,
-        REDACTED
+        CONTROL
     }
 
     /// @notice Allowance, in bytes, for everything a single-message bundle adds on
@@ -119,18 +115,18 @@ library ClprTypes {
         uint64 ackedMessageId;
         uint64 receivedMessageId;
         /// @dev The messageId of the next outbound DATA message for which we expect a REPLY.
-        ///      Initialized to 1 at channel creation. Incremented past each matched (or
-        ///      redacted) DATA id as REPLYs arrive. Ensures cross-bundle ordering is enforced.
+        ///      Initialized to 1 at channel creation. Incremented past each matched DATA id as
+        ///      REPLYs arrive. Ensures cross-bundle ordering is enforced.
         uint64 nextExpectedReplyId;
         // Timestamps derived from proto Timestamp{seconds,nanos} stored as nanosSinceEpoch (uint96).
-        // NOTE: These no longer pack into a single 32-byte slot — each uint96 occupies 12 bytes.
+        // slot 3: peerConfigTimestamp (12) + lastConfigTimestamp (12) = 24 bytes
         uint96 peerConfigTimestamp;
         uint96 lastConfigTimestamp;
-        // slots 3–5: three bytes32 values
+        // slots 4–6: three bytes32 values
         bytes32 sentRunningHash;
         bytes32 receivedRunningHash;
         bytes32 ownershipCommitment;
-        // slot 6: salt for channel derivation validation
+        // slot 7: salt for channel derivation validation
         bytes32 salt;
         // dynamic-length fields (each slot holds a pointer)
         string chainId;
@@ -179,8 +175,7 @@ library ClprTypes {
         bytes payload; // protobuf-encoded ClprMessagePayload
         bytes32 runningHashAfterProcessing;
         /// @dev For outbound DATA messages: the connectorId, so REPLY processing can decrement the
-        ///      in-flight counter and perform source-side slashing even after the payload has been
-        ///      replaced with a ClprRedactedMessage marker. `bytes32(0)` for CONTROL/REPLY messages
+        ///      in-flight and quota counters and perform source-side slashing. `bytes32(0)` for CONTROL/REPLY messages
         ///      (a real connectorId is a keccak256 hash, so it can never collide with the zero sentinel).
         bytes32 connectorIdForReply;
     }
@@ -447,11 +442,6 @@ library ClprTypes {
     error ClprAckVerificationFailed();
     /// @notice An invariant violation was detected; indicates a contract bug.
     error ClprInternalStateCorruption();
-    /// @notice The message has already been redacted.
-    error ClprMessageAlreadyRedacted();
-
-    /// @notice Only Data Messages may be redacted; attempted on a non-DATA slot.
-    error ClprMessageNotRedactable();
     /// @notice A configuration parameter fails a protocol validity check.
     error ClprInvalidConfiguration();
     /// @notice msg.sender is already registered as an endpoint.
@@ -482,8 +472,6 @@ library ClprTypes {
     error ClprTransferFailed();
     /// @notice The pull-payment balance is zero; nothing to withdraw.
     error ClprNothingToCollect();
-    /// @notice The message id is outside the live (ackedMessageId, nextMessageId) window.
-    error ClprInvalidMessageId();
     /// @notice A chain identifier passed to _sortChains / deriveChannelId was empty.
     error ClprInvalidChainId();
     /// @notice An endpoint's IP address is not a valid numeric IPv4 or IPv6 address.

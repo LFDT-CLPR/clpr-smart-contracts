@@ -417,7 +417,7 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
         service.registerEndpoint{value: 0}(
             ClprTypes.Endpoint({ipAddress: "1.2.3.4", port: 1, tlsCertificate: "", accountId: hex"01"})
         );
-        uint64 mid = service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
+        service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
 
         // Now disable.
         service.setClprEnabled(false);
@@ -445,10 +445,6 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
         // submitBundle
         vm.expectRevert(ClprTypes.ClprDisabled.selector);
         service.submitBundle(channelId, hex"00");
-
-        // redactMessage
-        vm.expectRevert(ClprTypes.ClprDisabled.selector);
-        service.redactMessage(channelId, mid);
 
         // registerConnector
         vm.expectRevert(ClprTypes.ClprDisabled.selector);

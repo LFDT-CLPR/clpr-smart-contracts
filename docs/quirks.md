@@ -73,7 +73,7 @@ contract.
 These are **not interchangeable**. `ConnectorLib._connectorKey` produces the
 record key; the in-flight key is the same hash but inlined, and the quota key
 has no named helper. Both are inlined in `MessagingLogic` (`sendMessage` /
-`_enqueueDataMessage`, `redactMessage`) and `BundleLib._processReplyMessageDecoded`.
+`_enqueueDataMessage`) and `BundleLib._processReplyMessageDecoded`.
 The trap: in `sendMessage` the local variable named `connectorKey` holds the
 **quota** key, not `ConnectorLib._connectorKey`. Mixing them silently corrupts
 accounting.
@@ -88,21 +88,6 @@ payload's `sender` for the `onClprResponse` callback. The REPLY handler then
 deletes the slot.
 
 `_deleteAckedNonDataMessages` is named accurately. Don't generalize it.
-
-**Redaction interaction (DRIFT-REVIEW C-4 + C?-12).** `redactMessage`
-**replaces** the DATA payload with an encoded `ClprRedactedMessage` marker
-carrying `sha256(originalPayload)` — it does not zero it — and decrements both
-`_connectorQueueCounts` *and* `_connectorInflightCount`. The marker matters:
-REPLY processing branches on the stored payload decoding as `REDACTED` rather
-than `DATA`, which a zeroed slot would not produce. The original `connectorId`
-is preserved in `MessageValue.connectorIdForReply` at enqueue time and survives
-redaction. When the eventual REPLY arrives, `_processReplyMessageDecoded` uses
-`connectorIdForReply` to perform source-side slashing even though the original
-payload is gone; with no recoverable `sender`, it skips the `onClprResponse`
-callback. The in-flight counter is NOT decremented a second time by REPLY
-processing (only `redactMessage` decrements it for the redacted case). Once a
-connector's last in-flight message is redacted, `removeConnector` succeeds
-immediately because inflight = 0.
 
 ## In-memory `Channel` mutation
 
@@ -306,12 +291,6 @@ Slash proceeds also go to the submitter (with the pull-payment fallback).
 The owner is the fallback recipient for charge and slash transfers — meaning
 the protocol owner ends up holding ETH from any push-failures. Don't accumulate
 large balances on the owner address; they should be swept periodically.
-
-**Interaction with redaction (C-4):** `redactMessage` decrements both the
-queue counter (`_connectorQueueCounts`) and the in-flight counter
-(`_connectorInflightCount`) for the redacted DATA message. Because the
-in-flight counter reaches zero, `removeConnector` succeeds immediately after
-redaction and is not bricked by the outstanding slot.
 
 ## sendMessage stamps msg.sender — application-layer "from" claims are untrusted
 

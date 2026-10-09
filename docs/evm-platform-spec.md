@@ -175,7 +175,7 @@ The platform-agnostic spec's "CLPR Service admin" role is bound to OZ
 `Ownable` on the EVM. The owner address returned by `owner()` is the admin.
 
 `ClprService` applies `onlyOwner` on the router to `closeChannel`,
-`redactMessage`, `setClprEnabled`, `initialize`, `updateLedgerConfiguration`,
+`setClprEnabled`, `initialize`, `updateLedgerConfiguration`,
 `updateEconomicConfiguration`, `addEndpoint` and `updateEndpointManifest`.
 Logic modules, which run under DELEGATECALL, read the owner with
 `ClprServiceStorage._getOwner`, a raw `sload` of slot 38 (E-10).
@@ -220,8 +220,7 @@ connectorQuota = maxQueueDepth * connectorQueueQuotaPct / 100    // uint32 arith
   `_connectorQueueCounts[channelId][keccak256(connectorId)]`.
   `MessagingLogic._enqueueDataMessage` increments it. It is decremented when
   the peer's REPLY for the message is processed
-  (`BundleLib._processReplyMessageDecoded`) or when the owner redacts the
-  message (`MessagingLogic.redactMessage`).
+  (`BundleLib._processReplyMessageDecoded`).
 - `sendMessage` reverts `ClprQueueQuotaExceeded` when the count is already
   **at** the quota (`count >= quota`), so the last accepted message brings the
   count exactly to the quota.
@@ -314,7 +313,7 @@ the bundle.
 - an inbound DATA message whose charge fails (E-2);
 - an inbound REPLY with status `CONNECTOR_NOT_FOUND` or `CONNECTOR_UNDERFUNDED`
   for one of this ledger's DATA messages. This source-side slash applies to
-  the local connector that sent it, also when that message was redacted.
+  the local connector that sent it.
 
 Slash proceeds go to the bundle submitter via `_transferWithFallback` (see E-8).
 
@@ -591,15 +590,6 @@ On success, `receivedRunningHash` becomes the computed value, and
 bound to the proof only through this check: EVM-family verifiers do not prove
 payloads individually.
 
-**Redacted messages.** `MessagingLogic.redactMessage` replaces the stored
-payload with `ClprRedactedMessage { message_hash = sha256(original payload) }`
-and leaves `runningHashAfterProcessing` and `sentRunningHash` unchanged. The
-receiver's fold hashes every carried payload as `sha256(payload)`; it does not
-special-case the marker or substitute its `message_hash`. When the source is
-this EVM service, a bundle that carries the stored marker in place of a
-redacted message therefore does not reproduce the proven `sentRunningHash`, and
-reverts `ClprRunningHashMismatch`.
-
 ---
 
 ## E-12 — Wire encoding
@@ -616,9 +606,8 @@ message kind (`ClprProtobuf.getMessageType`):
 | Field | Kind | Body fields |
 |---|---|---|
 | 1 | DATA | `connector_id` 1 (bytes, exactly 32), `target_application` 2, `sender` 3, `message_data` 4 |
-| 2 | REPLY | `message_id` 1 (varint), `status` 2 (varint, `ReplyStatus` 0–6), `reply_data` 3 |
+| 2 | REPLY | `message_id` 1 (varint), `status` 2 (varint, `ReplyStatus` 0–3), `reply_data` 3 |
 | 3 | CONTROL | `config_update` 1 → `configuration` 1 → `ClprLedgerConfiguration` |
-| 4 | REDACTED | `message_hash` 1 (bytes, 32) |
 
 `ClprLedgerConfiguration` fields are `protocol_version` 1, `chain_id` 2,
 `service_address` 3, `timestamp` 4 (`{seconds 1, nanos 2}`), `throttles` 5,

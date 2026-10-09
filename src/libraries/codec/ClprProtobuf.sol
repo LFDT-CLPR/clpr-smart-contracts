@@ -36,7 +36,6 @@ library ClprProtobuf {
         if (fieldNumber == 1) return (true, ClprTypes.MessageType.DATA);
         if (fieldNumber == 2) return (true, ClprTypes.MessageType.REPLY);
         if (fieldNumber == 3) return (true, ClprTypes.MessageType.CONTROL);
-        if (fieldNumber == 4) return (true, ClprTypes.MessageType.REDACTED);
         return (false, ClprTypes.MessageType.DATA);
     }
 
@@ -114,14 +113,6 @@ library ClprProtobuf {
         bytes memory configUpdate = abi.encodePacked(PB.encodeFieldKey(1, 2), PB.encodeLengthDelimited(configMsg));
         bytes memory controlMsg = abi.encodePacked(PB.encodeFieldKey(1, 2), PB.encodeLengthDelimited(configUpdate));
         return abi.encodePacked(PB.encodeFieldKey(3, 2), PB.encodeLengthDelimited(controlMsg));
-    }
-
-    /// @notice Encode a REDACTED message as `ClprMessage { redacted: ClprRedactedMessage { message_hash: ... } }`.
-    /// @param messageHash SHA-256 of the original serialized payload.
-    /// @return Encoded protobuf bytes.
-    function encodeRedactedMessage(bytes32 messageHash) internal pure returns (bytes memory) {
-        bytes memory inner = PB.encodeBytesField(1, abi.encodePacked(messageHash));
-        return abi.encodePacked(PB.encodeFieldKey(4, 2), PB.encodeLengthDelimited(inner));
     }
 
     function _encodeThrottles(ClprTypes.Throttles memory t) internal pure returns (bytes memory) {

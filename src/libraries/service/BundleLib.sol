@@ -504,7 +504,7 @@ library BundleLib {
     ///
     ///      The check walks every inbound REPLY in order and verifies that its messageId
     ///      matches the current `nextExpectedReplyId`. After a match, `nextExpectedReplyId`
-    ///      is advanced past any non-DATA or redacted (zero-payload) outbound ids to the
+    ///      is advanced past any non-DATA or pruned (zero-payload) outbound ids to the
     ///      next live outbound DATA.
     ///
     ///      The walk starts at `ctx.messageStartIndex`, skipping the leading already-received
@@ -542,33 +542,28 @@ library BundleLib {
 
             uint64 replyMessageId = ClprProtobuf.decodeReplyMessage(messagePayloads[j]).messageId;
 
-            // A REPLY for an un-acked outbound message is a violation.
+            // A REPLY for an unsent outbound message is a violation.
             if (replyMessageId >= nextMessageId) return (OrderingOutcome.StructuralViolation, 0);
 
             // Backward/duplicate reply - violation.
             if (nextExpectedReplyId > replyMessageId) return (OrderingOutcome.StructuralViolation, 0);
 
-            // Advance past skipped live DATA messages.
+            // Every id between the cursor and this REPLY's must be non-DATA or pruned: a live
+            // DATA there means this REPLY arrived out of order.
             while (nextExpectedReplyId < replyMessageId) {
-                // If nextExpected points to a slot that still has a live DATA (non-redacted),
-                // that DATA is being skipped — ordering violation.
                 if (
                     nextExpectedReplyId < nextMessageId
                         && _isMessageValueOfTypeData(channelId, nextExpectedReplyId, _messageQueues)
                 ) {
                     return (OrderingOutcome.StructuralViolation, 0);
-                    // CONTROL/REPLY/redacted-DATA slots are skipped silently.
                 }
                 nextExpectedReplyId++;
             }
 
             // nextExpectedReplyId == replyId guaranteed here
-            // Advance past this id regardless of whether it was a live or redacted DATA.
             nextExpectedReplyId++;
-            // Skip forward past non-DATA or redacted slots to preload next expected.
             while (nextExpectedReplyId < nextMessageId) {
                 if (_isMessageValueOfTypeData(channelId, nextExpectedReplyId, _messageQueues)) break;
-                // Redacted or non-DATA slot; skip.
                 nextExpectedReplyId++;
             }
         }
@@ -582,15 +577,12 @@ library BundleLib {
 
         // After processing all inbound REPLYs, verify that every newly-acked outbound DATA
         // (ids in range [old nextExpectedReplyId ... newAckedMessageId]) has received its REPLY.
-        // If nextExpectedReplyId <= newAckedMessageId, scan forward for any live DATA that should
-        // have had a REPLY but didn't get one in this bundle.
         uint64 scanId = nextExpectedReplyId;
         while (scanId <= ctx.newAckedMessageId) {
             if (scanId < nextMessageId && _isMessageValueOfTypeData(channelId, scanId, _messageQueues)) {
                 // A live DATA message was acked but no REPLY arrived — awaiting reply, not malformed.
                 return (OrderingOutcome.AwaitingReply, 0);
             }
-            // Non-DATA slots (CONTROL/REPLY) are always skipped.
             scanId++;
         }
 
@@ -651,12 +643,10 @@ library BundleLib {
                         _pendingWithdrawals
                     );
                 } catch (bytes memory reason) {
-                    // An unknown field inside the DATA message is a protocol violation (version
-                    // resulting in rejection of the entire bundle.
-                    // Every OTHER decode failure (missing/garbled fields) stays a
-                    // per-message APPLICATION_ERROR reply, so the source application can react
-                    // (e.g. redact the malformed message) and the rest of the bundle processes.
-                    // Previous error is carried, its leading 4-byte selector is forwarded.
+                    // An unknown field inside the DATA message is a protocol violation, re-thrown
+                    // unchanged to reject the entire bundle. Every other decode failure
+                    // (missing/garbled fields) stays a per-message APPLICATION_ERROR reply, so the
+                    // source application can react and the rest of the bundle processes.
                     // forge-lint: disable-next-line(unsafe-typecast)
                     if (reason.length >= 4 && bytes4(reason) == ClprTypes.ClprUnknownWireField.selector) {
                         _revertWith(reason);
@@ -677,21 +667,14 @@ library BundleLib {
                     _connectorQueueCounts,
                     _pendingWithdrawals
                 );
-            } else if (msgType == ClprTypes.MessageType.REDACTED) {
-                // Destination receives a ClprRedactedMessage - generate a REDACTED reply
-                _enqueueReplyAndEmit(ctx, channel, receivedMsgId, ClprTypes.ReplyStatus.REDACTED, "", _messageQueues);
             } else {
                 // ClprTypes.MessageType.CONTROL
                 try helper.decodeControl(payload) returns (ClprTypes.DecodedControl memory decoded) {
                     _processControlMessageDecoded(ctx, decoded, channel);
                 } catch (bytes memory reason) {
-                    // An unknown ClprControlMessage oneof variant is a protocol violation, not a
-                    // malformed-payload hiccup: the spec requires rejecting the entire bundle
-                    // rather than degrading to a per-message skip, so re-throw and let it
-                    // propagate out of submitBundle instead of swallowing it below.
-                    // A custom error's identity is fully carried by its leading 4-byte selector,
-                    // so truncating `reason` to compare against `.selector` is the intended way
-                    // to identify which error was thrown
+                    // A protocol violation rejects the entire bundle rather than degrading to a
+                    // per-message skip: re-throw an unknown oneof variant, an unknown wire field,
+                    // or a CONTROL message that does not parse (truncated input, varint overflow).
                     if (reason.length >= 4) {
                         // forge-lint: disable-next-line(unsafe-typecast)
                         bytes4 selector = bytes4(reason);
@@ -699,7 +682,6 @@ library BundleLib {
                             revert ClprTypes.ClprBundleVerificationFailedOneOfVariant();
                         }
                         if (selector == ClprTypes.ClprUnknownWireField.selector) _revertWith(reason);
-                        // A CONTROL message that does not parse is a protocol violation and rejects the whole bundle.
                         if (
                             selector == ClprProtobufHelpers.TruncatedInput.selector
                                 || selector == ClprProtobufHelpers.VarintOverflow.selector
@@ -863,9 +845,8 @@ library BundleLib {
         if (!success) emit ConnectorInboundCallbackFailed(ctx.channelId, receivedMsgId);
     }
 
-    /// @dev Uses connectorIdForReply to slash even when the original DATA payload has been redacted.
-    ///      Charges the source connector for the gas the sender's onClprResponse callback used, plus
-    ///      margin, paid to the submitter.
+    /// @dev Charges the source connector for the gas the sender's onClprResponse callback used,
+    ///      plus margin, paid to the submitter.
     function _processReplyMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.DecodedReply memory reply,
@@ -876,35 +857,21 @@ library BundleLib {
         mapping(bytes32 => mapping(bytes32 => uint32)) storage _connectorQueueCounts,
         mapping(address => uint256) storage _pendingWithdrawals
     ) internal {
-        ClprTypes.MessageValue memory message = _messageQueues[ctx.channelId][reply.messageId];
+        bytes32 channelId = ctx.channelId;
+        ClprTypes.MessageValue memory message = _messageQueues[channelId][reply.messageId];
+        delete _messageQueues[channelId][reply.messageId];
 
-        // Delete original immediately (before callback). Note: channel state updates are batched
-        // in memory and persisted after all dispatches complete via _channels assignment.
-        delete _messageQueues[ctx.channelId][reply.messageId];
-
-        // connectorIdForReply holds the connectorId for every DATA original (redacted or not)
-        // and is bytes32(0) for CONTROL/REPLY messages
+        // connectorIdForReply holds the connectorId for every DATA original and is bytes32(0) for CONTROL/REPLY
         bytes32 connectorId = message.connectorIdForReply;
         if (connectorId == bytes32(0)) {
-            emit ReplyDelivered(ctx.channelId, reply.messageId, reply.status);
+            emit ReplyDelivered(channelId, reply.messageId, reply.status);
             return;
         }
 
-        // senderBytes stays empty for redacted DATA (payload is a ClprRedactedMessage marker); only recoverable from a live payload.
-        bytes memory senderBytes;
-        (, ClprTypes.MessageType msgType) = ClprProtobuf.tryGetMessageType(message.payload);
-        if (msgType == ClprTypes.MessageType.DATA) {
-            // Live (non-redacted) DATA: recover sender for the callback and decrement counters.
-            // Counters were already decremented at redactMessage time for redacted slots.
-            senderBytes = ClprProtobuf.decodeDataMessage(message.payload).sender;
-            bytes32 inflightKey = keccak256(abi.encodePacked(ctx.channelId, connectorId));
-            if (_connectorInflightCount[inflightKey] > 0) _connectorInflightCount[inflightKey]--;
-            if (_connectorQueueCounts[ctx.channelId][connectorId] > 0) {
-                _connectorQueueCounts[ctx.channelId][connectorId]--;
-            }
-        }
+        bytes memory senderBytes = ClprProtobuf.decodeDataMessage(message.payload).sender;
+        _connectorInflightCount[keccak256(abi.encodePacked(channelId, connectorId))]--;
+        _connectorQueueCounts[channelId][connectorId]--;
 
-        // Source-side slashing (fires even for redacted DATA)
         if (
             reply.status == ClprTypes.ReplyStatus.CONNECTOR_NOT_FOUND
                 || reply.status == ClprTypes.ReplyStatus.CONNECTOR_UNDERFUNDED
@@ -933,7 +900,7 @@ library BundleLib {
                 ctx.throttles.maxGasPerMessage,
                 abi.encodeCall(
                     IClprApplication.onClprResponse,
-                    (ctx.channelId, reply.messageId, uint8(reply.status), reply.messageReplyData)
+                    (channelId, reply.messageId, uint8(reply.status), reply.messageReplyData)
                 ),
                 false
             );
@@ -950,7 +917,7 @@ library BundleLib {
                 _connectorExists,
                 _pendingWithdrawals,
                 ctx.fallbackRecipient,
-                ctx.channelId,
+                channelId,
                 connectorId,
                 totalCharge,
                 ctx.bundleSubmitter,
@@ -958,7 +925,7 @@ library BundleLib {
             );
         }
 
-        emit ReplyDelivered(ctx.channelId, reply.messageId, reply.status);
+        emit ReplyDelivered(channelId, reply.messageId, reply.status);
     }
 
     // ── Internal: Helpers ──────────────────────────────────────────────────

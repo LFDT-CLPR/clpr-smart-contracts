@@ -692,28 +692,6 @@ contract ClprHandler is Test {
         }
     }
 
-    function redactMessage(uint256 channelIndexSeed, uint256 messageIdSeed) external reconcileEth {
-        if (_channels.length == 0) return;
-        uint256 idx = bound(channelIndexSeed, 0, _channels.length - 1);
-        TrackedChannel storage tracked = _channels[idx];
-        if (!tracked.completed) return;
-
-        ClprTypes.Channel memory channel;
-        try SERVICE.getChannel(tracked.channelId) returns (ClprTypes.Channel memory c) {
-            channel = c;
-        } catch {
-            return;
-        }
-        if (channel.status != ClprTypes.ChannelStatus.ACTIVE) return;
-        if (channel.nextMessageId <= 1) return;
-
-        uint64 messageId = uint64(bound(messageIdSeed, 1, channel.nextMessageId - 1));
-        vm.prank(OWNER);
-        try SERVICE.redactMessage(tracked.channelId, messageId) {
-            _resyncConnectorGhosts(tracked.channelId);
-        } catch {}
-    }
-
     function setVerifierRevert(uint256 seed) external {
         if (seed % 2 == 0) {
             VERIFIER.setShouldRevert(false, "");
@@ -1169,7 +1147,7 @@ contract ClprHandler is Test {
         return revertData.length >= 4 && bytes4(revertData) == ClprTypes.ClprDisabled.selector;
     }
 
-    /// @dev Resync inflight, quota, and locked stake from chain (covers slash, bundle ack, redact).
+    /// @dev Resync inflight, quota, and locked stake from chain (covers slash, bundle ack).
     function _syncConnectorGhostsFor(TrackedConnector storage tracked) internal {
         if (tracked.live && SERVICE.hasConnector(tracked.channelId, tracked.connectorId)) {
             ClprTypes.Connector memory onchain = SERVICE.getConnector(tracked.channelId, tracked.connectorId);

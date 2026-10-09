@@ -56,7 +56,7 @@ alone** — page co-signers early (see [Paging tree](#paging-tree)).
   | Channels | `registerChannel`, `completeChannel`, `closeChannel` |
   | Connectors | `registerConnector`, `completeConnector`, `removeConnector`, `topUpConnectorStake` |
   | Endpoints | `registerEndpoint`, `addEndpoint`, `removeEndpoint`, `updateEndpointManifest` |
-  | Messaging | `sendMessage`, `redactMessage` |
+  | Messaging | `sendMessage` |
   | Bundles | `submitBundle` |
   | Configuration | `updateLedgerConfiguration`, `updateEconomicConfiguration` |
 
