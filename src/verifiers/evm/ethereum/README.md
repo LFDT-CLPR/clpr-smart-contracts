@@ -3,7 +3,7 @@
 > **Source**: [EthMainnetVerifier.sol](./EthMainnetVerifier.sol)
 > **Base contract**: [ClprEvmBundleVerifier.sol](../common/ClprEvmBundleVerifier.sol)
 > **Interface**: [IClprVerifier.sol](../../../interfaces/IClprVerifier.sol)
-> **Gas report**: [GAS_REPORT.md](../GAS_REPORT.md)
+> **Gas report**: [GAS_REPORT.md](GAS_REPORT.md)
 
 ---
 
@@ -251,6 +251,30 @@ With `cBase = keccak256(abi.encode(channelId, 15))` (`_channels` base slot, `sto
 
 A count other than 5 or 6 reverts `InvalidStorageProofShape`.
 
+> **Notice: node-shape validation in the MPT walker was deliberately loosened.**
+>
+> `MerklePatriciaProof` no longer re-validates the structure of a node (17-item branch shape, node-is-a-list-filling-its-range). It relies on the `keccak256` binding of every node to the hash its parent commits to, and on every walked root being authenticated first (see below). This widens the gap between what the walker rejects and what a well-formed trie can contain.
+>
+> **Why.** The checks cost gas on every node of every account and storage proof, in every verifier that walks an MPT. Measured when this was introduced, against the previous implementation: Ethereum `verifyBundle` about 2.7k to 3.6k gas lower; QBFT header mode 674 lower per `verifyBundle`; QBFT contract mode up to 31.7k lower (about 1.3%) on the 51 to 52 rotation. Most of the saving comes from dropping the node-is-a-list check, whose locals enlarged the walk's stack frame. The removed checks could only fire on nodes a valid trie never produces, so they bought no soundness.
+>
+> **What changes for integrators.** A structurally invalid proof still reverts, but not always with `MPTInvalidNode`: depending on the shape it surfaces as another `MPT*` error or as `RlpCursorOutOfBounds`. A node with trailing bytes is not rejected up front and may be read under a different shape. Do not match on `MPTInvalidNode` to detect a malformed proof.
+
+**Branch-node shape check is partial.** [MerklePatriciaProof](../../../libraries/proof/evm/MerklePatriciaProof.sol) does not enforce the 17-item shape of a branch node. It parses items only up to the one the walk needs (the child at the key's next nibble, or item 16 for a fully consumed key), skipping earlier `0x80` / `0xa0` items by prefix byte. Consequences:
+
+- Items after the target are never read, so a branch with fewer or more than 17 items is accepted if its target child is well formed. When that child is empty, a strict walk reverts `MPTKeyAbsent` and a lenient walk reads zero, not `MPTInvalidNode`.
+- Only a terminal-value read (item 16) checks that the item ends the node.
+- A node is not checked to be a list that fills its byte range exactly, and its first two items are parsed without a separate bounds guard (`RlpCursor.head` still bounds every read). A string-wrapped node, or a node with trailing bytes, is not rejected up front; it fails on its contents (for example `MPTInvalidPathPrefix`) or is read under a different shape.
+- Non-canonical nodes cannot be forged: every node is bound by `keccak256` to the hash its parent (ultimately the state root) commits to, and nodes of a valid trie are well formed. The shape check was defence in depth, not a soundness requirement, and the partial walk saves gas on every branch.
+
+Why this is sound depends on where each root comes from. `MerklePatriciaProof` is reached only through `ClprEvmStateProof`, and every root it walks is authenticated first:
+
+| Walk | Root | Authenticated by, before the walk |
+|---|---|---|
+| Account trie | execution `stateRoot` | Ethereum: sync-committee BLS aggregate, then the SSZ branch into the attested `bodyRoot`. QBFT header mode: quorum of the listed set via `verifyRotationStep`. QBFT contract mode: `verifyQuorum` of the trusted set (hop headers and current header), which precedes `resolveSet`. Legacy `QBFTVerifier`: `_verifySeal`. |
+| Storage tries | `storageRoot` | Read from the proven account leaf, never from the proof. |
+
+The same library backs the QBFT verifiers. The behaviour is pinned by the `test_branchTarget_*` tests in `test/libraries/proof/evm/MerklePatriciaProof.t.sol`.
+
 ### Endpoint manifest
 
 In the 13-item shape, `_verifyEndpointManifest` proves the fixed, channel-independent slot **18** (`EndpointManifestState.commitment`: `_endpointManifest` base 17 + 1) against the same `storageRoot`. The preimage (item 12) must `keccak256` to the proven commitment (`ManifestCommitmentMismatch`), decode with `version >= 1` (`ManifestVersionZero`), and carry the channel's peer service address (`ManifestServiceAddressMismatch`). In the 11-item shape the verifier returns a version-0 manifest, which `BundleLib` treats as "no update".
@@ -274,11 +298,11 @@ On-chain **compression** is used only at a window advance, to rebuild the beacon
 
 | Metric | Gas |
 |---|---|
-| `aggregateVerifyComplement`, 342/512 (170 non-signers) | ~1.35M |
+| `aggregateVerifyComplement`, 342/512 (170 non-signers) | ~1.34M |
 | `aggregateVerifyComplement`, 512/512 | ~0.22M |
-| `syncCommitteeRootFromUncompressed`, 512 keys | ~1.19M |
+| `syncCommitteeRootFromUncompressed`, 512 keys | ~1.14M |
 
-End-to-end `submitBundle` costs are in [GAS_REPORT.md](../GAS_REPORT.md).
+End-to-end `submitBundle` costs are in [GAS_REPORT.md](GAS_REPORT.md).
 
 ---
 

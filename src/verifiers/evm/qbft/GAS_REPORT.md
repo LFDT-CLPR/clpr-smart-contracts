@@ -13,7 +13,7 @@ To be conservative where it matters and realistic where it doesn't:
 - **Synthetic, shallow tries** (built by `EvmMptBuilder`): the service-account proof is 2–3 nodes and the
   channel storage proofs a few nodes each. A dedicated Besu app chain holds orders of magnitude fewer
   accounts and slots than mainnet, so shallow tries reflect the deployment target; for mainnet-shaped
-  depth sensitivity see `src/verifiers/evm/GAS_REPORT.md` §4 — depth adds cost per node on every walk.
+  depth sensitivity see `../ethereum/GAS_REPORT.md` §4 — depth adds cost per node on every walk.
 - **Validator-array trie**: one length slot + one slot per validator; two-level branch structure above
   15 validators (3-node proofs per slot).
 - **Seals at exactly the quorum**: ⌈2N/3⌉ committed seals per header (34/35 at N=51/52), matching real
@@ -22,10 +22,9 @@ To be conservative where it matters and realistic where it doesn't:
 - **Calldata** is priced per EIP-2028 (4 gas per zero byte, 16 per non-zero) over the three
   `verifyBundle` arguments (proof, trust anchor, channel context).
 - **Service overhead** is not re-measured here: it is verifier-independent (see
-  `src/verifiers/evm/GAS_REPORT.md` §2), `overhead(N) ≈ 195,970 + 76,780·N` gas for N messages,
-  measured there as 107,585 for an ACK-only bundle. That figure is `submitBundle − verifyBundle`,
-  i.e. service-side dispatch and storage, which the MPT/RLP rewrite did not touch — so it stays
-  valid even though the ETH report's own MPT figures predate the rewrite. The totals below use it.
+  `../ethereum/GAS_REPORT.md` §2), `overhead(N) ≈ 208,500 + 76,719·N` gas for N messages,
+  measured there as 124,785 for an ACK-only bundle. That figure is `submitBundle − verifyBundle`,
+  i.e. service-side dispatch and storage. The totals below use it.
 
 All figures are post the MPT/RLP hot-path rewrite (`RlpCursor` + in-place `MerklePatriciaProof` walk,
 in-place validator-set sort, cursor-parsed trusted-set and storage-entry lists); before it, the
@@ -34,17 +33,17 @@ in-place validator-set sort, cursor-parsed trusted-set and storage-entry lists);
 ## 1. Full on-chain transaction cost
 
 **Execution** is the verifier call frame (`vm.lastCallGas().gasTotalUsed`). **Total** adds the
-ACK-only service overhead (107,585), the EIP-2028 calldata gas, and the 21,000 tx base.
+ACK-only service overhead (124,785), the EIP-2028 calldata gas, and the 21,000 tx base.
 
 | Scenario | Execution (verify) | Service overhead | Calldata | Tx base | **Total** |
 |---|---|---|---|---|---|
-| Header mode, steady state (1 validator) | 122,915 | 107,585 | 13,528 | 21,000 | **265,028** |
-| Contract mode, steady, 3 validators | 218,045 | 107,585 | 34,788 | 21,000 | **381,418** |
-| Contract mode, steady, 10 validators | 366,231 | 107,585 | 109,992 | 21,000 | **604,808** |
-| Contract mode, steady, 25 validators | 864,623 | 107,585 | 346,976 | 21,000 | **1,340,184** |
-| Contract mode, steady, 52 validators | 1,686,242 | 107,585 | 731,060 | 21,000 | **2,545,887** |
-| Contract mode, rotation 10 → 11 (1 hop) | 690,472 | 107,585 | 232,596 | 21,000 | **1,051,653** |
-| Contract mode, rotation 51 → 52 (1 hop) | 3,204,782 | 107,585 | 1,433,044 | 21,000 | **4,766,411** |
+| Header mode, steady state (1 validator) | 122,348 | 124,785 | 13,528 | 21,000 | **281,661** |
+| Contract mode, steady, 3 validators | 194,111 | 124,785 | 34,788 | 21,000 | **374,684** |
+| Contract mode, steady, 10 validators | 318,956 | 124,785 | 109,992 | 21,000 | **574,733** |
+| Contract mode, steady, 25 validators | 671,421 | 124,785 | 346,976 | 21,000 | **1,164,182** |
+| Contract mode, steady, 52 validators | 1,295,071 | 124,785 | 731,060 | 21,000 | **2,171,916** |
+| Contract mode, rotation 10 → 11 (1 hop) | 596,889 | 124,785 | 232,596 | 21,000 | **975,270** |
+| Contract mode, rotation 51 → 52 (1 hop) | 2,428,340 | 124,785 | 1,433,044 | 21,000 | **4,007,169** |
 
 Header mode lets a relay omit the trusted-set list when no rotation is crossed
 (`qbft-header-mode.md` §5): the verifier then sorts and hashes the current header's own list against
@@ -53,16 +52,16 @@ same synthetic steady state as the rows above:
 
 | Validators | Execution (omitted) | Δ execution | Δ proof bytes | Δ calldata gas | **Total (omitted)** |
 |---|---|---|---|---|---|
-| 3 | 133,375 | −6,572 | −65 B | −1,016 | **276,864** |
-| 10 | 188,612 | −16,091 | −212 B | −3,356 | **339,753** |
-| 25 | 309,705 | −44,584 | −529 B | −8,404 | **476,574** |
-| 52 | 571,459 | −129,567 | −1,096 B | −17,428 | **766,516** |
+| 3 | 132,808 | −6,572 | −65 B | −1,016 | **293,497** |
+| 10 | 188,050 | −16,092 | −212 B | −3,356 | **356,391** |
+| 25 | 309,152 | −44,586 | −529 B | −8,404 | **493,221** |
+| 52 | 570,922 | −129,571 | −1,096 B | −17,428 | **783,179** |
 
 The saving grows faster than linearly (the omitted work includes an O(N²) insertion sort of the
 submitted list) and is ~16% of the total at 52 validators. Relays should send `0xc0` whenever the
 hop list is empty.
 
-The worst case above (a 51 → 52 rotation, ~4.8M) is roughly a sixth of a 30M block. Each additional
+The worst case above (a 51 → 52 rotation, ~4.0M) is roughly an eighth of a 30M block. Each additional
 hop crossed in one bundle adds approximately one hop-quorum + one hop-resolveSet (§3) plus its share
 of calldata.
 
@@ -77,7 +76,7 @@ roughly 1.7M total at 100 validators and ~4M at the 256 cap. The synthetic build
 validators), so treat these as estimates and measure on the target chain's block gas limit.
 
 `verifyConfig` (contract mode, 3 validators, channel setup — runs once per channel, via
-`completeChannel` rather than `submitBundle`): **183,120** execution + 23,156 calldata gas over a
+`completeChannel` rather than `submitBundle`): **165,919** execution + 23,156 calldata gas over a
 1,955-byte config proof. Header mode (3 validators): **107,457** execution.
 
 ## 2. Why contract mode scales with the validator-set size
@@ -89,15 +88,15 @@ detection is exactly this harvest; there is no cheaper "nothing changed" path.
 
 | Validators | Execution | Δ vs previous row | Proof bytes | Calldata gas |
 |---|---|---|---|---|
-| 3 | 218,045 | — | 2,802 B | 34,788 |
-| 10 | 366,231 | +21.2k/validator | 7,503 B | 109,992 |
-| 25 | 864,623 | +33.2k/validator | 22,367 B | 346,976 |
-| 52 | 1,686,242 | +30.4k/validator | 46,493 B | 731,060 |
+| 3 | 194,111 | — | 2,802 B | 34,788 |
+| 10 | 318,956 | +17.8k/validator | 7,503 B | 109,992 |
+| 25 | 671,421 | +23.5k/validator | 22,367 B | 346,976 |
+| 52 | 1,295,071 | +23.1k/validator | 46,493 B | 731,060 |
 
 The per-validator marginal cost grows with the set because each validator adds (a) one storage-slot
 MPT walk in `resolveSet`, (b) its share of quorum `ecrecover`s (⌈2N/3⌉ seals per verified header),
 and (c) ~900 B of proof calldata; the two-level array trie above 15 validators also makes each slot
-proof one node deeper. Calldata grows linearly and at 52 validators is already over 40% of the
+proof one node deeper. Calldata grows linearly and at 52 validators is already over 50% of the
 execution cost.
 
 ## 2a. How header mode scales with the validator-set size
@@ -110,23 +109,22 @@ plus the `equals` comparison between them.
 
 | Validators | Seals | Execution | Δ vs previous row | Proof bytes | Calldata gas |
 |---|---|---|---|---|---|
-| 1 | 1 | 122,915 | — | 1,318 B | 13,528 |
-| 3 | 2 | 139,947 | +8.5k/validator | 1,472 B | 15,920 |
-| 10 | 7 | 204,703 | +9.3k/validator | 2,104 B | 25,912 |
-| 25 | 17 | 354,289 | +10.0k/validator | 3,407 B | 46,688 |
-| 52 | 35 | 701,026 | +12.8k/validator | 5,747 B | 83,900 |
+| 1 | 1 | 122,348 | — | 1,318 B | 13,528 |
+| 3 | 2 | 139,380 | +8.5k/validator | 1,472 B | 15,920 |
+| 10 | 7 | 204,142 | +9.3k/validator | 2,104 B | 25,912 |
+| 25 | 17 | 353,738 | +10.0k/validator | 3,407 B | 46,688 |
+| 52 | 35 | 700,493 | +12.8k/validator | 5,747 B | 83,900 |
 
 Roughly ⅔ of a seal (~10k each, so ~6.7k) per added validator is the floor; the rest of the marginal
 cost is the two list sorts, which is why the per-validator term drifts upward with the set. Each
 validator adds ~87 B of proof (20 B in the header list, 20 B in the trusted list, and ⅔ of a 65-byte
-seal), about 1.4k calldata gas. At 52 validators header mode runs at ~36% of contract mode's total
-(913,511 vs 2,545,887): the ~1.15M `resolveSet` harvest and its ~650k of slot-proof calldata are what
+seal), about 1.4k calldata gas. At 52 validators header mode runs at ~43% of contract mode's total
+(930,178 vs 2,171,916): the ~0.76M `resolveSet` harvest and its ~650k of slot-proof calldata are what
 header mode does not pay.
 
 The 1-validator row is the single-node shape in `GasUsage.t.sol` (a 1-seal header built by
 `_buildSealedCurrentHeader`); the 3–52 rows come from `QbftHeaderModeProofBuilders._steadyScenario`
-and were measured on the header-mode branch, where the contract-mode rows of §1 re-measure ~0.2%
-lower than printed (they are left as originally recorded). All header-mode figures are post the
+and share one measurement run with the contract-mode rows of §1. All header-mode figures are post the
 single `extraData` decode per header: one `ClprQbftSeal.decodeHeader` now serves both the validator
 list and the seal check, where each header used to be copied and RLP-split twice. That took roughly
 9–10k gas off every header-mode verification, per header and per hop, independent of the set size.
@@ -142,19 +140,19 @@ channel/service-account proofs sit in the remainder.
 
 | Step | Gas | Share |
 |---|---|---|
-| Open set commitment (sort + hash 51 members) | 83,330 | 2.6% |
-| Hop quorum (34 `ecrecover` seals) | 335,849 | 10.5% |
-| **Hop `resolveSet` (52 slot proofs)** | **1,146,032** | **35.8%** |
-| Current-header quorum (35 `ecrecover` seals) | 346,877 | 10.8% |
-| **Final `resolveSet` (52 slot proofs)** | **1,152,363** | **36.0%** |
-| Measured steps sum | 3,064,451 | 95.6% |
-| Remainder (payload decode, trusted-set parse, service account proof, channel slots) | 140,331 | 4.4% |
-| **Full `verifyBundle`** | **3,204,782** |  |
+| Open set commitment (sort + hash 51 members) | 83,330 | 3.4% |
+| Hop quorum (34 `ecrecover` seals) | 333,254 | 13.7% |
+| **Hop `resolveSet` (52 slot proofs)** | **762,759** | **31.4%** |
+| Current-header quorum (35 `ecrecover` seals) | 344,208 | 14.2% |
+| **Final `resolveSet` (52 slot proofs)** | **766,053** | **31.5%** |
+| Measured steps sum | 2,289,604 | 94.3% |
+| Remainder (payload decode, trusted-set parse, service account proof, channel slots) | 138,736 | 5.7% |
+| **Full `verifyBundle`** | **2,428,340** |  |
 
 The two `resolveSet` harvests — one under the hop's state root, one under the current block's — are
-~72% of the rotation. A quorum check costs ~10k gas per seal (`ecrecover` + the sealing-digest keccak
+~63% of the rotation. A quorum check costs ~10k gas per seal (`ecrecover` + the sealing-digest keccak
 and header decode amortized), so seals are a minor term next to the array proofs. A steady-state
-bundle at the same set size drops the hop pair and keeps one harvest, which is why it runs at ~1.7M
+bundle at the same set size drops the hop pair and keeps one harvest, which is why it runs at ~1.3M
 (§2).
 
 ## Test infrastructure

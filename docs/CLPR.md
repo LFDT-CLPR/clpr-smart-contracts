@@ -80,7 +80,7 @@ layout, proof shape, verification steps, reverts, library map.
 | Hiero | `src/verifiers/hiero/HieroVerifier.sol` | [`hiero/hiero-verifier.md`](../src/verifiers/hiero/hiero-verifier.md) |
 | Avalanche (mock) | `src/verifiers/evm/avalanche/MockAvalancheVerifier.sol` | — test harness only, no cryptographic verification |
 
-Gas measurements live beside the verifiers: [`evm/GAS_REPORT.md`](../src/verifiers/evm/GAS_REPORT.md),
+Gas measurements live beside the verifiers: [`evm/GAS_REPORT.md`](../src/verifiers/evm/ethereum/GAS_REPORT.md),
 [`evm/qbft/GAS_REPORT.md`](../src/verifiers/evm/qbft/GAS_REPORT.md),
 [`hiero/GAS_REPORT.md`](../src/verifiers/hiero/GAS_REPORT.md).
 

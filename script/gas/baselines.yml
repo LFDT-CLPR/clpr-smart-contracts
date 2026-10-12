@@ -34,15 +34,29 @@ log_benchmarks:
       "BLS aggregateVerifyComplement 512 (0 nonP)": 218662
       "SSZ syncCommitteeRootFromUncompressed 512": 1136563
 
+  - name: Ethereum mainnet verifier (verifyBundle / submitBundle by message count)
+    match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
+    metrics:
+      "verifyBundle, ACK-only (N=0)": 464003
+      "verifyBundle, N = 1": 488450
+      "verifyBundle, N = 2": 494227
+      "verifyBundle, N = 5": 505004
+      "verifyBundle, N = 10": 525279
+      "submitBundle TOTAL, ACK-only (N=0)": 588900
+      "submitBundle TOTAL, N = 1": 773754
+      "submitBundle TOTAL, N = 2": 856060
+      "submitBundle TOTAL, N = 5": 1096551
+      "submitBundle TOTAL, N = 10": 1502823
+
   - name: Tempo verifier (BLS hot paths and full calls)
     match_path: test/verifiers/tempo/TempoGasReport.t.sol
     metrics:
       "hashToG1": 26559
       "verifyMinSig (hashToG1 + pairing)": 131765
       "certified header, mainnet tip": 191961
-      "verifyBundle steady state": 229289
-      "verifyBundle, 1 rotation": 417228
-      "verifyBundle, 2 rotations": 603624
+      "verifyBundle steady state": 228405
+      "verifyBundle, 1 rotation": 416344
+      "verifyBundle, 2 rotations": 602740
       "verifyConfig": 219523
 
 # End-to-end function gas from `forge test --gas-report`, keyed by contract +
@@ -74,19 +88,19 @@ gas_report_benchmarks:
     contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: min
-    baseline: 123232
+    baseline: 122348
   - name: QbftHeaderModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: median
-    baseline: 365095
+    baseline: 364211
   - name: QbftHeaderModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
     function: verifyBundle
     column: max
-    baseline: 1233252
+    baseline: 1232368
   - name: QbftHeaderModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
@@ -99,38 +113,51 @@ gas_report_benchmarks:
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: min
-    baseline: 218259
+    baseline: 194111
   - name: QbftContractModeVerifier.verifyBundle (rotation 10 to 11)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: median
-    baseline: 690010
+    baseline: 596889
   - name: QbftContractModeVerifier.verifyBundle (rotation 51 to 52)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyBundle
     column: max
-    baseline: 3202023
+    baseline: 2428340
   - name: QbftContractModeVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
     contract: QbftContractModeVerifier
     function: verifyConfig
     column: min
-    baseline: 182930
+    baseline: 165919
+  # Ethereum mainnet
+  - name: EthMainnetVerifier.verifyBundle (cheapest bundle)
+    match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
+    contract: EthMainnetVerifier
+    function: verifyBundle
+    column: min
+    baseline: 413178
+  - name: EthMainnetVerifier.verifyBundle (rotation)
+    match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
+    contract: EthMainnetVerifier
+    function: verifyBundle
+    column: max
+    baseline: 4423069
   # Tempo, calling verifier directly
   - name: TempoVerifier.verifyBundle (steady state)
     match_path: test/verifiers/tempo/TempoGasUsage.t.sol
     contract: TempoVerifier
     function: verifyBundle
     column: min
-    baseline: 229289
+    baseline: 228405
   - name: TempoVerifier.verifyBundle (1 rotation)
     match_path: test/verifiers/tempo/TempoGasUsage.t.sol
     contract: TempoVerifier
     function: verifyBundle
     column: max
-    baseline: 417228
+    baseline: 416344
   - name: TempoVerifier.verifyConfig (success-only path)
     match_path: test/verifiers/tempo/TempoGasUsage.t.sol
     contract: TempoVerifier

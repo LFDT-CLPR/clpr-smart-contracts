@@ -25,7 +25,7 @@ FOUNDRY_PROFILE=test forge test --match-path test/verifiers/hiero/HieroGasReport
   `verifyBundle` arguments: proof 83,644, trust anchor 512, empty channel context 0. It is not priced
   over the ABI-encoded `submitBundle` payload.
 - **Service overhead** is not re-measured here. It does not depend on the verifier; the figure used is
-  the N = 1 value from `src/verifiers/evm/GAS_REPORT.md` §2, **284,416**
+  the N = 1 value from `../evm/ethereum/GAS_REPORT.md` §2, **284,416**
   (`overhead(N) ≈ 207,640 + 76,775·N`). `src/verifiers/evm/qbft/GAS_REPORT.md` quotes a different fit
   (`195,970 + 76,780·N`, 107,585 ACK-only); the two need reconciling.
 - **EVM target**: `osaka` (EIP-2537 BLS12-381 precompiles, EIP-7883 MODEXP pricing), per `foundry.toml`.
@@ -78,7 +78,7 @@ What this shows:
   91k gas per hash. Together the two Merkle walks cost ≈ 2.57M, 57% of steady-state execution.
   Each extra message leaf in a bundle adds another path of this size, so the per-message verifier
   cost is ≈ 1.2M. This is unlike the EVM verifiers, where N adds about 4k per message
-  (`src/verifiers/evm/GAS_REPORT.md` §2). This fixture has a single message, so that per-message
+  (`../evm/ethereum/GAS_REPORT.md` §2). This fixture has a single message, so that per-message
   figure is an extrapolation.
 - **hinTS is ≈ 0.9M and does not depend on bundle size.** Its per-step cost is in §3.
 - **Decode, glue and remainder together are under 5%.**

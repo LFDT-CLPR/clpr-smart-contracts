@@ -55,6 +55,7 @@ library MerklePatriciaProof {
         pure
         returns (uint256, uint256)
     {
+        // Phase 1: open the proof container.
         (uint256 cur, uint256 listLen, bool isList) = RlpCursor.head(itemPtr, itemEnd);
         uint256 end;
         unchecked {
@@ -68,6 +69,7 @@ library MerklePatriciaProof {
         uint256 keyIdx = 0; // nibble cursor into keyHash (0..64)
 
         while (cur < end) {
+            // Phase 2: read the next node and check it against the hash committed by its parent.
             uint256 nodePtr;
             uint256 nodeEnd;
             {
@@ -83,12 +85,7 @@ library MerklePatriciaProof {
                 if (RlpCursor.keccakOf(nodePtr, nodeLen) != expectedHash) revert MPTInvalidHashRef();
             }
 
-            (uint256 payloadPtr, uint256 payloadLen, bool nodeIsList) = RlpCursor.head(nodePtr, nodeEnd);
-            uint256 afterPayload;
-            unchecked {
-                afterPayload = payloadPtr + payloadLen;
-            }
-            if (!nodeIsList || afterPayload != nodeEnd) revert MPTInvalidNode();
+            (uint256 payloadPtr,,) = RlpCursor.head(nodePtr, nodeEnd);
 
             // Every node kind has at least two items; parse both up front.
             (uint256 aPtr, uint256 aLen, bool aIsList) = RlpCursor.head(payloadPtr, nodeEnd);
@@ -96,7 +93,6 @@ library MerklePatriciaProof {
             unchecked {
                 bStart = aPtr + aLen;
             }
-            if (bStart >= nodeEnd) revert MPTInvalidNode();
             (uint256 bPtr, uint256 bLen, bool bIsList) = RlpCursor.head(bStart, nodeEnd);
             uint256 afterB;
             unchecked {
@@ -104,7 +100,7 @@ library MerklePatriciaProof {
             }
 
             if (afterB == nodeEnd) {
-                // 2-item node: leaf or extension. Item 0 is the compact-encoded path.
+                // Phase 3: 2-item node, leaf or extension. Item 0 is the compact-encoded path.
                 if (aIsList) revert MPTInvalidNode();
                 (bool isLeaf, uint256 pathNibbles, uint256 shiftBits) = _decodePathPrefix(aPtr, aLen);
                 if (
@@ -128,15 +124,17 @@ library MerklePatriciaProof {
                 if (bIsList || bLen != 32) revert MPTInlineNodeUnsupported();
                 expectedHash = RlpCursor.word(bPtr);
             } else {
-                // Branch node: exactly 17 items. Walk them once, capturing the target — the
-                // child at the key's next nibble, or item 16 (the terminal value) when the
-                // key is fully consumed.
+                // Phase 4: branch node. The target is the child at the key's next nibble, or item 16 (the
+                // terminal value) when the key is fully consumed.
                 uint256 target = keyIdx >= 64 ? 16 : _nibAt(keyHash, keyIdx);
-                // Items 0 and 1 are already parsed above; the helper walks 2..16 (and enforces the
-                // 17-item shape), then the target is taken from whichever source holds it.
-                (uint256 tStart, uint256 tPtr, uint256 tLen, bool tIsList) = _branchTarget(afterB, nodeEnd, target);
-                if (target == 0) (tStart, tPtr, tLen, tIsList) = (payloadPtr, aPtr, aLen, aIsList);
-                else if (target == 1) (tStart, tPtr, tLen, tIsList) = (bStart, bPtr, bLen, bIsList);
+                // Items 0 and 1 are already parsed; the helper walks from item 2 for any later target.
+                uint256 tStart;
+                uint256 tPtr;
+                uint256 tLen;
+                bool tIsList;
+                if (target == 0) (tPtr, tLen, tIsList) = (aPtr, aLen, aIsList);
+                else if (target == 1) (tPtr, tLen, tIsList) = (bPtr, bLen, bIsList);
+                else (tStart, tPtr, tLen, tIsList) = _branchTarget(afterB, nodeEnd, target);
 
                 if (tIsList) revert MPTInlineNodeUnsupported();
                 if (tLen == 0) {
@@ -160,26 +158,37 @@ library MerklePatriciaProof {
 
     // ── internal helpers ───────────────────────────────────────────────────────
 
-    /// @dev Walk branch items 2..16 starting at `afterItem1` and capture item `target` when it is
-    ///      among them. Reverts unless exactly 17 items fill the node (the caller parsed items 0
-    ///      and 1). For `target < 2` the returns stay zero and the caller substitutes its own
-    ///      already-parsed item; for `target >= 2` the loop assigns them or reverts.
+    /// @dev Walk branch items from item 2 at `afterItem1` up to item `target` (2..16) and return it; the caller
+    ///      has parsed items 0 and 1.
+    ///      Items past the target are not parsed. Item 16 must still end the node, since
+    ///      the caller returns `[tStart, nodeEnd)` as its value range.
+    ///      Items before the target are skipped by prefix byte alone when they are `0x80` (empty) or
+    ///      `0xa0` (32-byte hash); an overshooting skip is caught by the bound check on the next read.
     function _branchTarget(uint256 afterItem1, uint256 nodeEnd, uint256 target)
         private
         pure
         returns (uint256 tStart, uint256 tPtr, uint256 tLen, bool tIsList)
     {
         uint256 c = afterItem1;
-        for (uint256 k = 2; k < 17;) {
+        for (uint256 k = 2; k < target;) {
             if (c >= nodeEnd) revert MPTInvalidNode();
-            (uint256 iPtr, uint256 iLen, bool iIsList) = RlpCursor.head(c, nodeEnd);
-            if (k == target) (tStart, tPtr, tLen, tIsList) = (c, iPtr, iLen, iIsList);
+            uint256 prefix = RlpCursor.byteAt(c);
             unchecked {
-                c = iPtr + iLen;
+                if (prefix == 0x80) {
+                    c += 1;
+                } else if (prefix == 0xa0) {
+                    c += 33;
+                } else {
+                    (uint256 iPtr, uint256 iLen,) = RlpCursor.head(c, nodeEnd);
+                    c = iPtr + iLen;
+                }
                 k++;
             }
         }
-        if (c != nodeEnd) revert MPTInvalidNode();
+        if (c >= nodeEnd) revert MPTInvalidNode();
+        (tPtr, tLen, tIsList) = RlpCursor.head(c, nodeEnd);
+        if (target == 16 && tPtr + tLen != nodeEnd) revert MPTInvalidNode();
+        tStart = c;
     }
 
     /// @dev Returns the nibble at position `i` within a 32-byte hash (0..63).
