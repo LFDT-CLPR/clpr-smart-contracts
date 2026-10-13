@@ -99,9 +99,11 @@ contract HieroVerifier is IClprVerifier {
 
         // Step 3: TSS aggregate-signature check. `trustAnchor` is the ledger ID or
         // keccak256(hintsVk) ‖ WRAPS step; the anchor is reported only when the proof's WRAPS
-        // step is later than the stored one.
+        // step is later than the stored one. TSSVerifier skips the Poseidon hash only on a
+        // 32-byte keccak256(hintsVk) hint, so it gets the VK-hash half of a stored anchor.
+        bytes calldata vkHint = trustAnchor.length == VK_ANCHOR_LEN ? trustAnchor[:32] : trustAnchor;
         bool tssValid;
-        (tssValid, newTrustAnchor) = TSS_VERIFIER.verifyTss(ledgerId, sp.signature, blockRootHash, trustAnchor);
+        (tssValid, newTrustAnchor) = TSS_VERIFIER.verifyTss(ledgerId, sp.signature, blockRootHash, vkHint);
         if (!tssValid) revert ClprHieroTssVerificationFailed();
         newTrustAnchor = _advancedAnchor(trustAnchor, newTrustAnchor, sp.signature);
 

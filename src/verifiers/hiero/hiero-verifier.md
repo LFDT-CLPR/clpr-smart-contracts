@@ -26,7 +26,7 @@ flowchart LR
 
 The block root is computed from the first state-item path, and the TSS signature must verify over that root before any leaf is decoded. *Deep dive: the state proof and Merkle paths* lists which leaves are re-rooted against it.
 
-`ledgerId` is the verifier's only identity anchor. The `newTrustAnchor` that `verifyBundle` returns is `keccak256(hintsVk)`, a cache hint that lets the next bundle skip the Poseidon hash (see *Construction and trust model*).
+`ledgerId` is the verifier's only identity anchor. The `newTrustAnchor` that `verifyBundle` returns is `keccak256(hintsVk) ‖ WRAPS step`, reported only when the step advances. Its VK-hash half is a cache hint that lets the next bundle skip the Poseidon hash (see *Construction and trust model*).
 
 ---
 
@@ -83,14 +83,15 @@ No code reads `CLPR_SERVICE` or `INITIAL_PINNED_KEY_HASH`. The NatSpec on `ledge
 
 `verifyConfig` returns `initialTrustAnchor = ledgerId` and an empty `initialTrustAnchorId`, and `ChannelLogic._createChannel` stores both on the `Channel`. The `trust_anchor` and `trust_anchor_id` fields (7 and 8) of the peer's `LedgerConfiguration` are decoded but not used.
 
-### `newTrustAnchor`: the Poseidon-skip cache hint
+### `newTrustAnchor`: VK hash, WRAPS step, and the Poseidon-skip cache hint
 
-`BundleLib` passes the stored `Channel.trustAnchor` into `verifyBundle`, and `HieroVerifier` forwards it to `TSSVerifier.verifyTss` as `validHintVk`:
+`Channel.trustAnchor` holds either `ledgerId` (set at channel creation) or the 64-byte `keccak256(hintsVk) ‖ step`, where `step` is the WRAPS Nova IVC step `i` read from the abProof (`HieroVerifier._wrapsStep`). `BundleLib` passes it into `verifyBundle`:
 
-- `TSSVerifier` computes `keccak256(hintVk)` for the key set in this bundle.
-- `skipPoseidon` is true when `validHintVk` is 32 bytes and equals that hash.
+- `HieroVerifier` forwards the VK-hash half (`trustAnchor[:32]`) of a 64-byte anchor to `TSSVerifier.verifyTss` as `validHintVk`, and any other anchor unchanged.
+- `TSSVerifier` computes `keccak256(hintVk)` for the key set in this bundle. `skipPoseidon` is true when `validHintVk` is 32 bytes and equals that hash.
 - `WRAPSVerifierContract` then passes `address(0)` as the Poseidon address, and `WRAPSVerifier` skips the `z_i[1] == Poseidon(hintsVk)` check, which is the largest single cost in the verification (see [GAS_REPORT.md](./GAS_REPORT.md)).
-- `verifyTss` returns `abi.encodePacked(keccak256(hintVk))`. `HieroVerifier` returns it as `newTrustAnchor`, with an empty `newTrustAnchorId`, and `BundleLib` Step 1c writes it to `Channel.trustAnchor`.
+- `verifyTss` returns `abi.encodePacked(keccak256(hintVk))`. `HieroVerifier._advancedAnchor` turns it into `newTrustAnchor = keccak256(hintsVk) ‖ step` only when the stored anchor is `ledgerId`, or when the VK hash differs and `step` is strictly greater than the stored step. Otherwise `newTrustAnchor` is empty. `newTrustAnchorId` is always empty, and `BundleLib` Step 1c writes a reported anchor to `Channel.trustAnchor`.
+- A bundle whose step is at or below the stored step still verifies; it only reports no anchor, so the stored anchor never moves backwards.
 
 ```mermaid
 sequenceDiagram
@@ -105,14 +106,15 @@ sequenceDiagram
     HV->>T: verifyTss(ledgerId, sig1, root1, ledgerId)
     T->>W: verify(abProof1, hintsVk, ledgerId, skipPoseidon = false)
     T-->>HV: true, keccak256(hintsVk)
-    HV-->>S: newTrustAnchor = keccak256(hintsVk)
-    Note over S: Channel.trustAnchor = keccak256(hintsVk)
-    S->>HV: verifyBundle(proof2, keccak256(hintsVk), ctx)
+    HV-->>S: newTrustAnchor = keccak256(hintsVk) ‖ step
+    Note over S: Channel.trustAnchor = keccak256(hintsVk) ‖ step
+    S->>HV: verifyBundle(proof2, keccak256(hintsVk) ‖ step, ctx)
     HV->>T: verifyTss(ledgerId, sig2, root2, keccak256(hintsVk))
     T->>W: verify(abProof2, hintsVk, ledgerId, skipPoseidon = true)
+    HV-->>S: newTrustAnchor = empty (same VK)
 ```
 
-The first bundle after channel creation, and the first bundle after the key set changes, run Poseidon. Bundles after that under the same `hintsVk` skip it. The value caches the fact *"this key set has already been bound to a WRAPS proof for this ledger"*. The ledger identity does not change.
+The first bundle after channel creation, and the first bundle under a new key set, run Poseidon. Bundles after that under the same `hintsVk` skip it. The value caches the fact *"this key set has already been bound to a WRAPS proof for this ledger"*. The ledger identity does not change.
 
 When the hint matches, the Groth16 check still runs with the proof's own `z_i[1]` as a public input, but nothing compares `z_i[1]` with this bundle's `hintsVk`. The binding of that key set to the ledger rests on the earlier bundle that stored its hash.
 
@@ -191,7 +193,7 @@ flowchart TD
     START(["verifyBundle(proofBytes, trustAnchor, channelContext)"]) --> S1
     S1["Step 1 · decode<br/>ClprStateProof.decode(proofBytes)<br/>empty signature → ClprHieroBlockProofMissing"] --> S2
     S2["Step 2 · block root<br/>baseIdx = findFirstPath(StateItemLeaf)<br/>none → ClprHieroNoStateItemLeaf<br/>root = computeChainedRoot(paths, baseIdx)<br/>length ≠ 48 → ClprHieroBlockHashLength"] --> S3
-    S3["Step 3 · TSS<br/>TSS_VERIFIER.verifyTss(ledgerId, signature,<br/>root, trustAnchor)<br/>→ (valid, keccak256(hintsVk))<br/>false → ClprHieroTssVerificationFailed"] --> S4
+    S3["Step 3 · TSS<br/>TSS_VERIFIER.verifyTss(ledgerId, signature,<br/>root, VK-hash half of trustAnchor)<br/>→ (valid, keccak256(hintsVk))<br/>false → ClprHieroTssVerificationFailed<br/>newTrustAnchor = _advancedAnchor(...)"] --> S4
     S4["Step 4 · extract<br/>extractDecodedQueueData(paths, root)<br/>→ channel, payloads[], manifestWire"] --> S5
     S5["Step 5 · QueueMetadata<br/>nextMessageId = acked + 1 + payloads.length<br/>other fields from the channel leaf"] --> S6
     S6{"manifestWire<br/>non-empty?"}

@@ -42,6 +42,11 @@ import {Sha384} from "@hiero-ledger/clpr/libraries/crypto/Sha384.sol";
 contract HieroVerifierTest is Test {
     TSSVerifier internal tssVerifier;
     HieroVerifier internal hieroVerifier;
+    address internal poseidon;
+
+    // Lower bound on the Poseidon hash of the hinTS VK (~1.63M measured on the fixture); a cached
+    // anchor must save at least this much over the cold path.
+    uint256 internal constant POSEIDON_GAS_FLOOR = 1_000_000;
 
     // First 128 bytes of the blockSignature (hintsVK section, n=4).
     // Used as the pinned key in the HieroVerifier constructor.
@@ -69,7 +74,7 @@ contract HieroVerifierTest is Test {
     function setUp() public {
         address permuteA = deployCode("PoseidonPermuteA.sol:PoseidonPermuteA");
         address permuteB = deployCode("PoseidonPermuteB.sol:PoseidonPermuteB");
-        address poseidon = deployCode("PoseidonBN254Contract.sol:PoseidonBN254Contract", abi.encode(permuteA, permuteB));
+        poseidon = deployCode("PoseidonBN254Contract.sol:PoseidonBN254Contract", abi.encode(permuteA, permuteB));
         address wraps = deployCode("WRAPSVerifierContract.sol:WRAPSVerifierContract", abi.encode(poseidon));
         tssVerifier = TSSVerifier(deployCode("TSSVerifier.sol:TSSVerifier", abi.encode(wraps)));
         hieroVerifier =
@@ -571,6 +576,22 @@ contract HieroVerifierTest is Test {
 
         (,, bytes memory again,,) = hieroVerifier.verifyBundle(proof, anchor, _ctx());
         assertEq(again.length, 0, "same VK reports no anchor");
+    }
+
+    function test_verifyBundle_realProof_storedAnchorSkipsPoseidon() public {
+        bytes memory proof = _loadProof();
+
+        uint256 gasBefore = gasleft();
+        (,, bytes memory anchor,,) = hieroVerifier.verifyBundle(proof, _loadTrustAnchor(), _ctx());
+        uint256 coldGas = gasBefore - gasleft();
+        assertEq(anchor.length, 64, "stored anchor is keccak256(hintsVk) || step");
+
+        vm.expectCall(poseidon, abi.encodeWithSelector(PoseidonBN254Contract.hashHintsVk.selector), 0);
+        gasBefore = gasleft();
+        hieroVerifier.verifyBundle(proof, anchor, _ctx());
+        uint256 cachedGas = gasBefore - gasleft();
+
+        assertLt(cachedGas + POSEIDON_GAS_FLOOR, coldGas, "stored anchor must skip the Poseidon hash");
     }
 }
 

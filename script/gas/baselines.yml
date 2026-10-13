@@ -82,7 +82,14 @@ gas_report_benchmarks:
     contract: HieroVerifier
     function: verifyBundle
     column: min
-    baseline: 6115961
+    baseline: 6115999
+  # Same proof under the stored keccak256(hintsVk) || step anchor: the Poseidon hash is skipped.
+  - name: HieroVerifier.verifyBundle (steady state, Poseidon skipped)
+    match_path: test/verifiers/hiero/SteadyStateGasUsage.t.sol
+    contract: HieroVerifier
+    function: verifyBundle
+    column: min
+    baseline: 4475799
   - name: QbftHeaderModeVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier

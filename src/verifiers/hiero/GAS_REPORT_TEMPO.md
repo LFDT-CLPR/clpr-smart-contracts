@@ -46,8 +46,9 @@ verifier relies on (§6).
 The full-tx `verifyBundle` figure minus intrinsic gas is 6,108,407, against the 6,154,972 Foundry
 frame in `baselines.yml`; the difference is the Foundry call overhead.
 
-**First bundle versus steady state.** The trust anchor the service stores is `keccak256(hintsVk)`.
-When it matches the bundle's hinTS key, WRAPS skips re-hashing the 1,096-byte key with Poseidon:
+**First bundle versus steady state.** The trust anchor the service stores is
+`keccak256(hintsVk) ‖ WRAPS step`. When its VK-hash half matches the bundle's hinTS key, WRAPS skips
+re-hashing the 1,096-byte key with Poseidon:
 
 | `verifyBundle`, real fixture, whole tx | Ethereum | Tempo |
 |---|---|---|

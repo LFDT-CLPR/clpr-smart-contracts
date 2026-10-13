@@ -16,11 +16,11 @@ FOUNDRY_PROFILE=test forge test --match-path test/verifiers/hiero/HieroGasReport
   cold. The `verifyBundle` rows are the first call of a test (cold). Component rows come from later
   frames and measure only work inside the callee, which is the same either way.
 - **Two trust-anchor states**:
-  - *First bundle*: the `trustAnchor` argument is not `keccak256(hintsVk)` (the fixture passes the
-    32-byte ledger id, as `GasUsage.t.sol` does), so WRAPS recomputes the Poseidon hash of the hinTS
-    VK.
-  - *Steady state*: the relay passes back the `keccak256(hintsVk)` returned by the previous
-    `verifyBundle`, so WRAPS skips Poseidon (`WRAPSVerifierContract.verify(..., skipPoseidon)`).
+  - *First bundle*: the `trustAnchor` argument is the 32-byte ledger id (as `GasUsage.t.sol`
+    passes), not an anchor for this key set, so WRAPS recomputes the Poseidon hash of the hinTS VK.
+  - *Steady state*: `Channel.trustAnchor` holds the 64-byte `keccak256(hintsVk) ‖ WRAPS step` stored
+    after an earlier bundle under the same key set. `HieroVerifier` hands its VK-hash half to
+    `TSSVerifier`, so WRAPS skips Poseidon (`WRAPSVerifierContract.verify(..., skipPoseidon)`).
 - **Calldata** is priced per EIP-2028 (4 gas per zero byte, 16 per non-zero byte) over the three
   `verifyBundle` arguments: proof 83,644, trust anchor 512, empty channel context 0. It is not priced
   over the ABI-encoded `submitBundle` payload.
@@ -38,10 +38,10 @@ FOUNDRY_PROFILE=test forge test --match-path test/verifiers/hiero/HieroGasReport
 | Scenario | Execution (verify) | Service overhead | Calldata | Tx base | **Total** |
 |---|---|---|---|---|---|
 | First bundle under a hinTS VK (Poseidon runs) | 6,108,407 | 284,416 | 84,156 | 21,000 | **6,497,979** |
-| Steady state (cached `keccak256(hintsVk)`, Poseidon skipped) | 4,468,057 | 284,416 | 84,156 | 21,000 | **4,857,629** |
+| Steady state (stored `keccak256(hintsVk) ‖ step`, Poseidon skipped) | 4,468,057 | 284,416 | 84,156 | 21,000 | **4,857,629** |
 
-The first-bundle execution figure equals the `HieroVerifier.verifyBundle` minimum in
-`script/gas/baselines.yml` (6,108,407), which is regression-tracked by `GasUsage.t.sol`.
+Both paths are regression-tracked in `script/gas/baselines.yml`: the first bundle by
+`GasUsage.t.sol` and the steady state by `SteadyStateGasUsage.t.sol`.
 
 Caching the anchor saves **1,640,350** gas (25% of the first-bundle total). Relays should always
 pass back the anchor the previous bundle returned. The saving is lost only on the first bundle
