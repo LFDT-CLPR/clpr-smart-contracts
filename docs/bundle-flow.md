@@ -79,7 +79,7 @@ flowchart TD
 | 2 | `proofBytes.length ≤ throttles.maxSyncBytes`, else `BundleTooLarge` | `_validateAndPrepare` |
 | 3 | `IClprVerifier(channel.verifier).verifyBundle(proofBytes, channel.trustAnchor, channel.channelContext)` → `(metadata, messagePayloads, newTrustAnchor, newTrustAnchorId, newEndpointManifest)`; a verifier revert propagates. Then the progress check (`NoProgress`, see below), then caps on message count (`TooManyMessages`) and per-payload size against `maxMessagePayloadBytes` (`ClprPayloadTooLarge`) | `_validateAndPrepare`, `_checkBundleProgress` |
 | 1b | Endpoint-manifest update: when `newEndpointManifest.version > channel.endpointManifestVersion`, truncate it to `maxPeerEndpoints` (0 = no limit), write it to `_peerEndpointManifests[channelId]`, and set `channel.endpointManifestVersion`. A verifier signals "no manifest" with version 0 | `_validateAndPrepare` |
-| 1c | Trust-anchor update: when `newTrustAnchor` is non-empty, set `channel.trustAnchor` and `channel.trustAnchorId` | `_validateAndPrepare` |
+| 1c | Trust-anchor update: when `newTrustAnchor` is non-empty and differs from `channel.trustAnchor`, set `channel.trustAnchor` and `channel.trustAnchorId`. A re-reported current anchor is neither stored nor progress, and its `newTrustAnchorId` is ignored | `_validateAndPrepare`, `_trustAnchorAdvances` |
 | 4 | Replay defense: unconditionally reject `metadata.nextMessageId < channel.receivedMessageId + 1`; when the bundle carries messages, also reject `metadata.lastMessageId >= metadata.nextMessageId OR metadata.lastMessageId < messagePayloads.length OR metadata.lastMessageId < channel.receivedMessageId OR metadata.lastMessageId - channel.receivedMessageId > messagePayloads.length` | `_validateAndPrepare:257-277` |
 | 5 | Running-hash check: seed with `channel.receivedRunningHash` (32 zero bytes while `receivedMessageId == 0`), fold `sha256(prev‖sha256(payload))` over the new payloads with the `sha256` precompile, and compare with `metadata.sentRunningHash`, else `ClprRunningHashMismatch`. The comparison also runs when there are no new payloads: the peer's `sentRunningHash` must then equal the stored `receivedRunningHash` | `_validateAndPrepare` |
 | 6 | Ack bounds on `metadata.receivedMessageId` (the peer's ack of our messages): not below `channel.ackedMessageId`, and if changed, `< channel.nextMessageId`; else `ClprAckVerificationFailed` | `_validateAndPrepare` |
@@ -114,7 +114,8 @@ order:
 
 1. New messages: `metadata.nextMessageId > channel.receivedMessageId + 1`. A
    bundle of only leading duplicates does not count.
-2. Trust-anchor advancement: `newTrustAnchor` is non-empty.
+2. Trust-anchor advancement: `newTrustAnchor` is non-empty and differs from
+   `channel.trustAnchor`.
 3. Endpoint-manifest advancement: `newEndpointManifest.version >
    channel.endpointManifestVersion`.
 4. Ack progress: `metadata.receivedMessageId > channel.ackedMessageId`.

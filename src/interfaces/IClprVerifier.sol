@@ -9,8 +9,7 @@ interface IClprVerifier {
     /// @notice Verifies a bundle proof and extracts contents.
     /// @param proofBytes Opaque proof bytes from the peer ledger
     /// @param trustAnchor Current trust anchor bytes stored in the channel. Opaque to the
-    ///        caller; the verifier defines its own encoding. Stateless verifiers (e.g. Hiero)
-    ///        ignore this value and always return empty newTrustAnchor.
+    ///        caller; the verifier defines its own encoding.
     /// @param channelContext Opaque bytes encoding the ChannelContext{channelId,
     ///         remoteServiceAddress} — static context created at channel setup time. Used by
     ///         verifiers to validate bundles originate from the expected peer channel.

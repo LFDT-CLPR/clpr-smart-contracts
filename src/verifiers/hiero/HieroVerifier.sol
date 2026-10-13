@@ -97,10 +97,9 @@ contract HieroVerifier is IClprVerifier {
         bytes memory blockRootHash = ClprMerkleProof.computeChainedRoot(sp.paths, baseIdx);
         if (blockRootHash.length != BLOCK_HASH_LEN) revert ClprHieroBlockHashLength(blockRootHash.length);
 
-        // Step 3: TSS aggregate-signature check. `trustAnchor` is used as a cache hint:
-        // if it equals keccak256(hintsVk) for the current proof, TSSVerifier/WRAPS can
-        // skip recomputing the Poseidon hash of hinTS VK. On success we return the
-        // canonical keccak256(hintsVk) so callers can cache it for subsequent calls.
+        // Step 3: TSS aggregate-signature check. `trustAnchor` is the ledger ID or
+        // keccak256(hintsVk) ‖ WRAPS step; the anchor is reported only when the proof's WRAPS
+        // step is later than the stored one.
         bool tssValid;
         (tssValid, newTrustAnchor) = TSS_VERIFIER.verifyTss(ledgerId, sp.signature, blockRootHash, trustAnchor);
         if (!tssValid) revert ClprHieroTssVerificationFailed();

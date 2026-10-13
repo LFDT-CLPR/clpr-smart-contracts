@@ -75,10 +75,8 @@ library BundleLib {
     error NoProgress();
 
     /// @dev True when a verifier-reported trust anchor differs from the one the Channel holds. An
-    ///      empty report means "unchanged", but a verifier may also report the CURRENT anchor:
-    ///      TSSVerifier returns keccak256(hintVk) on every WRAPS-settled proof as a cache hint, so
-    ///      HieroVerifier hands back the stored anchor on each bundle. Only a different value is a
-    ///      rotation (#529).
+    ///      empty report means "unchanged", and a verifier may also re-report the current anchor;
+    ///      only a different value is a rotation.
     function _trustAnchorAdvances(bytes memory current, bytes memory reported) internal pure returns (bool) {
         return reported.length > 0 && keccak256(reported) != keccak256(current);
     }

@@ -238,7 +238,7 @@ config's `codeHash` on this path too.
 | `metadata.receivedMessageId` | acknowledgement verification (`ClprAckVerificationFailed`) |
 | `metadata.state` | the channel state machine |
 | `newEndpointManifest` | stored when `version > Channel.endpointManifestVersion` |
-| `newTrustAnchor`, `newTrustAnchorId` | stored when `newTrustAnchor` is non-empty |
+| `newTrustAnchor`, `newTrustAnchorId` | stored when `newTrustAnchor` is non-empty and differs from `Channel.trustAnchor` |
 
 `metadata.receivedRunningHash` and `metadata.endpointManifestVersion` are returned but not read.
 See [bundle-flow.md](../../../../docs/bundle-flow.md) for the full pipeline.

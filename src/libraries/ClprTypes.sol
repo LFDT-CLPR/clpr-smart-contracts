@@ -132,9 +132,8 @@ library ClprTypes {
         string chainId;
         bytes peerServiceAddress;
         Throttles peerThrottles;
-        /// @dev Opaque trust anchor bytes managed by the verifier. Stateless verifiers (Hiero)
-        ///      leave this empty. EVM verifiers store the current signing-key state here
-        ///      (e.g. sync committee, IBFT validator set hash, BLS aggregate key).
+        /// @dev Opaque trust anchor bytes managed by the verifier. EVM verifiers store the current
+        ///      signing-key state here (e.g. sync committee, IBFT validator set hash, BLS aggregate key).
         bytes trustAnchor;
         /// @dev Highest message ID ever assigned to an outbound DATA message (sendMessage).
         ///      Zero when no DATA messages have been sent. Used by the CLOSING->DRAINED
