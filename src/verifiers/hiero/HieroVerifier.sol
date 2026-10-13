@@ -7,6 +7,7 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {ClprStateProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprStateProof.sol";
 import {ClprMerkleProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprMerkleProof.sol";
 import {TSSVerifier} from "@hiero-ledger/clpr/verifiers/hiero/TSSVerifier.sol";
+import {BN254Util} from "@hiero-ledger/clpr/verifiers/hiero/wraps/BN254Util.sol";
 
 /// @title HieroVerifier
 /// @notice `IClprVerifier` for bundles originating on a Hiero ledger.
@@ -41,6 +42,12 @@ contract HieroVerifier is IClprVerifier {
 
     /// @dev Length of a Hiero block hash (SHA-384 root).
     uint256 internal constant BLOCK_HASH_LEN = 48;
+
+    /// @dev Length of a trust anchor `keccak256(hintsVk) ‖ wrapsStep` (32 + 32 bytes).
+    uint256 internal constant VK_ANCHOR_LEN = 64;
+
+    /// @dev Offset of the WRAPS abProof in a TSS block signature: hintVk (1096) ‖ hintSig (1632).
+    uint256 internal constant ABPROOF_OFFSET = 2728;
 
     /// @notice keccak256 of the raw `ledgerId` bytes. Used as the fast-path equality check
     ///         against the `trustAnchor` argument supplied to `verifyBundle`.
@@ -97,6 +104,7 @@ contract HieroVerifier is IClprVerifier {
         bool tssValid;
         (tssValid, newTrustAnchor) = TSS_VERIFIER.verifyTss(ledgerId, sp.signature, blockRootHash, trustAnchor);
         if (!tssValid) revert ClprHieroTssVerificationFailed();
+        newTrustAnchor = _advancedAnchor(trustAnchor, newTrustAnchor, sp.signature);
 
         // Step 4: walk every leaf path, authenticate it against `blockRootHash`, decode the
         // proven `ClprChannel` and `ClprMessageValue` leaves. Reverts inside the lib if
@@ -184,6 +192,27 @@ contract HieroVerifier is IClprVerifier {
         // Verify + bind the endpoint manifest: decoded from its proto proof, service_address bound to
         // the peer's config service_address, keys normalized. Version MUST be >= 1; empty list is OK.
         endpointManifest = _verifyManifestStateProof(endpointManifestProofBytes, cfg.serviceAddress);
+    }
+
+    function _advancedAnchor(bytes calldata trustAnchor, bytes memory vkHash, bytes memory signature)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bool hasVk = trustAnchor.length == VK_ANCHOR_LEN;
+        if (hasVk && keccak256(trustAnchor[:32]) == keccak256(vkHash)) return "";
+        uint256 step = _wrapsStep(signature);
+        if (hasVk && step <= abi.decode(trustAnchor[32:], (uint256))) return "";
+        return abi.encodePacked(vkHash, step);
+    }
+
+    /// @dev The WRAPS Nova IVC step `i`, the abProof's leading 32-byte little-endian field element.
+    function _wrapsStep(bytes memory signature) internal pure returns (uint256) {
+        bytes32 raw;
+        assembly ("memory-safe") {
+            raw := mload(add(add(signature, 0x20), ABPROOF_OFFSET))
+        }
+        return BN254Util._bswap32(uint256(raw));
     }
 
     /// @dev Verify a config-time endpoint-manifest proof: a full Hiero `StateProof` carrying a

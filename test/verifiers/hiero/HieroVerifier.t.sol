@@ -8,6 +8,7 @@ import {WRAPSVerifierContract} from "@hiero-ledger/clpr/verifiers/hiero/wraps/WR
 import {PoseidonBN254Contract} from "@hiero-ledger/clpr/verifiers/hiero/wraps/PoseidonBN254Contract.sol";
 import {PoseidonPermuteA} from "@hiero-ledger/clpr/verifiers/hiero/wraps/PoseidonPermuteA.sol";
 import {PoseidonPermuteB} from "@hiero-ledger/clpr/verifiers/hiero/wraps/PoseidonPermuteB.sol";
+import {BN254Util} from "@hiero-ledger/clpr/verifiers/hiero/wraps/BN254Util.sol";
 import {HieroVerifier} from "@hiero-ledger/clpr/verifiers/hiero/HieroVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprStateProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprStateProof.sol";
@@ -61,6 +62,9 @@ contract HieroVerifierTest is Test {
     // channel_id (field 1) and service_address (field 3) proven in the fixture's ClprChannel leaf.
     bytes32 internal constant EXPECTED_CHANNEL_ID = 0xe1022276af73c7a88c9fa00f7e844bbc4a8fda0cc6051d9c99926b74cf9c3d84;
     bytes internal constant PEER_SERVICE_ADDRESS = hex"ade986b5973ec38f3996f3a128f7d8c3e8ffcd9d";
+
+    bytes32 internal constant HINTS_VK_1 = keccak256("hintsVk#1");
+    bytes32 internal constant HINTS_VK_2 = keccak256("hintsVk#2");
 
     function setUp() public {
         address permuteA = deployCode("PoseidonPermuteA.sol:PoseidonPermuteA");
@@ -179,7 +183,7 @@ contract HieroVerifierTest is Test {
 
         assertEq(payloads.length, 1, "must contain exactly 1 message payload");
         assertTrue(payloads[0].length > 0, "payload must not be empty");
-        assertEq(newTrustAnchor.length, 32, "HieroVerifier returns newTrustAnchor = keccak256(hintsVK)");
+        assertEq(newTrustAnchor.length, 64, "HieroVerifier returns newTrustAnchor = keccak256(hintsVK) || WRAPS step");
 
         console.log("nextMessageId:", meta.nextMessageId);
         console.log("receivedMessageId:", meta.receivedMessageId);
@@ -458,6 +462,14 @@ contract HieroVerifierTest is Test {
     ///      the given ackedMessageId) and the fixture's message-1 leaf, each carrying the other's leaf
     ///      hash as its sibling so both paths converge on one root.
     function _proofWithChannelAcked(uint64 ackedMessageId) internal view returns (bytes memory) {
+        return _proofWithChannelAcked(ackedMessageId, hex"01");
+    }
+
+    function _proofWithChannelAcked(uint64 ackedMessageId, bytes memory signature)
+        internal
+        view
+        returns (bytes memory)
+    {
         bytes memory channel = abi.encodePacked(
             PB.encodeBytesField(1, abi.encodePacked(EXPECTED_CHANNEL_ID)),
             PB.encodeVarintField(7, uint64(ClprTypes.ChannelStatus.ACTIVE)),
@@ -476,7 +488,7 @@ contract HieroVerifierTest is Test {
             PB.encodeBytesField(ClprStateProof.SP_PATHS, _leafPath(channelLeaf, messageHash, false)),
             PB.encodeBytesField(ClprStateProof.SP_PATHS, _leafPath(messageLeaf, channelHash, true)),
             PB.encodeBytesField(
-                ClprStateProof.SP_SIGNED_BLOCK_PROOF, PB.encodeBytesField(ClprStateProof.SBP_BLOCK_SIGNATURE, hex"01")
+                ClprStateProof.SP_SIGNED_BLOCK_PROOF, PB.encodeBytesField(ClprStateProof.SBP_BLOCK_SIGNATURE, signature)
             )
         );
     }
@@ -493,6 +505,72 @@ contract HieroVerifierTest is Test {
             PB.encodeVarintField(ClprStateProof.MP_NEXT_PATH_INDEX, uint64(type(uint32).max)),
             PB.encodeBytesField(ClprStateProof.MP_STATE_ITEM_LEAF, leaf)
         );
+    }
+
+    function _verifyUnderVk(bytes32 vkHash, uint256 step, bytes memory anchor) internal returns (bytes memory) {
+        bytes memory signature = new bytes(3432);
+        bytes32 stepLe = bytes32(BN254Util._bswap32(step));
+        assembly {
+            mstore(add(add(signature, 0x20), 2728), stepLe)
+        }
+        vm.mockCall(
+            address(tssVerifier),
+            abi.encodeWithSelector(TSSVerifier.verifyTss.selector),
+            abi.encode(true, abi.encodePacked(vkHash))
+        );
+        (,, bytes memory newTrustAnchor,,) =
+            hieroVerifier.verifyBundle(_proofWithChannelAcked(0, signature), anchor, _ctx());
+        return newTrustAnchor;
+    }
+
+    function _applied(bytes memory anchor, bytes memory reported) internal pure returns (bytes memory) {
+        return reported.length > 0 && keccak256(reported) != keccak256(anchor) ? reported : anchor;
+    }
+
+    function test_verifyBundle_hintsVkReplay_2_1_2_keepsNewestAnchor() public {
+        bytes memory anchor = LEDGER_ID;
+
+        bytes memory reported = _verifyUnderVk(HINTS_VK_2, 2, anchor);
+        assertEq(reported, abi.encodePacked(HINTS_VK_2, uint256(2)), "#2 is installed over the ledger id");
+        anchor = _applied(anchor, reported);
+
+        reported = _verifyUnderVk(HINTS_VK_1, 1, anchor);
+        assertEq(reported.length, 0, "older #1 reports no anchor");
+        anchor = _applied(anchor, reported);
+
+        reported = _verifyUnderVk(HINTS_VK_2, 2, anchor);
+        assertEq(reported.length, 0, "current #2 reports no anchor");
+        anchor = _applied(anchor, reported);
+
+        assertEq(anchor, abi.encodePacked(HINTS_VK_2, uint256(2)), "anchor stays at #2");
+    }
+
+    function test_verifyBundle_hintsVkRotation_1_2_movesAnchor() public {
+        bytes memory anchor = _applied(LEDGER_ID, _verifyUnderVk(HINTS_VK_1, 1, LEDGER_ID));
+        assertEq(anchor, abi.encodePacked(HINTS_VK_1, uint256(1)), "#1 installed");
+
+        anchor = _applied(anchor, _verifyUnderVk(HINTS_VK_2, 2, anchor));
+        assertEq(anchor, abi.encodePacked(HINTS_VK_2, uint256(2)), "#2 replaces #1");
+    }
+
+    function test_verifyBundle_otherVkSameStep_reportsNoAnchor() public {
+        bytes memory anchor = abi.encodePacked(HINTS_VK_2, uint256(2));
+        assertEq(_verifyUnderVk(HINTS_VK_1, 2, anchor).length, 0);
+    }
+
+    function test_verifyBundle_realProof_anchorCarriesWrapsStep() public view {
+        bytes memory proof = _loadProof();
+        bytes memory signature = ClprStateProof.decode(proof).signature;
+        bytes memory hintsVk = new bytes(1096);
+        for (uint256 i = 0; i < 1096; i++) {
+            hintsVk[i] = signature[i];
+        }
+
+        (,, bytes memory anchor,,) = hieroVerifier.verifyBundle(proof, _loadTrustAnchor(), _ctx());
+        assertEq(anchor, abi.encodePacked(keccak256(hintsVk), uint256(2)), "keccak256(hintsVk) || step 2");
+
+        (,, bytes memory again,,) = hieroVerifier.verifyBundle(proof, anchor, _ctx());
+        assertEq(again.length, 0, "same VK reports no anchor");
     }
 }
 

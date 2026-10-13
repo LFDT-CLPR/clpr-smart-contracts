@@ -82,7 +82,7 @@ gas_report_benchmarks:
     contract: HieroVerifier
     function: verifyBundle
     column: min
-    baseline: 6115321
+    baseline: 6115961
   - name: QbftHeaderModeVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/evm/qbft/GasUsage.t.sol
     contract: QbftHeaderModeVerifier
