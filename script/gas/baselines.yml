@@ -42,11 +42,11 @@ log_benchmarks:
       "verifyBundle, N = 2": 494227
       "verifyBundle, N = 5": 505004
       "verifyBundle, N = 10": 525279
-      "submitBundle TOTAL, ACK-only (N=0)": 588900
-      "submitBundle TOTAL, N = 1": 773754
-      "submitBundle TOTAL, N = 2": 856060
-      "submitBundle TOTAL, N = 5": 1096551
-      "submitBundle TOTAL, N = 10": 1502823
+      "submitBundle TOTAL, ACK-only (N=0)": 589057
+      "submitBundle TOTAL, N = 1": 773830
+      "submitBundle TOTAL, N = 2": 856136
+      "submitBundle TOTAL, N = 5": 1096627
+      "submitBundle TOTAL, N = 10": 1502899
 
   - name: Tempo verifier (BLS hot paths and full calls)
     match_path: test/verifiers/tempo/TempoGasReport.t.sol

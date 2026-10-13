@@ -33,7 +33,7 @@ The verifiers keep no storage. `QbftHeaderModeVerifier` and `QbftContractModeVer
 the legacy `QBFTVerifier` is `view` and reads one immutable, `MIN_COMMITTED_SEALS`. All trust comes
 from the `trustAnchor` argument, which `ClprService` keeps in `Channel.trustAnchor`: `completeChannel`
 stores the anchor that `verifyConfig` returns, and `submitBundle` replaces it when `verifyBundle`
-returns a non-empty `newTrustAnchor` (`BundleLib`). `channelContext` is `channelId ‖
+returns a non-empty `newTrustAnchor` that differs from the stored one (`BundleLib`). `channelContext` is `channelId ‖
 remoteServiceAddress` (`ClprTypes.encodeChannelContext`, which uses `abi.encodePacked`). The verifier
 derives every storage slot it proves from that `channelId`.
 
@@ -433,8 +433,9 @@ A mode verifier returns a new anchor when **either** holds:
 The new anchor keeps the old commitment when `rotate` is false, and its `anchorBlockNumber` and id are
 the current block number. So after a bundle that crossed hops, a replay of those hops fails the floor
 check. Otherwise both return values are empty, and the next bundle may be proven at any block after
-the anchor block. `BundleLib._checkBundleProgress` counts a non-empty `newTrustAnchor` as progress,
-so a bundle that only crosses a rotation is accepted without message or acknowledgement progress.
+the anchor block. `BundleLib._checkBundleProgress` counts a `newTrustAnchor` that differs from the
+stored one as progress, so a bundle that only crosses a rotation is accepted without message or
+acknowledgement progress.
 
 ### 6.5 The EVM storage tail (`ClprEvmBundleVerifier`)
 

@@ -68,6 +68,22 @@ contract BundleLibHarness {
 
         BundleLib._checkBundleProgress(channel, meta, messageCount, newTrustAnchor, false);
     }
+
+    /// @dev An otherwise idle ACTIVE bundle (no messages, no ack advance, no transition) whose only
+    ///      candidate progress is the reported trust anchor, against a Channel already holding
+    ///      `storedAnchor`. Reverts with `BundleLib.NoProgress` unless the anchor rotates.
+    function checkTrustAnchorProgress(bytes memory storedAnchor, bytes memory reportedAnchor) external pure {
+        ClprTypes.Channel memory channel;
+        channel.status = ClprTypes.ChannelStatus.ACTIVE;
+        channel.nextMessageId = 1;
+        channel.trustAnchor = storedAnchor;
+
+        ClprTypes.QueueMetadata memory meta;
+        meta.state = ClprTypes.ChannelStatus.ACTIVE;
+        meta.nextMessageId = 1;
+
+        BundleLib._checkBundleProgress(channel, meta, 0, reportedAnchor, false);
+    }
 }
 
 /// @title BundleLibStateMachineTest
@@ -273,6 +289,24 @@ contract BundleLib_StateMachineTest is BundleLibTestBase {
     function test_progress_cond2_trustAnchor_passes() public view {
         // No new messages, no ack advance, no transition — only a new trust anchor.
         harness.checkProgress(ACTIVE, 1, 0, 0, 0, ACTIVE, 1, 0, hex"ABCD");
+    }
+
+    function test_progress_cond2_rotatedTrustAnchor_passes() public view {
+        // A reported anchor that differs from the stored one is a rotation → progress.
+        harness.checkTrustAnchorProgress(hex"ABCD", hex"1234");
+    }
+
+    function test_progress_cond2_reportedCurrentTrustAnchor_reverts() public {
+        // A verifier re-reporting the anchor the Channel already holds (TSSVerifier's cache hint on
+        // every WRAPS-settled proof) is not progress (#529).
+        vm.expectRevert(BundleLib.NoProgress.selector);
+        harness.checkTrustAnchorProgress(hex"ABCD", hex"ABCD");
+    }
+
+    function test_progress_cond2_emptyReportedTrustAnchor_reverts() public {
+        // An empty report means "unchanged".
+        vm.expectRevert(BundleLib.NoProgress.selector);
+        harness.checkTrustAnchorProgress(hex"ABCD", hex"");
     }
 
     function test_progress_cond3_ackAdvance_passes() public view {

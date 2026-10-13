@@ -113,7 +113,8 @@ reentrant call observes stale channel state (see the reentrancy note in
 ## No-progress revert
 
 A bundle reverts with **`NoProgress`** when none of these hold: new messages, a
-non-empty new trust anchor, an endpoint-manifest version advance, ack progress,
+new trust anchor that differs from the stored one (a verifier re-reporting the
+current anchor is not progress, #529), an endpoint-manifest version advance, ack progress,
 or a channel state-machine transition (`BundleLib._checkBundleProgress`, called
 right after `verifyBundle`). `BundleLib.EmptyBundle` is declared but never
 thrown — don't expect it in a test.

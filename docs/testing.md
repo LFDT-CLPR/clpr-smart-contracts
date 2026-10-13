@@ -224,7 +224,8 @@ messages, no new trust anchor, no endpoint-manifest advance, no ack movement,
 and no state-machine transition. (`EmptyBundle` is declared but never thrown —
 don't assert on it.) When testing pure state-machine transitions with no
 messages and no ack progress, set `verifier.setNewTrustAnchor(hex"01")` so the
-bundle has *some* effect. See
+bundle has *some* effect, and give each later such bundle a different anchor
+(`hex"02"`, …): the anchor the Channel already holds is not progress (#529). See
 `test/libraries/service/bundle-lib/BundleLib_Progress.t.sol`.
 
 ## White-box state seeding

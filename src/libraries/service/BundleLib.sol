@@ -74,7 +74,18 @@ library BundleLib {
     /// @dev Thrown when a bundle doesn't make any progress.
     error NoProgress();
 
+    /// @dev True when a verifier-reported trust anchor differs from the one the Channel holds. An
+    ///      empty report means "unchanged", but a verifier may also report the CURRENT anchor:
+    ///      TSSVerifier returns keccak256(hintVk) on every WRAPS-settled proof as a cache hint, so
+    ///      HieroVerifier hands back the stored anchor on each bundle. Only a different value is a
+    ///      rotation (#529).
+    function _trustAnchorAdvances(bytes memory current, bytes memory reported) internal pure returns (bool) {
+        return reported.length > 0 && keccak256(reported) != keccak256(current);
+    }
+
     /// @dev DoS guard: a bundle must make progress, or this reverts with NoProgress.
+    /// @param newTrustAnchor The trust anchor the verifier reported. Progress only when it differs
+    ///        from the Channel's stored anchor (see `_trustAnchorAdvances`).
     /// @param manifestAdvances True when the verifier returned a manifest with a version strictly
     ///        greater than the Channel's stored endpointManifestVersion.
     function _checkBundleProgress(
@@ -87,7 +98,7 @@ library BundleLib {
         // Leading duplicates don't count: only a last message past receivedMessageId is new.
         if (messageCount > 0 && metadata.lastMessageId > channel.receivedMessageId) return;
 
-        if (newTrustAnchor.length > 0) return;
+        if (_trustAnchorAdvances(channel.trustAnchor, newTrustAnchor)) return;
         if (manifestAdvances) return;
         if (metadata.receivedMessageId > channel.ackedMessageId) return;
 
@@ -239,8 +250,10 @@ library BundleLib {
                 _peerEndpointManifests[params.channelId] = newEndpointManifest;
                 channel.endpointManifestVersion = newEndpointManifest.version;
             }
-            // ── Step 1c: trust-anchor update.
-            if (newTrustAnchor.length > 0) {
+            // ── Step 1c: trust-anchor update, only on an actual rotation — the same test
+            // _checkBundleProgress applies, so a re-reported current anchor is neither progress nor
+            // a write.
+            if (_trustAnchorAdvances(channel.trustAnchor, newTrustAnchor)) {
                 channel.trustAnchor = newTrustAnchor;
                 channel.trustAnchorId = newTrustAnchorId;
             }
