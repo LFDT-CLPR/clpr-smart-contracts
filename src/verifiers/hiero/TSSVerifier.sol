@@ -100,7 +100,6 @@ contract TSSVerifier {
     /// @dev BLS12-381 Fr 2-adicity. The largest power-of-2 subgroup has order 2^32.
     uint256 internal constant BLS_FR_TWO_ADICITY = 32;
 
-    error ClprHieroPrecompileFailure(address precompile);
     error ClprHieroSignatureLength(uint256 length);
 
     /// @notice Deployed WRAPSVerifierContract whose code contains PoseidonBN254 + BN254Util.
@@ -238,11 +237,11 @@ contract TSSVerifier {
         internal
         view
     {
-        bytes memory hG2 = _hashToG2(blockHash);
+        bytes memory hG2 = ClprBls12381.hashToG2(blockHash, HIERO_DST);
         bytes memory aggPk = _arkG1ToEip2537(hintSig, SIG_OFFSET_AGG_PK);
         bytes memory aggSig = _arkG2ToEip2537(hintSig, SIG_OFFSET_AGG_SIG);
 
-        if (!_pairing(bytes.concat(aggPk, hG2, _negG1Eip(g0), aggSig))) {
+        if (!ClprBls12381.pairing(bytes.concat(aggPk, hG2, _negG1Eip(g0), aggSig))) {
             revert HieroHintsFinalPairingFailed();
         }
     }
@@ -272,10 +271,11 @@ contract TSSVerifier {
 
         bytes memory mergedG1 = _buildMergedG1(r, rPow, lnMinus1Scalar, negCombinedEval, hintVk, hintSig, g0);
 
-        bytes memory kzgRhsG2 = _g2Msm(abi.encodePacked(h0, bytes32(_frNeg(r)), h1, bytes32(uint256(1))));
+        bytes memory kzgRhsG2 = ClprBls12381.g2Msm(abi.encodePacked(h0, bytes32(_frNeg(r)), h1, bytes32(uint256(1))));
 
-        if (!_pairing(bytes.concat(mergedG1, h0, _negG1Eip(_arkG1ToEip2537(hintSig, SIG_OFFSET_OPENING_R)), kzgRhsG2)))
-        {
+        if (!ClprBls12381.pairing(
+                bytes.concat(mergedG1, h0, _negG1Eip(_arkG1ToEip2537(hintSig, SIG_OFFSET_OPENING_R)), kzgRhsG2)
+            )) {
             revert HieroHintsKzgMergedFailed();
         }
     }
@@ -309,7 +309,7 @@ contract TSSVerifier {
         bytes calldata hintSig,
         bytes memory g0
     ) internal view returns (bytes memory) {
-        bytes memory input = new bytes(9 * 160); // 1440 bytes, one allocation
+        bytes memory input = new bytes(9 * 160);
         _writeMsmTerm(input, 0, _arkG1ToEip2537(hintSig, SIG_OFFSET_PARSUM), 1);
         _writeMsmTerm(input, 160, _arkG1ToEip2537(hintVk, VK_OFFSET_W), r);
         _writeMsmTerm(input, 320, _arkG1ToEip2537(hintVk, VK_OFFSET_LN_MINUS_1), lnMinus1Scalar);
@@ -319,7 +319,7 @@ contract TSSVerifier {
         _writeMsmTerm(input, 960, _arkG1ToEip2537(hintSig, SIG_OFFSET_Q2), rPow[3]);
         _writeMsmTerm(input, 1120, _arkG1ToEip2537(hintSig, SIG_OFFSET_Q4), rPow[4]);
         _writeMsmTerm(input, 1280, g0, negCombinedEval);
-        return _g1Msm(input);
+        return ClprBls12381.g1Msm(input);
     }
 
     /// @dev Write one EIP-2537 G1MSM term `(point_128 || scalar_32)` into `buf` at `offset`.
@@ -345,15 +345,16 @@ contract TSSVerifier {
         uint256 rDivOmega = mulmod(r, _frInv(omega), BLS_FR_ORDER);
         uint256 parsumROmega = _readFrLe(hintSig, SIG_OFFSET_PARSUM_OF_R_DIV_OMG);
 
-        bytes memory parsumArg = _g1Msm(
+        bytes memory parsumArg = ClprBls12381.g1Msm(
             abi.encodePacked(
                 _arkG1ToEip2537(hintSig, SIG_OFFSET_PARSUM), bytes32(uint256(1)), g0, bytes32(_frNeg(parsumROmega))
             )
         );
 
-        bytes memory parsumRhsG2 = _g2Msm(abi.encodePacked(h0, bytes32(_frNeg(rDivOmega)), h1, bytes32(uint256(1))));
+        bytes memory parsumRhsG2 =
+            ClprBls12381.g2Msm(abi.encodePacked(h0, bytes32(_frNeg(rDivOmega)), h1, bytes32(uint256(1))));
 
-        if (!_pairing(
+        if (!ClprBls12381.pairing(
                 bytes.concat(
                     parsumArg, h0, _negG1Eip(_arkG1ToEip2537(hintSig, SIG_OFFSET_OPENING_R_DIV_OMEGA)), parsumRhsG2
                 )
@@ -368,7 +369,7 @@ contract TSSVerifier {
         internal
         view
     {
-        if (!_pairing(
+        if (!ClprBls12381.pairing(
                 bytes.concat(
                     _arkG1ToEip2537(hintSig, SIG_OFFSET_B),
                     _arkG2ToEip2537(hintVk, VK_OFFSET_SK),
@@ -453,7 +454,7 @@ contract TSSVerifier {
     /// @dev Degree bound check (hinTS step 9).
     ///      Verifies e([Qx]₁, [τ]₂) · e(−[Qx·τ]₁, [1]₂) == 1.
     function _verifyDegreeBound(bytes calldata hintSig, bytes memory h0, bytes memory h1) internal view {
-        if (!_pairing(
+        if (!ClprBls12381.pairing(
                 bytes.concat(
                     _arkG1ToEip2537(hintSig, SIG_OFFSET_QX),
                     h1,
@@ -611,8 +612,8 @@ contract TSSVerifier {
     /// @dev ArkWorks DefaultFieldHasher<Sha256, 128> applied to `message` with
     ///      DST `FIAT_SHAMIR_DST`, producing one BLS12-381 Fr element.
     ///
-    ///      Deviates from RFC 9380 §5.3.1: uses Z_pad of L = 48 bytes instead
-    ///      of the SHA-256 block size 64. ArkWorks 0.4.2 quirk;
+    ///      Deviates from RFC 9380 `expand_message_xmd`: uses Z_pad of L = 48 bytes
+    ///      instead of the SHA-256 block size 64. ArkWorks 0.4.2 quirk.
     ///
     ///      With len_in_bytes = 48 and SHA-256, ell = ceil(48/32) = 2, so we
     ///      need exactly b_0, b_1, b_2 and concatenate b_1 || top16(b_2).
@@ -628,7 +629,6 @@ contract TSSVerifier {
         bytes32 b1 = sha256(abi.encodePacked(b0, uint8(1), dstPrime));
         bytes32 b2 = sha256(abi.encodePacked(b0 ^ b1, uint8(2), dstPrime));
 
-        // uniform_bytes (48 B) = b1 (32 B) || top16(b2)
         // casting to 'bytes16' is safe because we want only top16 bytes of b2
         // forge-lint: disable-next-line(unsafe-typecast)
         bytes memory uniform = abi.encodePacked(b1, bytes16(b2));
@@ -643,14 +643,14 @@ contract TSSVerifier {
             BLS_FR_ORDER // mod = r (32 BE)
         );
         (bool ok, bytes memory out) = ClprBls12381.MODEXP.staticcall(modexpInput);
-        if (!ok || out.length != 32) revert ClprHieroPrecompileFailure(ClprBls12381.MODEXP);
+        if (!ok || out.length != 32) revert ClprBls12381.BlsPrecompileCallFailed();
         // casting to 'bytes32' is safe because there is a check above for out.length to equal 32
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint256(bytes32(out));
     }
 
     // hinTS helpers added for Steps 4–9: byte readers, ArkWorks↔EIP-2537
-    // converters, precompile wrappers, and Fr arithmetic.
+    // converters, and Fr arithmetic.
 
     /// @dev Read a u64 little-endian value from `src[offset..offset+8]`.
     ///      Uses a single calldataload + 64-bit byte-reversal instead of an 8-iteration loop.
@@ -706,36 +706,6 @@ contract TSSVerifier {
         }
     }
 
-    /// @dev Wrapper for EIP-2537 G1 multi-scalar multiplication (0x0c). Input
-    ///      is `(G1_128 || scalar_32)+`. Output is a single G1 point.
-    function _g1Msm(bytes memory input) internal view returns (bytes memory out) {
-        bool ok;
-        (ok, out) = ClprBls12381.BLS12_G1MSM.staticcall(input);
-        if (!ok || out.length != ClprBls12381.G1_POINT_LENGTH) {
-            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_G1MSM);
-        }
-    }
-
-    /// @dev Wrapper for EIP-2537 G2 multi-scalar multiplication (0x0e).
-    function _g2Msm(bytes memory input) internal view returns (bytes memory out) {
-        bool ok;
-        (ok, out) = ClprBls12381.BLS12_G2MSM.staticcall(input);
-        if (!ok || out.length != ClprBls12381.G2_POINT_LENGTH) {
-            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_G2MSM);
-        }
-    }
-
-    /// @dev Wrapper for EIP-2537 pairing check (0x0f). Returns true iff the
-    ///      product of pairings evaluates to one in Fp12 (precompile returns
-    ///      32-byte word = 1).
-    function _pairing(bytes memory input) internal view returns (bool) {
-        (bool ok, bytes memory out) = ClprBls12381.BLS12_PAIRING_CHECK.staticcall(input);
-        if (!ok) revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_PAIRING_CHECK);
-        // casting to 'bytes32' is safe because bls pairing precompile returns always 32 bytes output
-        // forge-lint: disable-next-line(unsafe-typecast)
-        return out.length == 32 && uint256(bytes32(out)) == 1;
-    }
-
     /// @dev Negate an EIP-2537 G1 point by flipping the y-coordinate in Fp:  −y = p − y.
     ///      EIP-2537 G1 layout (128 bytes):
     ///        [0..16)  = 16 zero bytes (x padding)
@@ -789,7 +759,7 @@ contract TSSVerifier {
     function _frPow(uint256 base, uint256 exp) internal view returns (uint256) {
         bytes memory input = abi.encodePacked(uint256(32), uint256(32), uint256(32), base, exp, BLS_FR_ORDER);
         (bool ok, bytes memory out) = ClprBls12381.MODEXP.staticcall(input);
-        if (!ok || out.length != 32) revert ClprHieroPrecompileFailure(ClprBls12381.MODEXP);
+        if (!ok || out.length != 32) revert ClprBls12381.BlsPrecompileCallFailed();
         // casting to 'bytes32' is safe because there is a check above for out.length to equal 32
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint256(bytes32(out));
@@ -833,84 +803,5 @@ contract TSSVerifier {
         abProof = blockSig[OFFSET_ABPROOF:]; // 2728..len
 
         isWrapsSettled = (len == TOTAL_SETTLED_WRAPS);
-    }
-
-    /// @dev RFC 9380 §3 hash_to_curve, specialized for BLS12-381 G2 with SHA-256 XMD.
-    ///       1. uniform_bytes = expand_message_xmd(message, DST, 256)
-    ///       2. u0, u1 ∈ Fp2 derived from 4 × 64-byte chunks reduced mod p
-    ///       3. Q0 = map_fp2_to_g2(u0); Q1 = map_fp2_to_g2(u1)  (EIP-2537 includes cofactor clear)
-    ///       4. return Q0 + Q1                                  (EIP-2537 G2ADD)
-    function _hashToG2(bytes memory message) internal view returns (bytes memory) {
-        bytes memory uniformBytes = _expandMessageXmd(message);
-
-        // u0 = (uniformBytes[0..64], uniformBytes[64..128]) each reduced mod p, in Fp2.
-        bytes memory u0 = bytes.concat(_modP(uniformBytes, 0), _modP(uniformBytes, 64));
-        // u1 = (uniformBytes[128..192], uniformBytes[192..256]) each reduced mod p, in Fp2.
-        bytes memory u1 = bytes.concat(_modP(uniformBytes, 128), _modP(uniformBytes, 192));
-
-        bytes memory q0 = _mapFp2ToG2(u0);
-        bytes memory q1 = _mapFp2ToG2(u1);
-        return _g2Add(q0, q1);
-    }
-
-    /// @dev RFC 9380 §5.3.1 expand_message_xmd with SHA-256.
-    ///       Constants: b_in_bytes = 32, s_in_bytes = 64, ell = ceil(256/32) = 8.
-    function _expandMessageXmd(bytes memory message) internal pure returns (bytes memory uniformBytes) {
-        bytes memory dstPrime = abi.encodePacked(HIERO_DST, uint8(HIERO_DST.length));
-        // msg_prime = Z_pad(64) || msg || I2OSP(256, 2) || I2OSP(0, 1) || DST_prime
-        bytes memory msgPrime = abi.encodePacked(new bytes(64), message, uint16(256), uint8(0), dstPrime);
-
-        bytes32 b0 = sha256(msgPrime);
-        bytes32 bi = sha256(abi.encodePacked(b0, uint8(1), dstPrime));
-
-        uniformBytes = new bytes(256);
-        _writeBytes32At(uniformBytes, 0, bi);
-        for (uint8 i = 2; i <= 8; i++) {
-            bi = sha256(abi.encodePacked(bi ^ b0, i, dstPrime));
-            _writeBytes32At(uniformBytes, (uint256(i) - 1) * 32, bi);
-        }
-    }
-
-    /// @dev Compute `n mod p` where n is a 64-byte big-endian integer drawn from
-    ///       `uniformBytes[offset..offset+64]`. Uses the modexp precompile with exp=1.
-    ///       Returns a 64-byte EIP-2537 Fp encoding (top 16 bytes zero).
-    function _modP(bytes memory uniformBytes, uint256 offset) internal view returns (bytes memory) {
-        bytes memory base = new bytes(64);
-        // forge-lint: disable-next-line(unsafe-typecast) — copying 64 bytes word-by-word.
-        assembly ("memory-safe") {
-            // Copy 64 bytes starting at uniformBytes+0x20+offset into base+0x20.
-            let src := add(add(uniformBytes, 0x20), offset)
-            let dst := add(base, 0x20)
-            mstore(dst, mload(src))
-            mstore(add(dst, 0x20), mload(add(src, 0x20)))
-        }
-        // EIP-198 modexp input: lenBase || lenExp || lenMod || base || exp || mod
-        bytes memory input =
-            abi.encodePacked(uint256(64), uint256(32), uint256(64), base, uint256(1), ClprBls12381.FIELD_MODULUS_FP);
-        (bool ok, bytes memory out) = ClprBls12381.MODEXP.staticcall(input);
-        if (!ok || out.length != 64) revert ClprHieroPrecompileFailure(ClprBls12381.MODEXP);
-        return out;
-    }
-
-    function _mapFp2ToG2(bytes memory u) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = ClprBls12381.BLS12_MAP_FP2_TO_G2.staticcall(u);
-        if (!ok || out.length != ClprBls12381.G2_POINT_LENGTH) {
-            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_MAP_FP2_TO_G2);
-        }
-        return out;
-    }
-
-    function _g2Add(bytes memory a, bytes memory b) internal view returns (bytes memory) {
-        (bool ok, bytes memory out) = ClprBls12381.BLS12_G2ADD.staticcall(bytes.concat(a, b));
-        if (!ok || out.length != ClprBls12381.G2_POINT_LENGTH) {
-            revert ClprHieroPrecompileFailure(ClprBls12381.BLS12_G2ADD);
-        }
-        return out;
-    }
-
-    function _writeBytes32At(bytes memory dst, uint256 offset, bytes32 v) internal pure {
-        assembly ("memory-safe") {
-            mstore(add(add(dst, 0x20), offset), v)
-        }
     }
 }

@@ -85,7 +85,7 @@ contract ClprTempoBlsTest is TempoSyntheticProofs {
         TempoFixture memory f = _loadTempoFixture("presto-tip");
         bytes memory badSig = f.sigUncompressed;
         badSig[127] ^= 0x01; // y no longer satisfies the curve equation
-        vm.expectRevert(ClprTempoBls.BlsPrecompileCallFailed.selector);
+        vm.expectRevert(ClprBls12381.BlsPrecompileCallFailed.selector);
         h.verify(badSig, ClprTempoCertificate.finalizeMessage(f.proposal), f.keyUncompressed);
     }
 

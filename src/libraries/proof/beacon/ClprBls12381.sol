@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 /// @title ClprBls12381
 /// @notice Shared BLS12-381 constants (EIP-2537 precompile addresses, point lengths, the field modulus,
 ///         the negated generators), G1 and G2 *compression* (uncompressed → ZCash/Ethereum compressed),
-///         RFC 9380 hash-to-field and hash-to-G1, and EIP-2537 precompile wrappers.
+///         RFC 9380 hash-to-field, hash-to-G1 and hash-to-G2, and EIP-2537 precompile wrappers.
 ///
 /// @dev The beacon `SyncCommittee` SSZ root and Tempo finalization certificates commit to compressed
 ///      points, while the relayer supplies uncompressed ones; compression binds the two. It is the cheap
@@ -62,6 +62,8 @@ library ClprBls12381 {
 
     /// @dev Two 64-byte field elements (RFC 9380, L = 64).
     uint256 internal constant HASH_TO_G1_EXPAND_LENGTH = 128;
+    /// @dev Two Fp2 elements, four 64-byte field elements (RFC 9380, L = 64).
+    uint256 internal constant HASH_TO_G2_EXPAND_LENGTH = 256;
 
     error BadLength();
     /// @notice A MODEXP or EIP-2537 precompile call failed or returned the wrong length.
@@ -156,48 +158,58 @@ library ClprBls12381 {
         return g1Add(q0, q1);
     }
 
+    /// @notice Hash `message` to a G2 point (256 bytes) with SHA-256 `expand_message_xmd`.
+    /// @dev `BLS12_MAP_FP2_TO_G2` clears the cofactor of each mapped point, so the sum needs no
+    ///      further clearing.
+    /// @param dst Domain separation tag, at most 255 bytes.
+    function hashToG2(bytes memory message, bytes memory dst) internal view returns (bytes memory) {
+        bytes memory expanded = expandMessageXmd(message, dst, HASH_TO_G2_EXPAND_LENGTH);
+        bytes memory q0 = mapFp2ToG2(bytes.concat(fpElementAt(expanded, 0), fpElementAt(expanded, 64)));
+        bytes memory q1 = mapFp2ToG2(bytes.concat(fpElementAt(expanded, 128), fpElementAt(expanded, 192)));
+        return g2Add(q0, q1);
+    }
+
     /// @dev RFC 9380 `expand_message_xmd` over SHA-256: b_in_bytes = 32, s_in_bytes = 64.
+    ///      `lenInBytes` is at most 8,160 (255 blocks), the RFC limit; larger values are not checked.
     function expandMessageXmd(bytes memory msgBytes, bytes memory dst, uint256 lenInBytes)
         internal
         pure
-        returns (bytes memory)
+        returns (bytes memory uniform)
     {
-        bytes memory dstPrime = abi.encodePacked(dst, bytes1(uint8(dst.length)));
-        uint8 ell = uint8((lenInBytes + 31) / 32);
-        bytes memory zPad = new bytes(64);
         // forge-lint: disable-next-line(unsafe-typecast)
-        bytes memory libStr = abi.encodePacked(bytes2(uint16(lenInBytes)), bytes1(0x00));
-        bytes memory b0 = abi.encodePacked(sha256(abi.encodePacked(zPad, msgBytes, libStr, dstPrime)));
-        bytes memory uniform = new bytes(lenInBytes);
-        bytes memory bi = abi.encodePacked(sha256(abi.encodePacked(b0, bytes1(0x01), dstPrime)));
-        _copyBytes(bi, 0, uniform, 0, 32);
-        for (uint8 i = 2; i <= ell; i++) {
-            bi = abi.encodePacked(sha256(abi.encodePacked(_xor32(b0, bi), bytes1(i), dstPrime)));
-            uint256 off = uint256(i - 1) * 32;
-            _copyBytes(bi, 0, uniform, off, lenInBytes - off < 32 ? lenInBytes - off : 32);
+        bytes memory dstPrime = abi.encodePacked(dst, uint8(dst.length));
+        uint256 ell = (lenInBytes + 31) / 32;
+        // forge-lint: disable-next-line(unsafe-typecast)
+        bytes32 b0 = sha256(abi.encodePacked(new bytes(64), msgBytes, uint16(lenInBytes), uint8(0), dstPrime));
+        bytes32 bi = sha256(abi.encodePacked(b0, uint8(1), dstPrime));
+        // Whole 32-byte blocks are written, so the buffer holds `ell` blocks and is then cut to `lenInBytes`.
+        uniform = new bytes(ell * 32);
+        assembly ("memory-safe") {
+            mstore(add(uniform, 0x20), bi)
         }
-        return uniform;
+        for (uint256 i = 2; i <= ell; i++) {
+            // forge-lint: disable-next-line(unsafe-typecast)
+            bi = sha256(abi.encodePacked(bi ^ b0, uint8(i), dstPrime));
+            assembly ("memory-safe") {
+                mstore(add(uniform, mul(i, 0x20)), bi)
+            }
+        }
+        assembly ("memory-safe") {
+            mstore(uniform, lenInBytes)
+        }
     }
 
     /// @dev The 64-byte chunk at `offset`, reduced mod p, as a 64-byte EIP-2537 field element.
-    function fpElementAt(bytes memory expanded, uint256 offset) internal view returns (bytes memory fp) {
-        fp = new bytes(64);
-        bytes memory reduced = reduceFp64(expanded, offset);
-        assembly ("memory-safe") {
-            mcopy(add(fp, 0x30), add(reduced, 0x20), 48)
-        }
-    }
-
-    /// @dev Reduce the 64-byte big-endian value `data[offset..offset+64]` mod p via MODEXP (`base^1`),
-    ///      returning the 48-byte result. This is RFC 9380's OS2IP-then-reduce for one field element.
-    function reduceFp64(bytes memory data, uint256 offset) internal view returns (bytes memory) {
+    function fpElementAt(bytes memory expanded, uint256 offset) internal view returns (bytes memory) {
         bytes memory base = new bytes(64);
         assembly ("memory-safe") {
-            mcopy(add(base, 0x20), add(add(data, 0x20), offset), 64)
+            mcopy(add(base, 0x20), add(add(expanded, 0x20), offset), 64)
         }
-        bytes memory input = abi.encodePacked(uint256(64), uint256(1), uint256(48), base, bytes1(0x01), FIELD_MODULUS);
+        // MODEXP returns a result as long as its modulus, so the 64-byte modulus gives the EIP-2537 layout.
+        bytes memory input =
+            abi.encodePacked(uint256(64), uint256(1), uint256(64), base, bytes1(0x01), FIELD_MODULUS_FP);
         (bool ok, bytes memory out) = MODEXP.staticcall(input);
-        if (!ok || out.length != 48) revert BlsPrecompileCallFailed();
+        if (!ok || out.length != 64) revert BlsPrecompileCallFailed();
         return out;
     }
 
@@ -229,19 +241,26 @@ library ClprBls12381 {
         return res;
     }
 
-    // ── Byte helpers ─────────────────────────────────────────────────────────
-
-    /// @dev XOR two 32-byte buffers as a single word. Both inputs are exactly 32 bytes.
-    function _xor32(bytes memory a, bytes memory b) private pure returns (bytes memory out) {
-        out = new bytes(32);
-        assembly ("memory-safe") {
-            mstore(add(out, 0x20), xor(mload(add(a, 0x20)), mload(add(b, 0x20))))
-        }
+    /// @dev Input is `(G1 point ‖ 32-byte scalar)+`.
+    function g1Msm(bytes memory input) internal view returns (bytes memory) {
+        (bool ok, bytes memory res) = BLS12_G1MSM.staticcall(input);
+        if (!ok || res.length != G1_POINT_LENGTH) revert BlsPrecompileCallFailed();
+        return res;
     }
 
-    function _copyBytes(bytes memory src, uint256 srcOff, bytes memory dst, uint256 dstOff, uint256 len) private pure {
-        assembly ("memory-safe") {
-            mcopy(add(add(dst, 0x20), dstOff), add(add(src, 0x20), srcOff), len)
-        }
+    /// @dev Input is `(G2 point ‖ 32-byte scalar)+`.
+    function g2Msm(bytes memory input) internal view returns (bytes memory) {
+        (bool ok, bytes memory res) = BLS12_G2MSM.staticcall(input);
+        if (!ok || res.length != G2_POINT_LENGTH) revert BlsPrecompileCallFailed();
+        return res;
+    }
+
+    /// @dev True iff the product of the pairings of the `(G1 point ‖ G2 point)+` input is one.
+    function pairing(bytes memory input) internal view returns (bool) {
+        (bool ok, bytes memory res) = BLS12_PAIRING_CHECK.staticcall(input);
+        if (!ok) revert BlsPrecompileCallFailed();
+        // The length check makes the bytes32 read exact.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return res.length == 32 && uint256(bytes32(res)) == 1;
     }
 }

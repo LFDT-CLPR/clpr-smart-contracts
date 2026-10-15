@@ -31,7 +31,6 @@ library ClprBeaconBls {
     // ((r-1)·P = -P), used to subtract the non-participants from the full-committee aggregate.
     uint256 internal constant R_MINUS_1 = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000;
 
-    error BlsPrecompileCallFailed();
     error BlsSignatureInvalid();
     error InvalidSignatureLength();
     error InvalidPubkeyLength();
@@ -93,11 +92,11 @@ library ClprBeaconBls {
         if (signature.length != 256) revert InvalidSignatureLength();
         if (aggregatePubkey.length != 128) revert InvalidPubkeyLength();
         // Full participation: the participant aggregate IS the committee aggregate, so skip the MSM
-        // entirely. The PAIRING_CHECK below still subgroup-checks the aggregate (EIP-2537 §5).
+        // entirely. The PAIRING_CHECK below still subgroup-checks the aggregate (EIP-2537).
         bytes memory participantsAggregate =
             nonParticipants.length == 0 ? aggregatePubkey : _aggregateG1Complement(aggregatePubkey, nonParticipants);
         if (_isZero(participantsAggregate) || _isZero(signature)) revert BlsSignatureInvalid();
-        bytes memory hashMsg = _hashToG2(signingRoot);
+        bytes memory hashMsg = hashToG2(signingRoot);
         _verifyPairing(participantsAggregate, signature, hashMsg);
     }
 
@@ -130,8 +129,8 @@ library ClprBeaconBls {
         bytes memory input = new bytes((n + 1) * 160); // (128-byte point || 32-byte scalar) per term
         assembly ("memory-safe") {
             let dst := add(input, 0x20)
-            mcopy(dst, add(aggregate, 0x20), 128) // full-committee aggregate
-            mstore(add(dst, 128), 1) // scalar = 1
+            mcopy(dst, add(aggregate, 0x20), 128)
+            mstore(add(dst, 128), 1)
         }
         for (uint256 i = 0; i < n; i++) {
             bytes memory pk = nonParticipants[i];
@@ -139,38 +138,24 @@ library ClprBeaconBls {
             uint256 offset = (i + 1) * 160;
             assembly ("memory-safe") {
                 let dst := add(add(input, 0x20), offset)
-                mcopy(dst, add(pk, 0x20), 128) // non-participant pubkey
-                mstore(add(dst, 128), R_MINUS_1) // scalar = -1 mod r  (subtracts the point)
+                mcopy(dst, add(pk, 0x20), 128)
+                mstore(add(dst, 128), R_MINUS_1)
             }
         }
-        (bool ok, bytes memory res) = ClprBls12381.BLS12_G1MSM.staticcall(input);
-        if (!ok || res.length != 128) revert BlsPrecompileCallFailed();
-        return res;
+        return ClprBls12381.g1Msm(input);
     }
 
     // ── Hash-to-G2 ───────────────────────────────────────────────────────────
 
-    /// @dev Hash `signingRoot` to a G2 point per RFC 9380 §3 / ETH2 spec:
-    ///      expand_message_xmd → two Fp2 elements → BLS12_MAP_FP2_TO_G2 × 2 → BLS12_G2ADD.
-    ///      Cofactor clearing is performed inside BLS12_MAP_FP2_TO_G2 (EIP-2537 §5).
+    /// @dev Hash `signingRoot` to a G2 point per RFC 9380 / ETH2 spec.
     ///      Exposed as `internal` so tests can construct a self-consistent signature `H(m)`.
     function hashToG2(bytes32 signingRoot) internal view returns (bytes memory) {
-        return _hashToG2(signingRoot);
+        return ClprBls12381.hashToG2(abi.encodePacked(signingRoot), BLS_DST);
     }
 
-    function _hashToG2(bytes32 signingRoot) private view returns (bytes memory) {
-        // hash_to_field(msg, count=2) for G2: 2 Fp2 elements = 4 Fp elements, each from L=64 bytes
-        // reduced mod p (RFC 9380, L = ceil((ceil(log2 p) + k) / 8) = 64). So 256 expansion bytes.
-        bytes memory expanded = ClprBls12381.expandMessageXmd(abi.encodePacked(signingRoot), BLS_DST, 256);
-        bytes memory q0 = ClprBls12381.mapFp2ToG2(_makeFp2(expanded, 0)); // u[0] = (e0, e1) from bytes [0..128)
-        bytes memory q1 = ClprBls12381.mapFp2ToG2(_makeFp2(expanded, 128)); // u[1] = (e2, e3) from bytes [128..256)
-        return ClprBls12381.g2Add(q0, q1);
-    }
-
-    // ── EIP-2537 precompile wrappers ──────────────────────────────────────────
+    // ── Pairing ──────────────────────────────────────────────────────────────
 
     /// @dev Pairing check: e(aggPubkey, H(msg)) * e(-G1_GEN, sig) == GT_identity.
-    ///      EIP-2537 PAIRING_CHECK input: [G1_0 || G2_0 || G1_1 || G2_1] (768 bytes total).
     function _verifyPairing(bytes memory aggPubkey, bytes memory sig, bytes memory hashMsg) private view {
         bytes memory input = abi.encodePacked(
             aggPubkey, // 128 bytes G1
@@ -178,26 +163,6 @@ library ClprBeaconBls {
             ClprBls12381.G1_GENERATOR_NEG, // 128 bytes G1
             sig // 256 bytes G2
         );
-        (bool ok, bytes memory res) = ClprBls12381.BLS12_PAIRING_CHECK.staticcall(input);
-        if (!ok) revert BlsPrecompileCallFailed();
-        // EIP-2537 PAIRING_CHECK returns a 32-byte big-endian word: 1 ⇒ product of pairings is the
-        // Fp12 identity (success), 0 ⇒ otherwise. The success bit is the *last* byte.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        if (res.length != 32 || uint256(bytes32(res)) != 1) revert BlsSignatureInvalid();
-    }
-
-    // ── Pure helpers ──────────────────────────────────────────────────────────
-
-    /// @dev Build a 128-byte EIP-2537 Fp2 element from `expanded[offset..offset+128]`: two 64-byte
-    ///      wide chunks (RFC 9380 L=64), each reduced mod p (OS2IP then `mod p`) into a 48-byte Fp
-    ///      coordinate, right-aligned in its 64-byte slot. Order is `c0 || c1` (value = c0 + c1·u).
-    function _makeFp2(bytes memory expanded, uint256 offset) private view returns (bytes memory fp2) {
-        fp2 = new bytes(128);
-        bytes memory c0 = ClprBls12381.reduceFp64(expanded, offset);
-        bytes memory c1 = ClprBls12381.reduceFp64(expanded, offset + 64);
-        for (uint256 i = 0; i < 48; i++) {
-            fp2[16 + i] = c0[i];
-            fp2[80 + i] = c1[i];
-        }
+        if (!ClprBls12381.pairing(input)) revert BlsSignatureInvalid();
     }
 }

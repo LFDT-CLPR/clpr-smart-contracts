@@ -14,7 +14,6 @@ library ClprTempoBls {
     bytes internal constant DST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
     error BadLength();
-    error BlsPrecompileCallFailed();
     error BlsSignatureInvalid();
 
     /// @notice Verify `signature` (128 bytes, G1) over `message` under `publicKey` (256 bytes, G2).
@@ -25,10 +24,6 @@ library ClprTempoBls {
         }
         bytes memory hashed = ClprBls12381.hashToG1(message, DST);
         bytes memory input = abi.encodePacked(signature, ClprBls12381.G2_GENERATOR_NEG, hashed, publicKey);
-        (bool ok, bytes memory res) = ClprBls12381.BLS12_PAIRING_CHECK.staticcall(input);
-        if (!ok) revert BlsPrecompileCallFailed();
-        // The length check makes the bytes32 read exact.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        if (res.length != 32 || uint256(bytes32(res)) != 1) revert BlsSignatureInvalid();
+        if (!ClprBls12381.pairing(input)) revert BlsSignatureInvalid();
     }
 }

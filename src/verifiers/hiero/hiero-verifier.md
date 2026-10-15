@@ -287,7 +287,7 @@ hinTS is a weighted-threshold BLS signature with a polynomial-IOP proof that the
 | 8 | `_verifyFieldIdentities` | parsum recurrence and endpoint; bitmap binary and endpoint | `HieroHintsParsumBadRecurrence` / `HieroHintsBitmapNotBinary` |
 | 9 | `_verifyDegreeBound` | `e(Qx, [τ]₂) · e(−Qx·τ, [1]₂) == 1` | `HieroHintsDegreeBoundFailed` |
 
-A failed precompile call reverts `ClprHieroPrecompileFailure(address)`. The in-source comment in `_computeFiatShamirChallenge` says "800-byte"; the 14 elements beside it add up to 752 bytes.
+A failed precompile call reverts `ClprBls12381.BlsPrecompileCallFailed()`. The in-source comment in `_computeFiatShamirChallenge` says "800-byte"; the 14 elements beside it add up to 752 bytes.
 
 > [!WARNING]
 > **The wire formats are ArkWorks formats, not EIP-2537.** `hintVk` and `hintSig` hold ArkWorks-*uncompressed* points: G1 is 96 B `x ‖ y`, and G2 is 192 B with the imaginary part first. `_arkG1ToEip2537` / `_arkG2ToEip2537` pad them to 128 / 256 B and swap c0/c1 for G2. The Fiat–Shamir transcript uses ArkWorks-*compressed* points (`_compressG1Ark` / `_compressG2Ark`), and Fr scalars are 32-byte little-endian. `_hashToFr` uses `expand_message_xmd` with a 48-byte `Z_pad` where RFC 9380 uses 64, to match ArkWorks 0.4.2. The transcript order is load-bearing: a different order changes `r`, and every check after it fails.
@@ -364,7 +364,7 @@ Each re-rooted path costs one full SHA-384 walk. The number of walks does not gr
 | `ClprHieroTssVerificationFailed()` | both | `verifyTss` returned `false` |
 | `InvalidPayloadShape()` | `verifyConfig` | `configProofBytes` is empty |
 
-**`TSSVerifier`**: `ClprHieroSignatureLength(uint256)`, `ClprHieroWrapsProofRequired()`, `ClprHieroPrecompileFailure(address)`, `HieroHintsBadVkLen(uint256)`, `HieroHintsBadSigLen(uint256)`, `HieroHintsBadBlockRootLen(uint256)`, `HieroHintsBadN(uint64)`, `HieroHintsBelowThreshold()`, `HieroHintsFinalPairingFailed()`, `HieroHintsKzgMergedFailed()`, `HieroHintsKzgShiftedFailed()`, `HieroHintsBSkIdentityFailed()`, `HieroHintsParsumBadRecurrence()`, `HieroHintsBitmapNotBinary()`, `HieroHintsDegreeBoundFailed()`. Each maps to a step in the hinTS table above.
+**`TSSVerifier`**: `ClprHieroSignatureLength(uint256)`, `ClprHieroWrapsProofRequired()`, `HieroHintsBadVkLen(uint256)`, `HieroHintsBadSigLen(uint256)`, `HieroHintsBadBlockRootLen(uint256)`, `HieroHintsBadN(uint64)`, `HieroHintsBelowThreshold()`, `HieroHintsFinalPairingFailed()`, `HieroHintsKzgMergedFailed()`, `HieroHintsKzgShiftedFailed()`, `HieroHintsBSkIdentityFailed()`, `HieroHintsParsumBadRecurrence()`, `HieroHintsBitmapNotBinary()`, `HieroHintsDegreeBoundFailed()`. Each maps to a step in the hinTS table above.
 
 **WRAPS stack**: `WRAPSInvalidProofLength`, `WRAPSLedgerIdMismatch`, `WRAPSPoseidonMismatch`, `WRAPSCmENotInfinity`, `WRAPSPairingFailed`, `WRAPSSliceOutOfBounds` (`WRAPSVerifier`); `WRAPSGammaAbcIndexOutOfRange` (`WRAPSVerificationKey`); `BN254G2SqrtFailed` (`BN254Util`). A failed BN254 precompile call reverts with empty data.
 

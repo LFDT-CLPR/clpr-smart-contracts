@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test, console} from "forge-std/Test.sol";
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 import {TSSVerifier} from "@hiero-ledger/clpr/verifiers/hiero/TSSVerifier.sol";
 
 contract HintsProfiler is TSSVerifier {
@@ -75,31 +76,31 @@ contract HintsProfiler is TSSVerifier {
         uint256 t;
 
         t = gasleft();
-        _hashToG2(m);
+        ClprBls12381.hashToG2(m, HIERO_DST);
         g[0] = t - gasleft();
 
         t = gasleft();
-        _pairing(bytes.concat(qx, h1, qxt, h0));
+        ClprBls12381.pairing(bytes.concat(qx, h1, qxt, h0));
         g[1] = t - gasleft(); // 2-pair pairing
 
         bytes memory four = bytes.concat(qx, h1, qxt, h0, qx, h1, qxt, h0);
         t = gasleft();
-        _pairing(four);
+        ClprBls12381.pairing(four);
         g[2] = t - gasleft(); // 4-pair pairing
 
         bytes memory six = bytes.concat(four, qx, h1, qxt, h0);
         t = gasleft();
-        _pairing(six);
+        ClprBls12381.pairing(six);
         g[3] = t - gasleft(); // 6-pair pairing
 
         bytes memory msm1 = abi.encodePacked(g0, uint256(7));
         t = gasleft();
-        _g1Msm(msm1);
+        ClprBls12381.g1Msm(msm1);
         g[4] = t - gasleft(); // 1-term G1MSM
 
         bytes memory msm2 = abi.encodePacked(g0, uint256(7), qx, uint256(9));
         t = gasleft();
-        _g1Msm(msm2);
+        ClprBls12381.g1Msm(msm2);
         g[5] = t - gasleft(); // 2-term G1MSM
 
         bytes memory msm9 = new bytes(9 * 160);
@@ -109,15 +110,15 @@ contract HintsProfiler is TSSVerifier {
             _writeMsmTerm(msm10, i * 160, g0, i + 3);
         }
         t = gasleft();
-        _g1Msm(msm9);
+        ClprBls12381.g1Msm(msm9);
         g[6] = t - gasleft(); // 9-term G1MSM
         t = gasleft();
-        _g1Msm(msm10);
+        ClprBls12381.g1Msm(msm10);
         g[7] = t - gasleft(); // 10-term G1MSM
 
         bytes memory g2in = abi.encodePacked(h0, bytes32(uint256(5)), h1, bytes32(uint256(1)));
         t = gasleft();
-        _g2Msm(g2in);
+        ClprBls12381.g2Msm(g2in);
         g[8] = t - gasleft(); // 2-term G2MSM
 
         t = gasleft();
@@ -202,7 +203,9 @@ contract HintsProfiler is TSSVerifier {
         _writeMsmTerm(input, 1280, g0, negCe);
         _writeMsmTerm(input, 1440, pi, r);
 
-        if (!_pairing(bytes.concat(_g1Msm(input), h0, _negG1Eip(pi), h1))) revert HieroHintsKzgMergedFailed();
+        if (!ClprBls12381.pairing(bytes.concat(ClprBls12381.g1Msm(input), h0, _negG1Eip(pi), h1))) {
+            revert HieroHintsKzgMergedFailed();
+        }
     }
 
     /// e(parsum − v·g0 + z·π', h0) · e(−π', h1) == 1, z = r/ω.
@@ -217,12 +220,12 @@ contract HintsProfiler is TSSVerifier {
         uint256 z = mulmod(r, omegaInv, BLS_FR_ORDER);
         uint256 v = _readFrLe(sig, SIG_OFFSET_PARSUM_OF_R_DIV_OMG);
         bytes memory pi = _arkG1ToEip2537(sig, SIG_OFFSET_OPENING_R_DIV_OMEGA);
-        bytes memory lhs = _g1Msm(
+        bytes memory lhs = ClprBls12381.g1Msm(
             abi.encodePacked(
                 _arkG1ToEip2537(sig, SIG_OFFSET_PARSUM), bytes32(uint256(1)), g0, bytes32(_frNeg(v)), pi, bytes32(z)
             )
         );
-        if (!_pairing(bytes.concat(lhs, h0, _negG1Eip(pi), h1))) revert HieroHintsKzgShiftedFailed();
+        if (!ClprBls12381.pairing(bytes.concat(lhs, h0, _negG1Eip(pi), h1))) revert HieroHintsKzgShiftedFailed();
     }
 
     /// Step 7 · (step 9)^γ in one 4-pair pairing:
@@ -233,10 +236,10 @@ contract HintsProfiler is TSSVerifier {
         view
     {
         uint256 gamma = uint256(keccak256(abi.encodePacked(r, sig))) % BLS_FR_ORDER;
-        bytes memory qxTerm = _g1Msm(
+        bytes memory qxTerm = ClprBls12381.g1Msm(
             abi.encodePacked(_arkG1ToEip2537(sig, SIG_OFFSET_QX), addmod(gamma, BLS_FR_ORDER - 1, BLS_FR_ORDER))
         );
-        bytes memory h0Term = _g1Msm(
+        bytes memory h0Term = ClprBls12381.g1Msm(
             abi.encodePacked(
                 _arkG1ToEip2537(sig, SIG_OFFSET_AGG_PK),
                 BLS_FR_ORDER - 1,
@@ -244,7 +247,7 @@ contract HintsProfiler is TSSVerifier {
                 _frNeg(gamma)
             )
         );
-        if (!_pairing(
+        if (!ClprBls12381.pairing(
                 bytes.concat(
                     _arkG1ToEip2537(sig, SIG_OFFSET_B),
                     _arkG2ToEip2537(vk, VK_OFFSET_SK),

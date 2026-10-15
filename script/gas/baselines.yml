@@ -22,17 +22,17 @@ log_benchmarks:
       "Protobuf decode": 177547
       "Merkle path 1": 1407829
       "Merkle path 2": 1195361
-      "hinTS BLS12-381": 902672
+      "hinTS BLS12-381": 901946
       "WRAPS Groth16+KZG": 2456774
-      "TOTAL": 6140183
+      "TOTAL": 6139457
 
   - name: Ethereum mainnet verifier (BLS / SSZ hot paths)
     match_path: test/verifiers/evm/ethereum/GasUsage.t.sol
     metrics:
-      "hashToG2": 113934
-      "BLS aggregateVerifyComplement 342 (170 nonP)": 1344779
-      "BLS aggregateVerifyComplement 512 (0 nonP)": 218662
-      "SSZ syncCommitteeRootFromUncompressed 512": 1136563
+      "hashToG2": 64341
+      "BLS aggregateVerifyComplement 342 (170 nonP)": 1294898
+      "BLS aggregateVerifyComplement 512 (0 nonP)": 169004
+      "SSZ syncCommitteeRootFromUncompressed 512": 1128868
 
   - name: Ethereum mainnet verifier (verifyBundle / submitBundle by message count)
     match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
@@ -170,4 +170,4 @@ gas_report_benchmarks:
     contract: TempoVerifier
     function: verifyConfig
     column: min
-    baseline: 219523
+    baseline: 216143
