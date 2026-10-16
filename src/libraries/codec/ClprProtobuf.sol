@@ -272,7 +272,6 @@ library ClprProtobuf {
 
     /// @notice Decode a CONTROL message encoded by `encodeControlMessage`.
     /// @param payload Full `ClprMessage` bytes (outer field 3 wraps the `ControlMessage`).
-    /// @return result Decoded `DecodedControl` including the embedded `LedgerConfiguration`.
     function decodeControlMessage(bytes memory payload) internal pure returns (ClprTypes.DecodedControl memory result) {
         uint256 offset;
         // Layer 1: ClprMessagePayload field 3 (control)
@@ -280,7 +279,6 @@ library ClprProtobuf {
         bytes memory controlMsg;
         (controlMsg,) = PB.decodeLengthDelimited(payload, offset);
         // Layer 2: ClprControlMessage — must be exactly field 1 (config_update oneof).
-        // Any unknown oneof variant causes bundle rejection to avoid processing an unrecognized control path.
         {
             uint64 ctrlField;
             (ctrlField,, offset) = PB.decodeFieldKey(controlMsg, 0);
@@ -296,12 +294,10 @@ library ClprProtobuf {
         uint256 pos = 0;
         while (pos < configMsg.length) {
             uint64 fieldNum;
-            uint8 wireType;
-            (fieldNum, wireType, pos) = PB.decodeFieldKey(configMsg, pos);
+            (fieldNum,, pos) = PB.decodeFieldKey(configMsg, pos);
             if (fieldNum == 1) {
                 uint64 v;
                 (v, pos) = PB.decodeVarint(configMsg, pos);
-                // Bound-check: peer-supplied `v` larger than uint32 would truncate silently.
                 if (v > type(uint32).max) revert ClprTypes.ClprBundleVerificationFailed();
                 // casting to 'uint32' is safe because of the bound check above.
                 // forge-lint: disable-next-line(unsafe-typecast)
@@ -338,10 +334,6 @@ library ClprProtobuf {
                 (result.config.trustAnchor, pos) = PB.decodeLengthDelimited(configMsg, pos);
             } else if (fieldNum == 8) {
                 (result.config.trustAnchorId, pos) = PB.decodeLengthDelimited(configMsg, pos);
-                // FIXME Skip deprecated `seed_endpoints`: peers still send it, and rejecting it blocks the channel.
-                //       Remove 2 lines below after the deprecated seed_endpoints field (6) is removed from LedgerConfiguration.
-            } else if (fieldNum == 6) {
-                pos = PB.skipField(configMsg, pos, wireType);
             } else {
                 // Strict wire format: every unrecognized field number rejects the whole bundle.
                 revert ClprTypes.ClprUnknownWireField(fieldNum);

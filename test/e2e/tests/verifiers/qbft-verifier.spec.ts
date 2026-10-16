@@ -284,7 +284,7 @@ describe.skipIf(shouldSkip)("QBFTVerifier — single-node Besu QBFT (verifyConfi
 
         // verifyConfig return tuple:
         // [0] channelContext, [1] chainId, [2] serviceAddress, [3] peerConfigNanos,
-        // [4] throttles, [5] initialTrustAnchor, [6] initialTrustAnchorId, [7] seedEndpoints
+        // [4] throttles, [5] initialTrustAnchor, [6] initialTrustAnchorId, [7] endpointManifest
         const [, chainId, , , , initialTrustAnchor] = result;
         expect(chainId).toBe("hiero:localnet");
         expect(initialTrustAnchor).toBe(channel.trustAnchor);
