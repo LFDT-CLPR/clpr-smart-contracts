@@ -21,6 +21,7 @@ library ClprConfig {
         });
     }
 
+    /// @dev Amounts are in wei. A service with a fee token counts them in the token's base units and needs its own.
     function defaultEconomicConfig() internal pure returns (ClprTypes.EconomicConfig memory) {
         return ClprTypes.EconomicConfig({
             messageExecutionCost: 0.001 ether,

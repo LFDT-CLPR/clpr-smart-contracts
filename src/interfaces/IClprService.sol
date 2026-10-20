@@ -189,6 +189,10 @@ interface IClprService {
     /// @return The current economic configuration
     function getEconomicConfig() external returns (ClprTypes.EconomicConfig memory);
 
+    /// @notice The ERC-20 stakes, bonds, execution charges and slash proceeds are paid in, and in
+    ///         which every `EconomicConfig` amount is denominated; `address(0)` means native value.
+    function getFeeToken() external returns (address);
+
     /// @notice Retrieve a message from a channel's queue.
     /// @dev Zero-valued (empty `payload`) for an unsent ID and once the slot is pruned: a DATA
     ///      message when its REPLY is processed, a CONTROL/REPLY message when the peer acknowledges it.
@@ -210,13 +214,18 @@ interface IClprService {
     function registerConnector(bytes32 commitment) external;
 
     /// @notice Complete connector registration (reveal phase).
-    /// @param connectorId Must equal keccak256(channelId || pubKey || salt) packed as bytes.
+    /// @dev Locks the stake: `msg.value` in native mode, reverting with ClprInsufficientStake below
+    ///      `minLockedStake`; in token mode exactly `minLockedStake`, pulled with `transferFrom`, and any
+    ///      `msg.value` reverts with ClprNativeValueMismatch. Approve exactly that amount: a larger allowance
+    ///      lets an owner who raises `minLockedStake` first lock more. The stake comes back only through
+    ///      {removeConnector}.
+    /// @param connectorId Must equal keccak256(channelId || pubKey || salt) packed as bytes, or the call
+    ///        reverts with ClprInvalidChannelId.
     /// @param pubKey Full operator public key. On EVM: 64-byte uncompressed secp256k1 (X || Y).
     /// @param sig ECDSA signature over keccak256(connectorId || address(this)) with Ethereum prefix.
     /// @param salt Operator-chosen label differentiating connectors on the same channel.
-    /// @param channelId The channel this connector is bound to.
     /// @param connectorContract Local contract implementing IClprConnector.
-    /// @param admin Address authorized to deregister and top up stake.
+    /// @param admin Only address allowed to call {removeConnector}; any caller can top up the stake.
     function completeConnector(
         bytes32 connectorId,
         bytes calldata pubKey,
@@ -233,8 +242,12 @@ interface IClprService {
     /// @notice Remove a connector and return the locked stake to `recipient`.
     function removeConnector(bytes32 channelId, bytes32 connectorId, address recipient) external;
 
-    /// @notice Add ETH to a connector's locked stake.
-    function topUpConnectorStake(bytes32 channelId, bytes32 connectorId) external payable;
+    /// @notice Add `amount` of the fee asset to a connector's locked stake.
+    /// @dev Native mode requires `msg.value == amount`; token mode pulls `amount` with
+    ///      `transferFrom` and requires `msg.value == 0`. Either mismatch reverts with
+    ///      ClprNativeValueMismatch; a zero `amount` reverts with ClprInsufficientStake.
+    /// @param amount Stake to add, in fee-asset units.
+    function topUpConnectorStake(bytes32 channelId, bytes32 connectorId, uint256 amount) external payable;
 
     function getConnector(bytes32 channelId, bytes32 connectorId) external returns (ClprTypes.Connector memory);
 
@@ -242,10 +255,14 @@ interface IClprService {
 
     // ── Endpoint manifest management (two-step admission, spec §6.5) ─────────
 
-    /// @notice Self-register as a PENDING endpoint, locking `msg.value` as a refundable bond
-    ///         (a quality/Sybil-resistance deposit; never slashed). Permissionless — any caller.
+    /// @notice Self-register as a PENDING endpoint, locking a refundable bond (a quality/Sybil-resistance
+    ///         deposit; never slashed). Permissionless — any caller.
     /// @dev The caller is not advertised until the owner admits it via {addEndpoint}. Registration
-    ///      does not gate {submitBundle}. Reverts if `msg.value < minEndpointBond`.
+    ///      does not gate {submitBundle}. The bond is `msg.value` in native mode, reverting with
+    ///      ClprInsufficientBond below `minEndpointBond`. In token mode exactly `minEndpointBond` is pulled
+    ///      with `transferFrom` and any `msg.value` reverts with ClprNativeValueMismatch. Approve exactly
+    ///      that amount: a larger allowance lets an owner who raises `minEndpointBond` first lock more. The
+    ///      bond comes back through {removeEndpoint} and {collectPending}.
     /// @param endpoint The endpoint discovery data to advertise once admitted.
     function registerEndpoint(ClprTypes.Endpoint calldata endpoint) external payable;
 

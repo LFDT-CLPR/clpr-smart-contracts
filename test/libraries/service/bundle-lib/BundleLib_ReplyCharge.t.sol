@@ -94,6 +94,23 @@ contract BundleLib_ReplyChargeTest is BundleLibTestBase {
         assertEq(app.getResponseCallCount(), 1);
     }
 
+    function test_reply_freeExecution_noCharge() public {
+        ClprTypes.EconomicConfig memory econ = service.getEconomicConfig();
+        econ.messageExecutionCost = 0;
+        service.updateEconomicConfiguration(econ);
+        _registerTestConnector();
+        _sendFromApp();
+        vm.txGasPrice(1 gwei);
+        uint256 connectorBefore = address(connector).balance;
+        uint256 submitterBefore = address(this).balance;
+
+        _submitReply(ClprTypes.ReplyStatus.SUCCESS);
+
+        assertEq(address(connector).balance, connectorBefore, "connector keeps its balance");
+        assertEq(address(this).balance, submitterBefore, "submitter is not paid");
+        assertEq(app.getResponseCallCount(), 1);
+    }
+
     function test_reply_revertingCallback_stillCharged() public {
         _registerTestConnector();
         _sendFromApp();

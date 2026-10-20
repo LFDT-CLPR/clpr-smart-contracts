@@ -16,6 +16,7 @@ import type {ChainClients} from "../lib/clients.js";
 import type {BackendKind} from "../backend/Backend.js";
 import {isSoloBackend} from "../backend/solo/solo.js";
 import {resolveSoloLedgerId} from "../lib/soloLedger.js";
+import {deployFeeToken, feeTokenMode} from "./feeAsset.js";
 
 export type DeployedAddresses = Pick<
     E2EDeployed,
@@ -97,6 +98,8 @@ export async function deployAll(opts: DeployAllOpts & {mode: "sei"}): Promise<De
 export async function deployAll(opts: DeployAllOpts & {mode?: DeployMode}): Promise<DeployedAddresses | QbftDeployedAddresses> {
     const label = opts.label ?? String(await opts.clients.publicClient.getChainId());
     const params = buildDeployParams({...opts, protocolVersion: opts.protocolVersion ?? 1});
+    // Token mode: the fee token is a ClprService constructor argument, so it exists before the service.
+    if (feeTokenMode()) params.feeToken = await deployFeeToken(opts.clients);
     const clients = toDeployClients(opts.clients);
 
     if (opts.mode === "qbft") {

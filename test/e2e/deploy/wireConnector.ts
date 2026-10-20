@@ -9,7 +9,8 @@ import {
     digestForConnectorReveal,
     uncompressedPubKey64
 } from "../lib/ids.js";
-import { ZERO_BYTES32 } from "./constants";
+import { TOKEN_CONNECTOR_FUND, ZERO_BYTES32 } from "./constants";
+import { approveFeeToken, fundConnectorInToken, getEconomicConfig, getFeeToken, isTokenMode } from "./feeAsset.js";
 
 export interface WiredConnector {
     connectorId: Hex;             // bytes32
@@ -27,15 +28,20 @@ interface ConnectorDeployAddrs {
 }
 
 /// Wire a connector pair: register + reveal on both sides, then fund each
-/// local MockClprConnector contract with ETH so its `payForExecution`
-/// callback can settle when inbound DATA messages arrive.
+/// local MockClprConnector contract so its `payForExecution` callback can
+/// settle when inbound DATA messages arrive.
+///
+/// Each side follows its service's fee asset (`getFeeToken()`). In token mode the
+/// stake is `minLockedStake` of the token, approved here and pulled by
+/// completeConnector, plus a `topUpConnectorStake` for any `stake` above it;
+/// the connector gets a token operating balance and pays `payForExecution` in it.
 ///
 ///   1. Fresh connector keypair (deterministic if `connectorKey` supplied).
 ///   2. Derive `connectorId` in TS — same value on both chains by construction
 ///      (function of channelId + pubKey + salt only; no per-chain inputs).
 ///   3. registerConnector(commitment) on chain A; sign keccak(connectorId‖routerA);
-///      completeConnector payable with `stake` ETH. Same on chain B.
-///   4. Send `fundConnector` ETH to each MockClprConnector for inbound payments.
+///      completeConnector with the `stake`. Same on chain B.
+///   4. Give each MockClprConnector a `fundConnector` operating balance for inbound payments.
 ///
 /// Pre-conditions:
 ///   - wireChannel has run; `channelId` exists on both chains in ACTIVE state.
@@ -51,9 +57,9 @@ export async function wireConnector(opts: {
     salt?: Hex;
     /// Private key for the connector operator. Defaults to a fresh random key.
     connectorKey?: Hex;
-    /// ETH to lock as stake on each side (must be >= economicConfig.minLockedStake).
+    /// Stake to lock on each side, in fee-asset units (must be >= economicConfig.minLockedStake).
     stake?: bigint;
-    /// ETH to send to each MockClprConnector for paying for inbound-message execution.
+    /// Operating balance for each MockClprConnector, in fee-asset units, for inbound-message execution.
     fundConnector?: bigint;
     /// Admin address authorized to deregister + top up. Defaults to chain's deployer.
     admin?: Hex;
@@ -71,15 +77,24 @@ export async function wireConnector(opts: {
     const isSoloA = opts.soloRelayA ?? isSoloBackend();
     const isSoloB = opts.soloRelayB ?? isSoloBackend();
 
-    // Solo relay does not forward tx.value into delegatecall targets; stake must be 0.
-    const stakeA = isSoloA ? 0n : (opts.stake ?? parseEther("0.1"));
-    const stakeB = isSoloB ? 0n : (opts.stake ?? parseEther("0.1"));
+    const feeTokenA = await getFeeToken(chainA, addrsA.clprService);
+    const feeTokenB = opts.skipChainB ? feeTokenA : await getFeeToken(chainB, addrsB.clprService);
+    const tokenA = isTokenMode(feeTokenA);
+    const tokenB = isTokenMode(feeTokenB);
 
-    // Connector fund: Solo needs gas-price-based sizing per side.
-    let fundA = opts.fundConnector ?? parseEther("1");
-    let fundB = opts.fundConnector ?? parseEther("1");
-    if (isSoloA) fundA = await soloMinConnectorFund(chainA.publicClient);
-    if (isSoloB) fundB = await soloMinConnectorFund(chainB.publicClient);
+    // Native mode on a Solo relay: tx.value is not forwarded into delegatecall targets, so stake is 0.
+    const stakeA = tokenA
+        ? (opts.stake ?? (await getEconomicConfig(chainA, addrsA.clprService)).minLockedStake)
+        : isSoloA ? 0n : (opts.stake ?? parseEther("0.1"));
+    const stakeB = tokenB
+        ? (opts.stake ?? (await getEconomicConfig(chainB, addrsB.clprService)).minLockedStake)
+        : isSoloB ? 0n : (opts.stake ?? parseEther("0.1"));
+
+    // Connector fund: Solo native mode needs gas-price-based sizing per side.
+    let fundA = opts.fundConnector ?? (tokenA ? TOKEN_CONNECTOR_FUND : parseEther("1"));
+    let fundB = opts.fundConnector ?? (tokenB ? TOKEN_CONNECTOR_FUND : parseEther("1"));
+    if (isSoloA && !tokenA) fundA = await soloMinConnectorFund(chainA.publicClient);
+    if (isSoloB && !tokenB) fundB = await soloMinConnectorFund(chainB.publicClient);
 
     // ── 1. Connector operator keypair ──────────────────────────────────────
     const connectorKey = opts.connectorKey ?? generatePrivateKey();
@@ -101,7 +116,7 @@ export async function wireConnector(opts: {
     });
     await completeOn(chainA, addrsA.clprService, {
         connectorId, pubKey: connectorPubKey, sig: sigA, salt, channelId,
-        connectorContract: addrsA.connectorContract, admin: adminA, stake: stakeA
+        connectorContract: addrsA.connectorContract, admin: adminA, stake: stakeA, feeToken: feeTokenA
     });
 
     if (!opts.skipChainB) {
@@ -111,14 +126,14 @@ export async function wireConnector(opts: {
         });
         await completeOn(chainB, addrsB.clprService, {
             connectorId, pubKey: connectorPubKey, sig: sigB, salt, channelId,
-            connectorContract: addrsB.connectorContract, admin: adminB, stake: stakeB
+            connectorContract: addrsB.connectorContract, admin: adminB, stake: stakeB, feeToken: feeTokenB
         });
     }
 
     // ── 4. Fund each MockClprConnector for payForExecution ─────────────────
-    await fundContract(chainA, addrsA.connectorContract, fundA);
+    await fundConnector(chainA, addrsA.connectorContract, fundA, feeTokenA);
     if (!opts.skipChainB) {
-        await fundContract(chainB, addrsB.connectorContract, fundB);
+        await fundConnector(chainB, addrsB.connectorContract, fundB, feeTokenB);
     }
 
     return { connectorId, connectorPubKey, connectorAddress: connectorAccount.address, salt };
@@ -142,24 +157,44 @@ async function completeOn(
     serviceAddr: Hex,
     a: {
         connectorId: Hex; pubKey: Hex; sig: Hex; salt: Hex; channelId: Hex;
-        connectorContract: Hex; admin: Hex; stake: bigint;
+        connectorContract: Hex; admin: Hex; stake: bigint; feeToken: Hex;
     }
 ): Promise<void> {
     const service = loadArtifact("ClprService");
+    const tokenMode = isTokenMode(a.feeToken);
+    // Token mode: completeConnector pulls exactly minLockedStake; the rest is a separate top-up.
+    const minStake = tokenMode ? (await getEconomicConfig(clients, serviceAddr)).minLockedStake : 0n;
+    if (tokenMode) await approveFeeToken(clients, a.feeToken, serviceAddr, a.stake);
     const tx = await clients.walletClient.writeContract({
         address: serviceAddr,
         abi: service.abi as never,
         functionName: "completeConnector",
         args: [a.connectorId, a.pubKey, a.sig, a.salt, a.channelId, a.connectorContract, a.admin],
-        value: a.stake
+        value: tokenMode ? 0n : a.stake
     });
     const receipt = await clients.publicClient.waitForTransactionReceipt({hash: tx});
     if (receipt.status === "reverted") {
         throw new Error(`completeConnector reverted (chain ${await clients.publicClient.getChainId()})`);
     }
+    if (tokenMode && a.stake > minStake) {
+        const topUpTx = await clients.walletClient.writeContract({
+            address: serviceAddr,
+            abi: service.abi as never,
+            functionName: "topUpConnectorStake",
+            args: [a.channelId, a.connectorId, a.stake - minStake]
+        });
+        const topUp = await clients.publicClient.waitForTransactionReceipt({hash: topUpTx});
+        if (topUp.status === "reverted") {
+            throw new Error(`topUpConnectorStake reverted (chain ${await clients.publicClient.getChainId()})`);
+        }
+    }
 }
 
-async function fundContract(clients: ChainClients, target: Hex, value: bigint): Promise<void> {
+async function fundConnector(clients: ChainClients, target: Hex, value: bigint, feeToken: Hex): Promise<void> {
+    if (isTokenMode(feeToken)) {
+        await fundConnectorInToken(clients, feeToken, target, value);
+        return;
+    }
     // MockClprConnector defines `receive() external payable {}` — a plain
     // value transfer lands in its native balance.
     // Explicit gas avoids eth_estimateGas calls on Hedera where the Mirror Node

@@ -240,8 +240,9 @@ never produce a reply.
 ```
 if connector not registered on this channel:    reply CONNECTOR_NOT_FOUND; return
 gasLimit = throttles.maxGasPerMessage
-if tx.gasprice > 0:
-    affordableGas = balance*100 / ((100+margin)*tx.gasprice)
+charging = messageExecutionCost > 0 and tx.gasprice > 0
+if charging:
+    affordableGas = balance/scale*100 / ((100+margin)*tx.gasprice)
     if affordableGas == 0:                      slash + reply CONNECTOR_UNDERFUNDED; return
     gasLimit = min(gasLimit, affordableGas)
 status = APPLICATION_ERROR
@@ -251,21 +252,24 @@ if targetApplication is 20 bytes with code:
         on success, malformed return:           data = raw return bytes
         on revert:                              data = raw revert bytes
     gasUsed = gasBefore - gasleft()
-totalCharge = gasUsed*tx.gasprice * (1 + margin/100)   # actual cost, not a ceiling
-if totalCharge > 0 and ConnectorLib.charge(totalCharge) fails:   # payForExecution, connectorPaymentGasLimit gas
+if charging:
+    totalCharge = gasUsed*tx.gasprice * (1 + margin/100) * scale   # actual cost, not a ceiling
+    if totalCharge > 0 and ConnectorLib.charge(totalCharge) fails:   # payForExecution, connectorPaymentGasLimit gas
                                                 slash    # reply status unchanged
 if stipend > 0: best-effort onInboundMessage, stipend gas   # not only on success
 enqueue reply(status, data)
 ```
 
-`balance` is the connector contract's native balance and `margin` is
-`economicConfig.endpointMarginPercent`. Things here that are easy to get wrong:
+`balance` is the connector contract's balance in the service's fee asset (native value, or the
+`feeToken` ERC-20), `scale` is `10^(decimals − 18)` for a fee token and 1 without (results
+round down), and `margin` is `economicConfig.endpointMarginPercent`. Things here that are easy to get wrong:
 
 - There is **no channel-status check** on this path: a CLOSING or DRAINED
   channel still calls the application and enqueues the reply.
 - Charging is by **actual execution cost**, computed after the call from
   `gasBefore - gasleft()`, on both the success and the revert path.
-  `economicConfig.messageExecutionCost` plays no part.
+  `economicConfig.messageExecutionCost` is read only as zero or non-zero: zero makes execution
+  free, with no balance bound, no charge and no underfunded slash.
 - A failed charge slashes the connector but does **not** change the reply status.
 - A `targetApplication` that is not a 20-byte address with code gets an
   `APPLICATION_ERROR` reply with empty data and no charge.
@@ -288,6 +292,9 @@ Looks up the original outbound message by `replyId`:
 - best-effort `IClprApplication.onClprResponse` to the original sender, with
   `throttles.maxGasPerMessage` gas, only when the sender is exactly 20 bytes and
   has bytecode;
+- charges that connector for the gas `onClprResponse` used, by the DATA formula and in the
+  same fee asset, paid to the submitter; nothing when execution is free. A failed charge is
+  not slashed: the submitter absorbs the unpaid cost;
 - emits `ReplyDelivered`.
 
 ## Reentrancy & ordering

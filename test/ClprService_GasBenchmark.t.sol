@@ -165,7 +165,7 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
 
     function test_gas_topUpStake() public {
         uint256 g0 = gasleft();
-        service.topUpConnectorStake{value: 0.5 ether}(channelId, connectorAddr);
+        service.topUpConnectorStake{value: 0.5 ether}(channelId, connectorAddr, 0.5 ether);
         uint256 gasTopUp = g0 - gasleft();
 
         console.log("=== ConnectorLib Gas Benchmark ===");
@@ -174,7 +174,7 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
 
     function test_gas_removeConnector() public {
         // Top up to have more stake
-        service.topUpConnectorStake{value: 1 ether}(channelId, connectorAddr);
+        service.topUpConnectorStake{value: 1 ether}(channelId, connectorAddr, 1 ether);
 
         uint256 g0 = gasleft();
         service.removeConnector(channelId, connectorAddr, address(this));

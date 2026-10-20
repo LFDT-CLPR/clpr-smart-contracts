@@ -23,7 +23,7 @@ const SOLO_PEER_THROTTLES = {
 const ZERO_BYTES32: Hex = `0x${"00".repeat(32)}` as Hex;
 
 const DEFAULT_ECON = {
-    messageExecutionCost: 0n,
+    messageExecutionCost: 1n, // non-zero keeps execution charging on; 0 would switch to free execution
     endpointMarginPercent: 10n,
     minLockedStake: parseEther("0.1"),
     minEndpointBond: parseEther("0.1"),
@@ -37,4 +37,15 @@ const DEFAULT_ECON = {
     connectorPaymentGasLimit: 200_000n
 } as const;
 
-export {DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES, DEFAULT_ECON, ZERO_BYTES32};
+/** Token-mode economics (`CLPR_E2E_FEE_TOKEN=1`), in 6-decimal USD token units. */
+const TOKEN_ECON = {
+    ...DEFAULT_ECON,
+    minLockedStake: 100_000_000n, // 100 USD
+    minEndpointBond: 10_000_000n, // 10 USD
+    basePenalty: 1_000_000n // 1 USD
+} as const;
+
+/** Token-mode operating balance given to each connector contract for `payForExecution` (10 USD). */
+const TOKEN_CONNECTOR_FUND = 10_000_000n;
+
+export {DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES, DEFAULT_ECON, TOKEN_ECON, TOKEN_CONNECTOR_FUND, ZERO_BYTES32};

@@ -72,8 +72,8 @@ switch safe to use; the other two are limits worth knowing before you flip.
 
 - `setClprEnabled` itself is not gated, so the action is fully **reversible**
   with `setClprEnabled(true)`. Halting can never lock you out of un-halting.
-- `collectPending()` is not gated. Anyone owed ETH through the pull-payment
-  path can still withdraw it during a halt — a halt does not trap refunds. If
+- `collectPending()` and `collectPendingTo()` are not gated. Anyone owed the fee asset (ETH, or
+  the service's fee token) through the pull-payment path can still withdraw it during a halt — a halt does not trap refunds. If
   your incident calls for freezing withdrawals too, **the kill switch is not
   the tool**; escalate, because no owner call achieves that.
 - `transferOwnership` / `renounceOwnership` are plain `Ownable` functions and
@@ -91,6 +91,7 @@ scenario below: confirm the signal, decide whether halting *helps*, then act.
 |---------|---------------------|--------------------|----------|
 | **Verifier compromise** | Bundles verifying that should not (forged proofs accepted), a disclosed vulnerability in the active verifier (Hiero / QBFT / Sei), or a trust-anchor key you no longer trust. | **Yes.** `submitBundle` runs `whenEnabled`; disabling stops all bundle processing, cutting off the exploit path immediately. | **Flip.** Then escalate to security — this is the highest-severity trigger. |
 | **Peer-chain halt** | The peer chain has stopped finalizing / is reorging / is unreachable, so bundle proofs are stale or unverifiable. Watch for a spike in failed `submitBundle` calls or stuck cross-chain state. | **Usually yes**, if endpoints/connectors would otherwise act on stale peer-chain state or accrue incorrect slashes while the peer chain is down. | **Flip if** the halt is causing incorrect on-chain effects. If the system merely stalls harmlessly, halting may add little — prefer monitoring. |
+| **Fee token halted** | The service's fee token (`getFeeToken()` is non-zero) pauses transfers, or its blocklist or transfer policy blocks the `ClprService` address. Every `payForExecution` then fails, so each inbound DATA message slashes a connector that can pay (`docs/quirks.md`). | **Yes.** `submitBundle` stops, so no connector is slashed for a transfer the token refused. | **Flip** until the token resumes transfers or unblocks the service. A block on a single connector is not a reason to halt: its admin removes it with `removeConnector`. |
 | **Anomalous slash rate** | Connector `slashCount` climbing far faster than baseline; connectors approaching `slashBanThreshold` en masse; slashing that does not correspond to real misbehavior (possible logic bug or coordinated abuse). | **Yes**, to stop irreversible economic damage to honest connectors while you investigate. | **Flip** if slashing appears incorrect or runaway. Legitimate slashing of a single bad actor is **not** a reason to halt the whole protocol. |
 
 If the situation does not clearly match a trigger above but you believe halting

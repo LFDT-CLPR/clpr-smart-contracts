@@ -1,5 +1,5 @@
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
-import {parseEther, type Hex} from "viem";
+import {type Hex} from "viem";
 import {createBackend} from "../backend/index.js";
 import type {Backend} from "../backend/Backend.js";
 import type {ChainClients} from "../lib/clients.js";
@@ -10,7 +10,7 @@ import {deployAll, deployE2EPair} from "../deploy/deploy.js";
 import {wireConfig, registerEndpoint} from "../deploy/wire.js";
 import {wireChannel} from "../deploy/wireChannel.js";
 import {wireConnector, type WiredConnector} from "../deploy/wireConnector.js";
-import {DEFAULT_ECON} from "../deploy/constants.js";
+import {activeEcon, feeAssetBalance, getFeeToken} from "../deploy/feeAsset.js";
 import {ferry, ferryQbft} from "../relay/ferry.js";
 import {waitForBlock} from "../lib/qbft.js";
 
@@ -45,8 +45,9 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
     let channelId: Hex;
     let connector: WiredConnector;
 
-    const STAKE = parseEther("1");
-    const EXPECTED_REMAINING = STAKE - DEFAULT_ECON.basePenalty; // partial slash leaves this on-ledger
+    // 10 x minLockedStake: 1 ETH in native mode, 1,000 USD in token mode.
+    const STAKE = activeEcon().minLockedStake * 10n;
+    const EXPECTED_REMAINING = STAKE - activeEcon().basePenalty; // partial slash leaves this on-ledger
 
     beforeAll(async () => {
         backend = createBackend();
@@ -185,7 +186,8 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
     it("the slashed connector can still be deregistered, returning the remaining stake", async () => {
         const service = loadArtifact("ClprService");
         const recipient = "0x000000000000000000000000000000000000dEaD" as Hex;
-        const balBefore = await A.publicClient.getBalance({address: recipient});
+        const feeToken = await getFeeToken(A, addrsA.clprService);
+        const balBefore = await feeAssetBalance(A, feeToken, recipient);
 
         // admin == deployer (wireConnector default). The in-flight count MUST be 0 here,
         // otherwise removeConnector reverts with ClprConnectorHasInflightMessages.
@@ -204,7 +206,7 @@ describe.skipIf(isSoloBackend())("source slash on failure reply then deregister"
         });
         expect(exists).toBe(false);
 
-        const balAfter = await A.publicClient.getBalance({address: recipient});
+        const balAfter = await feeAssetBalance(A, feeToken, recipient);
         expect(balAfter - balBefore).toBe(EXPECTED_REMAINING); // remaining stake returned, not stuck
     });
 });

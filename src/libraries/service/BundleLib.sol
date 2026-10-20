@@ -5,6 +5,7 @@ import {ClprTypes, ChannelStatusChanged, MessageQueued} from "@hiero-ledger/clpr
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {ClprProtobufHelpers} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {ConnectorLib} from "@hiero-ledger/clpr/libraries/service/ConnectorLib.sol";
+import {FeeAssetLib} from "@hiero-ledger/clpr/libraries/service/FeeAssetLib.sol";
 import {BundleDecodeHelper} from "@hiero-ledger/clpr/libraries/codec/BundleDecodeHelper.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {IClprApplication} from "@hiero-ledger/clpr/interfaces/IClprApplication.sol";
@@ -32,6 +33,7 @@ library BundleLib {
         address fallbackRecipient;
         ClprTypes.LedgerConfiguration config;
         ClprTypes.EconomicConfig econ;
+        ClprTypes.FeeAsset feeAsset;
     }
 
     // ── Bundle processing context: cross-step state (see STACK STRATEGY) ──
@@ -53,6 +55,11 @@ library BundleLib {
         /// @dev Address of the BundleDecodeHelper contract for try/catch protobuf decode.
         address decodeHelperAddr;
         uint256 bannedCount;
+        ClprTypes.FeeAsset feeAsset;
+        /// @dev `FeeAssetLib.scale(feeAsset)`: an 18-decimal gas cost × `gasCostMultiplier` / `gasCostDivisor`
+        ///      is in fee-asset units; one of the two is 1.
+        uint256 gasCostMultiplier;
+        uint256 gasCostDivisor;
     }
 
     // ── Events ────────────────────────────────────────────────────────
@@ -265,6 +272,8 @@ library BundleLib {
         ctx.fallbackRecipient = params.fallbackRecipient;
         ctx.decodeHelperAddr = params.decodeHelperAddr;
         ctx.config = params.config;
+        ctx.feeAsset = params.feeAsset;
+        (ctx.gasCostMultiplier, ctx.gasCostDivisor) = FeeAssetLib.scale(params.feeAsset);
 
         // ── Step 4: Replay defense ───────────────────────────────────
         // The payloads are the contiguous run ending at lastMessageId. It may be a prefix of the
@@ -746,7 +755,8 @@ library BundleLib {
         }
     }
 
-    /// @dev Charges actual gas used (× gasPrice × margin factor) rather than a fixed cost; all paid to the submitter.
+    /// @dev Charges the connector for the gas used (`_executionCharge`), paid to the submitter. When
+    ///      `_chargesExecution` is false, execution is free: no balance check, charge or slash.
     function _processDataMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.Channel memory channel,
@@ -772,10 +782,8 @@ library BundleLib {
         address connectorContract =
             ConnectorLib.getContract(_connectors, _connectorExists, ctx.channelId, data.connectorId);
         uint256 gasLimit = ctx.throttles.maxGasPerMessage;
-        // tx.gasprice == 0 (some test/L2 environments) leaves nothing to charge, so no affordability bound applies.
-        if (tx.gasprice > 0) {
-            uint256 affordableGas =
-                connectorContract.balance * 100 / ((100 + uint256(ctx.econ.endpointMarginPercent)) * tx.gasprice);
+        if (_chargesExecution(ctx)) {
+            uint256 affordableGas = _affordableGas(ctx, connectorContract);
             if (affordableGas == 0) {
                 _slashConnector(ctx, data.connectorId, _connectors, _connectorExists, _pendingWithdrawals);
                 _enqueueReplyAndEmit(
@@ -816,6 +824,7 @@ library BundleLib {
                 _connectors,
                 _connectorExists,
                 _pendingWithdrawals,
+                ctx.feeAsset,
                 ctx.fallbackRecipient,
                 ctx.channelId,
                 data.connectorId,
@@ -856,8 +865,8 @@ library BundleLib {
         if (!success) emit ConnectorInboundCallbackFailed(ctx.channelId, receivedMsgId);
     }
 
-    /// @dev Charges the source connector for the gas the sender's onClprResponse callback used,
-    ///      plus margin, paid to the submitter.
+    /// @dev Charges the source connector for the gas the sender's onClprResponse callback used
+    ///      (`_executionCharge`, zero when execution is free), paid to the submitter.
     function _processReplyMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.DecodedReply memory reply,
@@ -927,6 +936,7 @@ library BundleLib {
                 _connectors,
                 _connectorExists,
                 _pendingWithdrawals,
+                ctx.feeAsset,
                 ctx.fallbackRecipient,
                 channelId,
                 connectorId,
@@ -941,9 +951,28 @@ library BundleLib {
 
     // ── Internal: Helpers ──────────────────────────────────────────────────
 
+    /// @dev Charge in fee-asset units, zero when execution is free.
     function _executionCharge(BundleContext memory ctx, uint256 gasUsed) internal view returns (uint256) {
+        if (!_chargesExecution(ctx)) return 0;
         uint256 actualCharge = gasUsed * tx.gasprice;
-        return actualCharge + actualCharge * ctx.econ.endpointMarginPercent / 100;
+        return (actualCharge + actualCharge * ctx.econ.endpointMarginPercent / 100) * ctx.gasCostMultiplier
+            / ctx.gasCostDivisor;
+    }
+
+    /// @dev Gas the connector's fee-asset balance pays for at `tx.gasprice` plus margin. Anyone can send the
+    ///      connector tokens, so the balance is capped where the product would overflow and revert the
+    ///      bundle; a capped balance still pays for far more than `maxGasPerMessage`.
+    function _affordableGas(BundleContext memory ctx, address connectorContract) private view returns (uint256) {
+        uint256 balance = FeeAssetLib.balanceOf(ctx.feeAsset, connectorContract);
+        uint256 maxBalance = type(uint256).max / (ctx.gasCostDivisor * 100);
+        if (balance > maxBalance) balance = maxBalance;
+        return balance * ctx.gasCostDivisor * 100
+            / ((100 + uint256(ctx.econ.endpointMarginPercent)) * tx.gasprice * ctx.gasCostMultiplier);
+    }
+
+    /// @dev `tx.gasprice` is zero in some test/L2 environments; the DATA affordability bound divides by it.
+    function _chargesExecution(BundleContext memory ctx) private view returns (bool) {
+        return ctx.econ.messageExecutionCost > 0 && tx.gasprice > 0;
     }
 
     function _enqueueMessage(
@@ -992,6 +1021,7 @@ library BundleLib {
             _connectors,
             _connectorExists,
             _pendingWithdrawals,
+            ctx.feeAsset,
             ctx.fallbackRecipient,
             ctx.channelId,
             connectorId,

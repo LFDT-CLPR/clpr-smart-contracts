@@ -330,6 +330,12 @@ library ClprTypes {
     }
 
     struct EconomicConfig {
+        /// @dev Read only as zero / non-zero. Non-zero charges the connector for inbound DATA
+        ///      execution and REPLY callbacks (gasUsed × gasprice plus an `endpointMarginPercent`
+        ///      margin, converted to fee-asset units, paid to the submitter) and slashes it when
+        ///      it cannot pay for DATA. Zero makes that execution free: no balance check, charge or
+        ///      slash. In native mode on a chain without native value every connector balance reads
+        ///      zero, so only zero works there.
         uint256 messageExecutionCost;
         uint256 endpointMarginPercent;
         uint256 minLockedStake;
@@ -360,6 +366,17 @@ library ClprTypes {
     ///      small for any payment would fail every charge, slashing even a funded connector for each inbound
     ///      DATA message.
     uint256 internal constant MIN_CONNECTOR_PAYMENT_GAS_LIMIT = 50_000;
+
+    /// @dev The asset stakes, bonds, execution charges and slash proceeds are held and paid in.
+    ///      Every amount in `EconomicConfig` is denominated in it.
+    struct FeeAsset {
+        /// @dev `address(0)` for native value; otherwise an ERC-20.
+        address token;
+        /// @dev The token's `decimals()`. An 18-decimal gas cost is scaled to token units by
+        ///      10^(decimals - 18), which assumes `tx.gasprice` is quoted in the token's own currency.
+        ///      Zero in native mode, whose amounts are wei (18 decimals).
+        uint8 decimals;
+    }
 
     /// @dev Decoded fields from a protobuf ClprMessage (DATA type)
     struct DecodedDataMessage {
@@ -447,7 +464,7 @@ library ClprTypes {
     error ClprEndpointAlreadyRegistered();
     /// @notice msg.sender (or the given account) is not a registered endpoint.
     error ClprEndpointNotRegistered();
-    /// @notice The supplied ETH bond is below the configured minimum.
+    /// @notice The supplied bond is below the configured minimum.
     error ClprInsufficientBond();
     /// @notice `addEndpoint`/`updateEndpointManifest` would push the live manifest past
     ///         `maxLocalEndpoints`.
@@ -467,10 +484,19 @@ library ClprTypes {
     /// @dev Reverted by submitBundle when the channel's maxBundlesPerSec limit is exceeded
     ///      within the current one-second window. Zero means unlimited (not enforced).
     error ClprBundleRateLimitExceeded();
-    /// @notice An ETH transfer to the intended recipient failed.
+    /// @notice A fee-asset transfer to the intended recipient failed, or a fee-token deposit delivered
+    ///         a different amount than requested.
     error ClprTransferFailed();
+    /// @notice The ClprService constructor was given a fee token whose `decimals()` cannot be read
+    ///         or exceeds `FeeAssetLib.MAX_DECIMALS`.
+    error ClprInvalidFeeToken();
+    /// @notice `msg.value` differs from what the fee asset requires: the stated amount in native
+    ///         mode, zero in token mode.
+    error ClprNativeValueMismatch();
     /// @notice The pull-payment balance is zero; nothing to withdraw.
     error ClprNothingToCollect();
+    /// @notice `collectPendingTo` was given the zero address as the recipient.
+    error ClprZeroRecipient();
     /// @notice A chain identifier passed to _sortChains / deriveChannelId was empty.
     error ClprInvalidChainId();
     /// @notice An endpoint's IP address is not a valid numeric IPv4 or IPv6 address.

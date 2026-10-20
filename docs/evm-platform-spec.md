@@ -79,34 +79,60 @@ The EVM service splits connector funds into two pools:
 
 | Pool | Location | Purpose |
 |---|---|---|
-| **Operating balance** | Native ETH on the `connectorContract` itself | Pays for inbound message execution charges |
+| **Operating balance** | Fee asset held by the `connectorContract` itself | Pays for inbound message execution charges |
 | **Slashable stake** | `Connector.lockedStake` in router storage | Misbehavior bond; subject to geometric slashing (E-7) |
+
+Both pools, the endpoint bonds and every `EconomicConfig` amount are denominated in the
+service's **fee asset**: native value by default, or the ERC-20 passed as the `feeToken`
+constructor argument, whose `decimals()` must be readable and at most 95 (10^(95 − 18) is the largest power of ten
+a uint256 holds). It is fixed for the life of the service: no function changes it, so
+held balances are never re-denominated. `getFeeToken()` reads it back. In token mode:
+
+- `completeConnector` and `registerEndpoint` pull exactly `minLockedStake` /
+  `minEndpointBond` with `transferFrom` and reject any `msg.value`. The minimum is read when
+  the call runs, so approve exactly the amount to lock: with a larger allowance, an owner who
+  raises the minimum first locks more, which comes back only on exit.
+  `topUpConnectorStake(channelId, connectorId, amount)` pulls `amount` the same way.
+- Refunds, slash proceeds, execution charges and `collectPending` are paid in the token.
+  `collectPendingTo(recipient)` pays a pending credit to another address, for an account
+  the token will not pay.
+- Fee-on-transfer and rebasing tokens are not supported. A deposit reverts with
+  `ClprTransferFailed` unless the service's balance grows by exactly the pulled amount.
+- Native value sent to the router reverts with `ClprNativeValueMismatch`.
+- A token that pauses transfers, or blocks the connector or the router, fails every
+  `payForExecution`, so each inbound DATA message slashes a connector that can pay
+  (`docs/quirks.md`).
+
+On a chain without native value (`CALLVALUE`, `BALANCE` and `SELFBALANCE` always return 0),
+a deployment either sets a fee token or sets `EconomicConfig.messageExecutionCost` to zero.
 
 For each inbound DATA message, `BundleLib._processDataMessageDecoded` first
 looks up the connector on the channel. A missing connector gets a
-`CONNECTOR_NOT_FOUND` reply and no charge. Otherwise it does the following:
+`CONNECTOR_NOT_FOUND` reply and no charge. Otherwise, unless execution is free
+(see below), it does the following:
 
 1. **Bound the gas.** It computes what the connector can pay for:
-   `affordableGas = connectorContract.balance * 100 / ((100 + endpointMarginPercent) * tx.gasprice)`.
-   If this is 0, the connector is slashed, the reply is `CONNECTOR_UNDERFUNDED`,
-   and the application is not called. Otherwise the application gets
-   `min(throttles.maxGasPerMessage, affordableGas)` gas, less the CALL's own
-   cost, or the bundle reverts
-   with `ExactGasCall.InsufficientGasForCall` (see *Reentrancy & ordering* in
-   `bundle-flow.md`). A return that is not an ABI-encoded `bytes` is recorded as
-   `APPLICATION_ERROR` with the raw data. With `tx.gasprice == 0` there is no
-   bound and no charge.
+   `affordableGas = balance / scale * 100 / ((100 + endpointMarginPercent) * tx.gasprice)`,
+   where `balance` is the connector contract's fee-asset balance and `scale` is
+   `10^(decimals − 18)` with a fee token, 1 without (results round down). If this is 0, the
+   connector is slashed, the reply is `CONNECTOR_UNDERFUNDED`, and the application is not called.
+   Otherwise the application gets `min(throttles.maxGasPerMessage, affordableGas)` gas,
+   less the CALL's own cost, or the bundle reverts with `ExactGasCall.InsufficientGasForCall`
+   (see *Reentrancy & ordering* in `bundle-flow.md`). A return that is not an ABI-encoded
+   `bytes` is recorded as `APPLICATION_ERROR` with the raw data.
 2. **Charge the gas used.** With `c = gasUsed * tx.gasprice`, the charge is
-   `c + c * endpointMarginPercent / 100`. When it is non-zero,
-   `ConnectorLib.charge` calls `IClprConnector.payForExecution(charge)` with
-   `economicConfig.connectorPaymentGasLimit` gas, less the CALL's own cost, and
-   compares the router's ETH balance before and after. The charge fails if the
-   connector's balance is below the charge, if the call reverts, or if the
-   balance delta is not exactly the charge. A failed charge slashes the
+   `(c + c * endpointMarginPercent / 100) * scale`, in fee-asset units. With a fee token,
+   this assumes `tx.gasprice` is quoted in the token's currency at 18 decimals; where it is
+   not, keep execution free. When the charge is non-zero, `ConnectorLib.charge` calls
+   `IClprConnector.payForExecution(charge)` with `economicConfig.connectorPaymentGasLimit`
+   gas, less the CALL's own cost, and compares the router's fee-asset balance before and
+   after. The charge fails if the connector's balance is below the charge, if the call
+   reverts, or if the balance delta is not exactly the charge. A failed charge slashes the
    connector and does not change the reply status. `initialize` and
    `updateEconomicConfiguration` reject a payment budget below
-   `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT` (50,000) with
-   `ClprInvalidConfiguration`.
+   `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT` (50,000) with `ClprInvalidConfiguration`.
+   The balance-delta check relies on every stake and bond deposit being `nonReentrant`, so a
+   deposit made from inside `payForExecution` cannot count as the payment.
 3. **Pay the submitter.** A successful charge goes to the bundle submitter (E-8).
 4. **Notify the connector.** `onInboundMessage` gets
    `economicConfig.connectorInboundGasStipend` gas (E-6). With a stipend of 0 it
@@ -129,8 +155,14 @@ measured gas. One DATA message can use up to
 callbacks, plus the service's own work, and `maxMessagesPerBundle` must leave room
 for that within the chain's per-transaction gas cap.
 
-`EconomicConfig.messageExecutionCost` is not read by any code path; the charge
-is based on gas used.
+For each inbound REPLY, `BundleLib._processReplyMessageDecoded` charges the original DATA
+message's connector for the gas its `onClprResponse` callback used, with the same formula and
+fee asset as step 2. The callback always gets `throttles.maxGasPerMessage`, with no
+affordability bound, and a failed reply charge is not slashed.
+
+**Free execution.** `EconomicConfig.messageExecutionCost` is read only as zero or non-zero.
+Zero, or `tx.gasprice == 0`, makes inbound execution free in either asset: no gas bound, no
+`payForExecution`, no DATA or REPLY charge and no underfunded slash.
 
 This model means:
 - `topUpConnector` / `withdrawConnectorBalance` from the platform-agnostic

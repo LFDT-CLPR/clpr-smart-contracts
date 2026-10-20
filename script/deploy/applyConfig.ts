@@ -24,6 +24,18 @@ export async function applyInitialConfig(
 ): Promise<void> {
     const service = loadArtifact("ClprService");
 
+    const feeToken = (await clients.publicClient.readContract({
+        address: clprService,
+        abi: service.abi as never,
+        functionName: "getFeeToken"
+    })) as Address;
+    const defaulted = params.defaultedEconAmounts ?? [];
+    if (BigInt(feeToken) !== 0n && defaulted.length > 0) {
+        throw new Error(
+            `missing env ${defaulted.join(", ")} (required for a fee-token service: amounts are in the fee token's base units)`
+        );
+    }
+
     const initTx = await clients.walletClient.writeContract({
         address: clprService,
         abi: service.abi as never,

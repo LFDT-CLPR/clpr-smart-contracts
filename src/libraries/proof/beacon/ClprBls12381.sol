@@ -6,8 +6,8 @@ pragma solidity ^0.8.28;
 ///         the negated generators), G1 and G2 *compression* (uncompressed → ZCash/Ethereum compressed),
 ///         RFC 9380 hash-to-field, hash-to-G1 and hash-to-G2, and EIP-2537 precompile wrappers.
 ///
-/// @dev The beacon `SyncCommittee` SSZ root and Tempo finalization certificates commit to compressed
-///      points, while the relayer supplies uncompressed ones; compression binds the two. It is the cheap
+/// @dev Source-chain data (e.g. the beacon `SyncCommittee` SSZ root) commits to compressed points,
+///      while the relayer supplies uncompressed ones; compression binds the two. It is the cheap
 ///      direction (no field square root — just read the y sign bit). On-chain *decompression* is
 ///      gas-infeasible and deliberately avoided (see ClprBeaconBls / the ethereum README).
 ///

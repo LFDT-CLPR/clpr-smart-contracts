@@ -25,11 +25,16 @@ contract ConnectorLibHarness {
     mapping(address => uint256) public pendingWithdrawals;
 
     address private _fallback = address(this);
+    ClprTypes.FeeAsset private _feeAsset;
 
     receive() external payable {}
 
     function setFallback(address fb) external {
         _fallback = fb;
+    }
+
+    function setFeeToken(address token) external {
+        _feeAsset.token = token;
     }
 
     function setupConnector(bytes32 channelId, bytes32 connectorId, address connectorContract, uint256 stake) external {
@@ -56,6 +61,7 @@ contract ConnectorLibHarness {
             _connectors,
             _connectorExists,
             pendingWithdrawals,
+            _feeAsset,
             _fallback,
             channelId,
             connectorId,
@@ -88,6 +94,7 @@ contract ConnectorLibHarness {
             _connectors,
             _connectorExists,
             pendingWithdrawals,
+            _feeAsset,
             _fallback,
             channelId,
             connectorId,

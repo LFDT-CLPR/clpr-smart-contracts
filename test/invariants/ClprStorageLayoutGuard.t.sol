@@ -36,6 +36,7 @@ contract ClprStorageLayoutGuardTest is Test {
         _assertStorageSlot("_deprecatedPeerEndpointAccounts", ClprServiceStorageSlots.PEER_ENDPOINT_ACCOUNTS);
         // `_owner` (OZ Ownable) is read via a raw sload in ClprServiceStorage._getOwner(); pin it
         // so a storage layout shift above it (e.g. an added/removed config field) fails loudly.
+        _assertStorageSlot("_feeAsset", ClprServiceStorageSlots.FEE_ASSET);
         _assertStorageSlot("_owner", ClprServiceStorageSlots.OWNER);
     }
 

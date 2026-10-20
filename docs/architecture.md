@@ -61,7 +61,7 @@ Owner checks (`onlyOwner`) are on the router stubs in `ClprService`, not in the
 modules. Two module functions do not use `onlyService`:
 `ConnectorLogic.removeConnector` (the caller must be the connector's `admin`,
 checked in `ConnectorLib.deregister`) and `AdminLogic.collectPending` (pays
-`msg.sender` from its own `_pendingWithdrawals` entry). Called directly on the
+`msg.sender` from its own `_pendingWithdrawals` entry, as does `collectPendingTo`). Called directly on the
 module address, both run against the module's own empty storage and revert.
 
 ### Why functions aren't `view`
@@ -116,8 +116,8 @@ counters (`channelCount`, `connectorCount`, `endpointCount`),
 | `registerEndpoint` (payable) | `AdminLogic` | `onlyService` + `whenEnabled` | Permissionless. Creates a **PENDING** manifest entry for the caller, escrowing `msg.value ≥ minEndpointBond`; not advertised until admitted. There is no bond top-up |
 | `addEndpoint`, `updateEndpointManifest` | `AdminLogic` | Router `onlyOwner`; module `onlyService` + `whenEnabled` | Admit a PENDING registration or direct-add. Capped by `throttles.maxLocalEndpoints` (`ClprEndpointManifestFull`) |
 | `removeEndpoint` | `AdminLogic` | `onlyService` + `whenEnabled` | Registrant **or** owner, else `ClprEndpointUnauthorized`. Bond credited in full to `_pendingWithdrawals`; endpoint bonds are never slashed |
-| `getEndpointManifest`, `getEndpointEntry`, `getLedgerConfiguration`, `getLedgerConfigurationHash`, `getChannelPeerConfigHash`, `getEconomicConfig`, `pendingWithdrawals`, `endpointCount` | `AdminLogic` | None (read) | `endpointCount` is the LIVE manifest size, excluding PENDING registrations |
-| `collectPending` | `AdminLogic` | `nonReentrant` | Pull payment of the caller's `_pendingWithdrawals`. Not `onlyService` and not gated by the kill switch |
+| `getEndpointManifest`, `getEndpointEntry`, `getLedgerConfiguration`, `getLedgerConfigurationHash`, `getChannelPeerConfigHash`, `getEconomicConfig`, `getFeeToken`, `pendingWithdrawals`, `endpointCount` | `AdminLogic` | None (read) | `endpointCount` is the LIVE manifest size, excluding PENDING registrations |
+| `collectPending`, `collectPendingTo` | `AdminLogic` | `nonReentrant` | Pull payment of the caller's `_pendingWithdrawals`, to the caller or to another address. Not `onlyService` and not gated by the kill switch |
 | `receive() payable {}` | router | None | Accepts ETH sent to the router, including `IClprConnector.payForExecution` payments |
 
 ## Outward-bound interfaces (the protocol calls these)
@@ -221,9 +221,9 @@ Listed in **slot order**, as `storage-layout.json` pins them:
 - **`LedgerConfiguration`** — the local config sent to peers in CONTROL
   messages. It carries no endpoints; the endpoint set lives in
   `_endpointManifest`.
-- **`EconomicConfig`** — `messageExecutionCost` is stored but no contract in
-  `src/` reads it; inbound execution is charged by measured gas (see
-  `bundle-flow.md`).
+- **`EconomicConfig`** — `messageExecutionCost` is read only as zero or
+  non-zero: zero makes inbound execution free; otherwise it is charged by
+  measured gas (see `bundle-flow.md`).
 
 ## Library responsibilities
 
@@ -242,12 +242,15 @@ Listed in **slot order**, as `storage-layout.json` pins them:
 The proof libraries under `libraries/proof/` serve the verifiers, not the
 service.
 
-## Native-token (ETH) flows
+## Fee-asset flows
+
+The fee asset is native value, or the ERC-20 passed to the ClprService constructor (see
+`docs/evm-platform-spec.md`).
 
 - **In:** `registerEndpoint` (endpoint bond, once per registration),
   `completeConnector` / `topUpConnectorStake` (connector stake), and
   `payForExecution` (pull payment from the connector contract during inbound
-  DATA, received by `receive()`).
+  DATA, received by `receive()` in native mode).
 - **Out:** charge and slash proceeds → bundle submitter, else the fallback
   recipient `_getOwner()`, else credited to the submitter's `_pendingWithdrawals`
   (`ConnectorLib._transferWithFallback`). `removeConnector` **pushes** the
@@ -260,4 +263,5 @@ service.
   after `payForExecution(amount)` the router must have gained exactly `amount`.
   If not, the charge fails and the connector is slashed.
 - **`_pendingWithdrawals`** is the safety net: when both push transfers reject,
-  the amount is credited to a pull balance claimable via `collectPending()`.
+  the amount is credited to a pull balance claimable via `collectPending()`, or via
+  `collectPendingTo(recipient)` when the credited account itself cannot be paid.

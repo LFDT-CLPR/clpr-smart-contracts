@@ -10,6 +10,7 @@
     "deploy:e2e-with-hiero-verifier": "tsx script/deploy/cli.ts e2e-with-hiero-verifier",
     "test:e2e": "CLPR_BACKEND=anvil vitest run",
     "test:e2e:anvil": "CLPR_BACKEND=anvil vitest run",
+    "test:e2e:anvil:token": "CLPR_BACKEND=anvil CLPR_E2E_FEE_TOKEN=1 vitest run",
     "test:e2e:besu": "CLPR_BACKEND=besu vitest run",
     "test:e2e:solo": "CLPR_BACKEND=solo vitest run --config vitest.solo.config.ts",
     "test:e2e:qbft-verifier": "vitest run test/e2e/tests/verifiers/qbft-verifier.spec.ts",

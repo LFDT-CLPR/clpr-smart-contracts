@@ -3,7 +3,8 @@ import {loadArtifact} from "../../../script/deploy/artifacts.js";
 import type {ChainClients} from "../lib/clients.js";
 import {isSoloBackend} from "../backend/solo/solo.js";
 import type {DeployedAddresses} from "./deploy.js";
-import {DEFAULT_ECON, DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES} from "./constants";
+import {DEFAULT_ECON, DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES, TOKEN_ECON} from "./constants";
+import {approveFeeToken, getEconomicConfig, getFeeToken, isTokenMode} from "./feeAsset.js";
 
 /// Push ledger + economic config to a freshly-deployed ClprService.
 ///
@@ -12,6 +13,8 @@ import {DEFAULT_ECON, DEFAULT_PEER_THROTTLES, SOLO_PEER_THROTTLES} from "./const
 /// registerEndpoint/addEndpoint.
 /// Pass `soloRelay: true` when the clients connect to a Hiero JSON-RPC relay
 /// so Solo-specific throttles and economic constraints are applied.
+/// A token-mode service (deployed with a fee token, see `CLPR_E2E_FEE_TOKEN`) gets `TOKEN_ECON` — on
+/// Solo too, since token mode needs no `msg.value`.
 export async function wireConfig(opts: {
     clients: ChainClients;
     addrs: DeployedAddresses;
@@ -26,9 +29,12 @@ export async function wireConfig(opts: {
     const isSolo = opts.soloRelay ?? isSoloBackend();
 
     const serviceAddressBytes = opts.serviceAddressBytes ?? ("0x" as `0x${string}`);
-    const econ = isSolo
-        ? {...DEFAULT_ECON, minEndpointBond: 0n, minLockedStake: 0n}
-        : DEFAULT_ECON;
+    const tokenMode = isTokenMode(await getFeeToken(clients, addrs.clprService));
+    const econ = tokenMode
+        ? TOKEN_ECON
+        : isSolo
+          ? {...DEFAULT_ECON, minEndpointBond: 0n, minLockedStake: 0n}
+          : DEFAULT_ECON;
     const throttles = isSolo ? SOLO_PEER_THROTTLES : DEFAULT_PEER_THROTTLES;
 
     const initTx = await clients.walletClient.writeContract({
@@ -79,6 +85,8 @@ export async function wireConfig(opts: {
 /// posts a refundable bond; it no longer carries a signing key and does not gate
 /// submitBundle. Pass `soloRelay: true` when the chain is a Hiero relay — sets bond
 /// to 0 since the relay does not forward tx.value into delegatecall targets.
+/// On a token-mode service the bond is `minEndpointBond` of the fee token, approved here and
+/// pulled by the service; `bond` and `soloRelay` are ignored.
 export async function registerEndpoint(opts: {
     clients: ChainClients;
     clprService: `0x${string}`;
@@ -89,7 +97,13 @@ export async function registerEndpoint(opts: {
     const service = loadArtifact("ClprService");
 
     const isSolo = opts.soloRelay ?? isSoloBackend();
-    const value = isSolo ? 0n : (bond ?? parseEther("0.1"));
+    const feeToken = await getFeeToken(clients, clprService);
+    let value = isSolo ? 0n : (bond ?? parseEther("0.1"));
+    if (isTokenMode(feeToken)) {
+        const {minEndpointBond} = await getEconomicConfig(clients, clprService);
+        await approveFeeToken(clients, feeToken, clprService, minEndpointBond);
+        value = 0n;
+    }
     // Two-step admission: registerEndpoint now takes ClprEndpoint discovery data and posts the bond as
     // a PENDING entry (submission is permissionless, so this is not required to submit bundles — it
     // exercises the manifest-registration path). Fields are placeholders; the anvil e2e drives sync via

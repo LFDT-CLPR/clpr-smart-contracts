@@ -13,12 +13,15 @@ same bytecode on anvil (Ethereum Osaka schedule).
 | Deploy the 7-contract `ClprService` stack | 15,645,584 | **76,411,784** (×4.9) | Same rule, plus 250,000 per storage slot the constructor writes. |
 | One new storage slot (SSTORE 0 → non-zero) | 43,391 (tx) | **275,591** (tx) | TIP-1000 state-creation charge, +232,200 per slot. |
 | Same, when the contract has a storage credit | 43,391 | **30,591** | TIP-1060: every cleared slot mints a credit for the next creation in that contract. |
-| `sendMessage`, 512-byte payload, real tx | 1,052,958 | **10,725,358** (×10) | 42 new slots (22 in the service, 20 in the mock connector), no credits. |
+| `sendMessage`, 512-byte payload, real tx | 1,052,980 | **10,725,380** (×10) | 42 new slots (22 in the service, 20 in the mock connector), no credits. |
 | `sendMessage`, 16-byte payload, real tx | 355,596 | **3,386,396** without credits, **1,426,396** with credits from earlier deletes | |
-| Ack-only `submitBundle`, real tx | 153,453 | **168,053** | No new slots; Tempo gives no refund for the cleared slots. |
+| Ack-only `submitBundle`, real tx | 154,191 | **168,803** | No new slots; Tempo gives no refund for the cleared slots. |
+| Inbound DATA 16 B through `submitBundle`, charged in the fee asset | 523,037 (native value) | **3,540,459** (pathUSD) | Delivered and charged. Mostly the receiving app's storage; the service adds 3 slots. |
+| Same, free execution (`messageExecutionCost = 0`) | — | **3,498,038** | Delivered; no balance check, charge or slash. |
 
 The verifier itself costs the same. Creating state costs far more, unless the contract has
-storage credits from earlier deletes (§3). A future Tempo upgrade (TIP-1102, still a draft) would also reprice the precompiles the
+storage credits from earlier deletes (§3). Inbound DATA is delivered on Tempo with the service on a
+fee token such as pathUSD, or with free execution (§4). A future Tempo upgrade (TIP-1102, still a draft) would also reprice the precompiles the
 verifier relies on (§6).
 
 ## Setup
@@ -184,27 +187,43 @@ its throughput:
 
 The whole flow on one chain, driven like the e2e harness (`tools/tempo-localnet/measure-submit-bundle.ts`):
 `ClprService` stack, `E2EVerifier`, one channel, a bonded endpoint, a connector with the
-`MockClprConnector` double, `E2EApplication` as sender and receiver. All economic amounts are zero.
+`MockClprConnector` double, `E2EApplication` as sender and receiver. Three runs: native value on
+anvil (0.1 ETH connector stake, 1 ETH operating balance), pathUSD as the `feeToken` on Tempo (100 USD
+stake, 10 USD endpoint bond, 1 USD base penalty, 10 USD operating balance), and free execution on
+Tempo (`messageExecutionCost` and every stake and bond zero). In every run each inbound DATA message
+is delivered, `MessageDispatched` with `SUCCESS`, and in the charged runs paid, `ConnectorCharged`;
+the script fails otherwise.
 
 Two throttles were raised on both chains, `maxGasPerMessage` 1M → 8M and
 `connectorInboundGasStipend` 500k → 3M, because the Ethereum defaults are too small on Tempo the
 moment the application writes a few slots at 250,000 each.
 
-| Transaction | Ethereum | Tempo | Tempo notes |
-|---|---|---|---|
-| `sendMessage`, first on channel, 16 B | 441,096 | **4,128,296** | 16 new slots: 11 service, 5 mock connector |
-| `submitBundle`, 1 inbound REPLY, delivered | 265,132 | **1,006,644** | app stores the response |
-| `submitBundle`, ack-only | 153,441 | **168,053** | 4 clears, no refund |
-| `sendMessage`, steady, 16 B, after 13 deletes | 389,796 | **1,181,396** | storage credits cover most slots |
-| `sendMessage`, steady, 512 B | 1,052,958 | **10,235,358** | 42 slots, last credits used |
-| `sendMessage`, steady, 16 B, no credits | 355,596 | **2,891,796** | 13 slots × 232,200 minus one credit |
-| `sendMessage`, steady, 512 B, no credits | 1,052,958 | **10,725,358** | 42 slots × 232,200 |
+| Transaction | Ethereum, native value | Tempo, pathUSD | Tempo, free execution | Tempo notes |
+|---|---|---|---|---|
+| `sendMessage`, first on channel, 16 B | 441,118 | **4,128,318** | **4,128,318** | 16 new slots: 11 service, 5 mock connector |
+| `submitBundle`, 1 inbound DATA 16 B, delivered | 523,037 | **3,540,459** | **3,498,038** | app stores the message (test double), service adds 3 slots |
+| `submitBundle`, 1 inbound REPLY, delivered | 266,505 | **1,008,017** | **1,008,017** | app stores the response |
+| `submitBundle`, ack-only | 154,191 | **168,803** | **168,803** | 4 clears, no refund |
+| `sendMessage`, steady, 16 B, after 13 deletes | 389,818 | **1,181,418** | **1,181,418** | storage credits cover most slots |
+| `sendMessage`, steady, 512 B | 1,052,980 | **10,235,380** | **10,235,380** | 42 slots, last credits used |
+| `submitBundle`, 1 inbound DATA 512 B, delivered | 1,197,880 | **8,582,110** | **8,537,724** | app stores 512 B; the connector callback runs out of its 3M stipend |
+| `sendMessage`, steady, 16 B, no credits | 355,618 | **2,891,818** | **2,891,818** | 13 slots × 232,200 minus one credit |
+| `sendMessage`, steady, 512 B, no credits | 1,052,980 | **10,725,380** | **10,725,380** | 42 slots × 232,200 |
 
-Every Tempo transaction also emits a TIP-20 `Transfer` from the sender to the fee collector, the
-gas fee paid in pathUSD.
+In the pathUSD run the connector paid 3,846 micro-dollars (0.0038 USD) of execution charges for
+the two inbound DATA messages, and the service passed all of it to the submitter: it held exactly
+the 110 USD of stake and bond before and after. Charging costs 42,421 (16 B) and 44,386 (512 B) gas
+more than free execution, for the TIP-20 balance reads and the two transfers. Every Tempo
+transaction also emits a TIP-20 `Transfer` from the sender to the fee collector, the gas fee paid in
+pathUSD.
 
 What the rows say:
 
+- **The service's own share of an inbound message is small.** It stores only the REPLY it
+  generates, 2 to 3 slots. Almost all of the Tempo inbound cost above is the receiving
+  application (the e2e double stores every message) and the connector callback. Real
+  applications on Tempo pay 250,000 per slot they keep, so what an app persists per message
+  decides its cost, not CLPR.
 - **Outbound is where CLPR itself pays.** A queued message costs `3 + ceil(payload/32)` slots
   until it is acked, and the 512-byte send is 10× Ethereum.
 - **Credits matter.** The same 16-byte send costs 1.18M right after 13 deletes and 2.89M with no
@@ -223,6 +242,7 @@ What the rows say:
 | Calldata, 5,668-byte proof | 85,144 |
 | Tx base | 21,000 |
 | **Total, ack-only** | **≈ 6,360,000**, within 1% of Ethereum |
+| + one inbound DATA message | about +700,000 for the 3 slots of the service's REPLY, about +42,000 to charge it in pathUSD, plus whatever the application stores |
 
 ## 6. What TIP-1102 would change
 
@@ -272,10 +292,12 @@ npx tsx tools/tempo-localnet/scan-deploy-gas.ts http://127.0.0.1:18545 <fromBloc
 # Storage slots per CLPR operation
 FOUNDRY_PROFILE=test forge test --match-path test/gas/TempoStorageWrites.t.sol -vv
 
-# Storage credits probe, and the full ClprService flow (FUND=1 only on chains with native value)
+# Storage credits probe, and the full ClprService flow: native value on anvil, pathUSD and free execution on Tempo
 npx tsx tools/tempo-localnet/probe-storage-credits.ts http://127.0.0.1:18545
-FUND=1 npx tsx tools/tempo-localnet/measure-submit-bundle.ts anvil http://127.0.0.1:8555 /tmp/submit-anvil.json
-npx tsx tools/tempo-localnet/measure-submit-bundle.ts tempo http://127.0.0.1:18545 /tmp/submit-tempo.json
+npx tsx tools/tempo-localnet/measure-submit-bundle.ts anvil http://127.0.0.1:8555 /tmp/submit-anvil.json
+FEE_TOKEN=0x20C0000000000000000000000000000000000000 \
+  npx tsx tools/tempo-localnet/measure-submit-bundle.ts tempo http://127.0.0.1:18545 /tmp/submit-tempo.json
+FREE_EXECUTION=1 npx tsx tools/tempo-localnet/measure-submit-bundle.ts tempo-free http://127.0.0.1:18545 /tmp/submit-tempo-free.json
 ```
 
 | File | Role |
@@ -284,7 +306,7 @@ npx tsx tools/tempo-localnet/measure-submit-bundle.ts tempo http://127.0.0.1:185
 | `tools/tempo-localnet/measure-hiero-steps.ts`, `test/helpers/HieroGasStepsHarness.sol` | The per-step breakdown of `GasUsage.t.sol`, readable from a live chain. |
 | `tools/tempo-localnet/measure-hiero-anchor.ts` | `verifyBundle` with a fresh versus a matching trust anchor. |
 | `tools/tempo-localnet/probe-sstore.ts`, `probe-storage-credits.ts` | SSTORE transitions and the storage-credit behaviour on a 7-byte probe contract. |
-| `tools/tempo-localnet/measure-submit-bundle.ts` | Deploys the service stack, wires a channel, connector and endpoint, then measures `sendMessage` and `submitBundle` receipts. |
+| `tools/tempo-localnet/measure-submit-bundle.ts` | Deploys the service stack with real economics (native value, the `FEE_TOKEN` ERC-20, or free execution), wires a channel, connector and endpoint, measures `sendMessage` and `submitBundle` receipts, and fails unless every inbound DATA message is delivered and, when charged, paid. |
 | `tools/tempo-localnet/scan-deploy-gas.ts` | Per-transaction gas and code size for a block range. |
 | `test/gas/TempoStorageWrites.t.sol` | Storage-slot transitions per protocol operation. |
 | `test/verifiers/hiero/GasUsage.t.sol` | The Foundry breakdown and the fixtures both chains were fed. |

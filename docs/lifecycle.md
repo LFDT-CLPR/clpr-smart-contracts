@@ -234,9 +234,10 @@ channel's status is not checked. It then calls
    commitment, emit `ConnectorRegistered`; `ConnectorLogic` then increments
    `_connectorCount`.
 
-`topUpConnectorStake(channelId, connectorId)` adds `msg.value` to
-`lockedStake`. Any caller may top up; `msg.value == 0` reverts
-`ClprInsufficientStake` and an unknown connector `ClprConnectorNotFound`.
+`topUpConnectorStake(channelId, connectorId, amount)` adds `amount` to
+`lockedStake`: native mode requires `msg.value == amount`, token mode pulls it with
+`transferFrom`. Any caller may top up; `amount == 0` reverts `ClprInsufficientStake`, a
+`msg.value` mismatch `ClprNativeValueMismatch` and an unknown connector `ClprConnectorNotFound`.
 
 ### `deregister` (`removeConnector`)
 

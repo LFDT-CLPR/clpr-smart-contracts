@@ -656,7 +656,8 @@ contract BundleProcessor_ReplyDecodeFailTest is ClprTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
 
         verifier = new MockClprVerifier();

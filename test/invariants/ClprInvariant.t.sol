@@ -427,7 +427,7 @@ contract ClprInvariantTest is StdInvariant, Test {
             if (!live) continue;
             vm.prank(address(this));
             vm.expectRevert(ClprTypes.ClprDisabled.selector);
-            service.topUpConnectorStake{value: 0}(channelId, connectorId);
+            service.topUpConnectorStake(channelId, connectorId, 0);
             return;
         }
     }

@@ -346,7 +346,7 @@ contract ClprHandler is Test {
 
         uint256 amount = bound(amountSeed, 0, 1 ether);
         vm.prank(OWNER);
-        try SERVICE.topUpConnectorStake{value: amount}(tracked.channelId, tracked.connectorId) {
+        try SERVICE.topUpConnectorStake{value: amount}(tracked.channelId, tracked.connectorId, amount) {
             tracked.stake += amount;
             _connectorStakeGhost[tracked.digest] += amount;
             _syncConnectorGhostsFor(tracked);

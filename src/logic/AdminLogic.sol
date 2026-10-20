@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {ClprTypes} from "../libraries/ClprTypes.sol";
 import {ClprConfigHash} from "../libraries/codec/ClprConfigHash.sol";
 import {ManifestLib} from "../libraries/service/ManifestLib.sol";
+import {FeeAssetLib} from "../libraries/service/FeeAssetLib.sol";
 import {LogicModuleBase} from "./base/LogicModuleBase.sol";
 
 /// @title AdminLogic
@@ -67,10 +68,14 @@ contract AdminLogic is LogicModuleBase {
         return _endpointManifest.entries[account];
     }
 
-    /// @notice Pending ETH withdrawal balance for `account` (pull-payment pattern).
-    /// @param account The account to query.
+    /// @notice Pending fee-asset withdrawal balance for `account` (pull-payment pattern).
     function pendingWithdrawals(address account) external view returns (uint256) {
         return _pendingWithdrawals[account];
+    }
+
+    /// @notice The ERC-20 stakes, bonds and charges are paid in; `address(0)` means native value.
+    function getFeeToken() external view returns (address) {
+        return _feeAsset.token;
     }
 
     // ── Kill switch ────────────────────────────────────────────────────────
@@ -184,14 +189,24 @@ contract AdminLogic is LogicModuleBase {
 
     // ── Endpoint management ────────────────────────────────────────────────
 
-    /// @notice Self-register the caller as a PENDING endpoint, posting a bond (= msg.value).
-    /// @dev Two-step admission (spec §6.5): the caller does not appear in the live manifest until the
+    /// @notice Self-register the caller as a PENDING endpoint, posting a bond.
+    /// @dev Two-step admission: the caller does not appear in the live manifest until the
     ///      owner admits it via {addEndpoint}/{updateEndpointManifest}. The bond is held in escrow,
     ///      refunded in full on removal/cancellation, and never slashed. Permissionless — any caller;
-    ///      registration does not gate submitBundle. Requires msg.value >= minEndpointBond.
+    ///      registration does not gate submitBundle. The bond is `msg.value` in native mode (at least
+    ///      `minEndpointBond`); in token mode exactly `minEndpointBond` is pulled with `transferFrom`
+    ///      and `msg.value` must be 0.
     /// @param endpoint The endpoint discovery data to advertise once admitted.
-    function registerEndpoint(ClprTypes.Endpoint calldata endpoint) external payable onlyService whenEnabled {
-        ManifestLib.registerEndpoint(_endpointManifest, endpoint, msg.value, economicConfig.minEndpointBond, msg.sender);
+    function registerEndpoint(ClprTypes.Endpoint calldata endpoint)
+        external
+        payable
+        nonReentrant
+        onlyService
+        whenEnabled
+    {
+        uint256 minBond = economicConfig.minEndpointBond;
+        uint256 bond = FeeAssetLib.pullAtLeast(_feeAsset, minBond);
+        ManifestLib.registerEndpoint(_endpointManifest, endpoint, bond, minBond, msg.sender);
     }
 
     /// @notice Admit a registrant to the live endpoint manifest. Owner-only (enforced at ClprService).
@@ -240,14 +255,25 @@ contract AdminLogic is LogicModuleBase {
 
     // ── Pull-payment ───────────────────────────────────────────────────────
 
-    /// @notice Withdraw the caller's pending ETH balance (pull-payment).
-    /// @dev Follows checks-effects-interactions: balance is zeroed before the
-    ///      transfer. Reverts if the balance is zero.
+    /// @notice Withdraw the caller's pending fee-asset balance (pull-payment).
+    /// @dev Reverts with ClprNothingToCollect on a zero balance and ClprTransferFailed when the
+    ///      transfer fails.
     function collectPending() external nonReentrant {
+        _collectPending(msg.sender);
+    }
+
+    /// @notice Withdraw the caller's pending fee-asset balance to `recipient`.
+    /// @dev Lets an account the fee asset will not pay, such as one a fee token blocks, redirect its credit.
+    ///      Reverts with ClprZeroRecipient for `address(0)`, otherwise like {collectPending}.
+    function collectPendingTo(address recipient) external nonReentrant {
+        if (recipient == address(0)) revert ClprTypes.ClprZeroRecipient();
+        _collectPending(recipient);
+    }
+
+    function _collectPending(address recipient) private {
         uint256 amount = _pendingWithdrawals[msg.sender];
         if (amount == 0) revert ClprTypes.ClprNothingToCollect();
         _pendingWithdrawals[msg.sender] = 0;
-        (bool ok,) = msg.sender.call{value: amount}("");
-        if (!ok) revert ClprTypes.ClprTransferFailed();
+        FeeAssetLib.send(_feeAsset, recipient, amount);
     }
 }

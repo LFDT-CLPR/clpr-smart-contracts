@@ -8,6 +8,7 @@ import {loadArtifact} from "../../../script/deploy/artifacts.js";
 import {deployE2EPair, type DeployedAddresses} from "../deploy/deploy.js";
 import {wireConfig, registerEndpoint} from "../deploy/wire.js";
 import {isSoloBackend} from "../backend/solo/solo.js";
+import {activeEcon, feeTokenMode} from "../deploy/feeAsset.js";
 
 /// Smoke test: validates that the full toolchain works end-to-end —
 /// backend starts, contracts deploy, config writes, endpoint registers,
@@ -102,7 +103,9 @@ describe("smoke", () => {
             args: [A.account.address]
         })) as {status: number; bond: bigint};
         expect(entry.status).toBe(1); // EndpointStatus.PENDING
-        expect(entry.bond).toBe(soloRelay ? 0n : parseEther("0.1"));
+        // Token mode pulls exactly minEndpointBond of the fee token.
+        const expectedBond = feeTokenMode() ? activeEcon().minEndpointBond : soloRelay ? 0n : parseEther("0.1");
+        expect(entry.bond).toBe(expectedBond);
 
         // Live manifest count is still 0 until the admin admits the endpoint via addEndpoint.
         const count = (await A.publicClient.readContract({
@@ -131,7 +134,8 @@ describe("smoke", () => {
                 abi: service.abi as never,
                 functionName: "registerEndpoint",
                 args: [{ipAddress: "10.0.0.2", port: 50211, tlsCertificate: "0x", accountId: "0x"}],
-                value: parseEther("0.001"),
+                // A token-mode service rejects any msg.value, which would mask the ClprDisabled revert.
+                value: feeTokenMode() ? 0n : parseEther("0.001"),
                 account: A.account
             })
         ).rejects.toThrow();

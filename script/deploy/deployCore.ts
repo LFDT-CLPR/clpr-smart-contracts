@@ -128,6 +128,7 @@ export async function deployClprService(
     console.error(`[Deploy]   connectorLogic: ${modules.connectorLogic}`);
     console.error(`[Deploy]   adminLogic: ${modules.adminLogic}`);
     console.error(`[Deploy]   bundleDecodeHelper: ${modules.bundleDecodeHelper}`);
+    console.error(`[Deploy]   feeToken: ${params.feeToken ?? "native value"}`);
     console.error("[Deploy] ========================================");
     return deployArtifact(clients, "ClprService", [
         params.initialOwner,
@@ -138,7 +139,8 @@ export async function deployClprService(
         modules.bundleLogic,
         modules.connectorLogic,
         modules.adminLogic,
-        modules.bundleDecodeHelper
+        modules.bundleDecodeHelper,
+        params.feeToken ?? "0x0000000000000000000000000000000000000000"
     ]);
 }
 

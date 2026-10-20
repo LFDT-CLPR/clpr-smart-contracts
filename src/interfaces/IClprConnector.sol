@@ -27,16 +27,19 @@ interface IClprConnector {
     ///      `economicConfig.connectorPaymentGasLimit` gas (at least `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT`),
     ///      less the CALL's own cost (account access under EIP-2929 and, for an EIP-7702 account, its
     ///      delegate), or the bundle reverts with `ExactGasCall.InsufficientGasForCall`. The connector MUST
-    ///      transfer exactly `amount` wei to `msg.sender` (the manager forwards it to the bundle submitter).
+    ///      transfer exactly `amount` of the service's fee asset to `msg.sender` (the manager forwards it to
+    ///      the bundle submitter): native value when `IClprService.getFeeToken()` is `address(0)`, otherwise
+    ///      that ERC-20.
     ///      Reverting, running out of gas, transferring any other amount, or holding a balance below `amount`
     ///      (checked first; the call is then skipped) fails the charge. A failed charge for a DATA message
     ///      slashes the connector and leaves the message's reply status unchanged; a failed charge for a
-    ///      reply does not slash it.
+    ///      reply does not slash it. A fee token that pauses transfers, or blocks this contract or the
+    ///      service, fails the charge the same way.
     ///
     ///      Implementations SHOULD restrict callers to the manager (the address
     ///      they were registered with), otherwise any caller can drain the
     ///      contract's operating balance.
-    /// @param amount Wei to transfer back to `msg.sender`.
+    /// @param amount Fee-asset units to transfer back to `msg.sender`.
     function payForExecution(uint256 amount) external;
 
     /// @notice Notify the connector that an inbound message has been processed.

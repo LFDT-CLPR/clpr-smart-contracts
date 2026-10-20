@@ -216,13 +216,28 @@ EVM rendering of the spec's "service_address" binding.
 ## Charge verification by router-balance delta
 
 `ConnectorLib.charge` calls `IClprConnector.payForExecution(amount)` and
-then asserts `address(this).balance` grew by exactly `amount`. Because
+then asserts the router's fee-asset balance grew by exactly `amount`. Because
 `ConnectorLib` is an internal library, `address(this)` resolves to the
 router. A connector that "succeeds" without transferring (or transfers the
 wrong amount) makes `charge` return `false`, and
 `BundleLib._processDataMessageDecoded` slashes it. **Don't replace this with a
 return-value check** — the ABI return value is unreliable for measuring
 actual ETH flow.
+
+## A fee token that pauses or blocks transfers slashes funded connectors
+
+With a fee token, `payForExecution` moves that token from the connector to the router. If the
+token pauses transfers, or blocks the connector or the router address (a blocklist or transfer
+policy), that transfer reverts. `ConnectorLib.charge` cannot tell this from a connector that
+refuses to pay, so it returns `false` and every inbound DATA message for the connector slashes
+it, although its balance covers the charge: `balanceOf` still answers, so the affordability
+bound passes. After `slashBanThreshold` such messages the connector is banned and loses its
+whole `lockedStake`, and one bundle can carry that many. A pause, or a block on the router,
+hits every connector at once.
+
+This is an accepted risk: telling the two cases apart needs token-specific checks or a
+different payment interface. While the fee token is paused or blocks the router, the operator
+disables the service (`docs/runbooks/kill-switch.md`, trigger *Fee token halted*).
 
 ## Pull-payment fallback (`_pendingWithdrawals`)
 
@@ -261,7 +276,7 @@ with the connector paying the measured execution cost plus a margin
 
 ```
 actualCharge = gasUsed * tx.gasprice
-totalCharge  = actualCharge + actualCharge * economicConfig.endpointMarginPercent / 100
+totalCharge  = (actualCharge + actualCharge * economicConfig.endpointMarginPercent / 100) * scale
 ```
 
 All of `totalCharge` is transferred to the bundle submitter via
@@ -269,8 +284,11 @@ All of `totalCharge` is transferred to the bundle submitter via
 margin covers the submitter's overhead (routing, verification, hash checks)
 and provides a small profit incentive. The margin is a single service-wide
 setting (`EconomicConfig.endpointMarginPercent`) applied identically to every
-connector — `Connector` has no margin field. `EconomicConfig.messageExecutionCost`
-is stored but no code in `src/` reads it; charges are always measured gas.
+connector — `Connector` has no margin field. `scale` is 1 when the service runs on native
+value and `10^(decimals − 18)` with a fee token (the `feeToken` constructor argument), whose
+units every charge is then paid in; results round down. `EconomicConfig.messageExecutionCost` is read only as zero
+or non-zero: zero turns the whole charge path off (free execution); otherwise charges are
+always measured gas.
 
 Example: if the application call uses 300,000 gas at a gas price of 1 gwei
 with `endpointMarginPercent = 10`, the connector pays
@@ -278,19 +296,19 @@ with `endpointMarginPercent = 10`, the connector pays
 of it.
 
 **Pre-call gas clamp:** before invoking the application the service computes
-`affordableGas = connectorContract.balance * 100 / ((100 + endpointMarginPercent)
-* tx.gasprice)`. If that is **zero**, the connector is CONNECTOR_UNDERFUNDED —
+`affordableGas = balance / scale * 100 / ((100 + endpointMarginPercent)
+* tx.gasprice)`, where `balance` is the connector contract's fee-asset balance. If that is **zero**, the connector is CONNECTOR_UNDERFUNDED —
 slashed, and no application call is made. Otherwise the call is dispatched
 with `gas: min(maxGasPerMessage, affordableGas)`, so the endpoint never
 performs work the connector cannot pay for. It is a *clamp* on the forwarded
 gas, not a ceiling check against a fixed maximum charge.
 
-When `tx.gasprice == 0` (some test and L2 environments) execution is free, so the
-clamp is skipped entirely.
+When `tx.gasprice == 0` (some test and L2 environments) or `messageExecutionCost == 0`,
+execution is free, so the clamp is skipped entirely.
 
 Slash proceeds also go to the submitter (with the pull-payment fallback).
 The owner is the fallback recipient for charge and slash transfers — meaning
-the protocol owner ends up holding ETH from any push-failures. Don't accumulate
+the protocol owner ends up holding the fee asset from any push-failures. Don't accumulate
 large balances on the owner address; they should be swept periodically.
 
 ## sendMessage stamps msg.sender — application-layer "from" claims are untrusted

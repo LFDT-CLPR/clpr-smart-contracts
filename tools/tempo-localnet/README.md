@@ -31,18 +31,24 @@ Docker (compose v2), Node 24 with the repository's `node_modules`, Foundry (`cas
    three. The compose file passes `--rpc.eth-proof-window=1000000` so `eth_getProof` answers for
    any recent block; reth's default answers only for the head.
 
-3. **Deploy a ClprService** with the repository's deploy CLI (fees are paid in the localnet's
-   pathUSD automatically; the first mnemonic account is funded):
+3. **Deploy a ClprService** with the repository's deploy CLI (gas is paid in the localnet's pathUSD
+   automatically; the first mnemonic account is funded). Tempo has no native value, so the service is
+   deployed with pathUSD as its fee token; the constructor fixes it for the life of the service. Tempo
+   quotes `tx.gasprice` in attodollars (USD at 18 decimals), the unit the execution charge assumes, so
+   the 6-decimal pathUSD charge is gasUsed × gasprice / 10^12:
 
    ```bash
    PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+   FEE_TOKEN=0x20C0000000000000000000000000000000000000 \
      npx tsx script/deploy/cli.ts all --rpc-url http://127.0.0.1:18545
    ```
 
-4. **Initialize the service and complete a channel** on it (through the `E2EVerifier` double):
+4. **Initialize the service and complete a channel** on it (through the `E2EVerifier` double).
+   Every `ECON_*` amount is in 6-decimal pathUSD units:
 
    ```bash
    PRIVATE_KEY=0xac09…ff80 CLPR_SERVICE=<address from step 3> \
+   ECON_MIN_LOCKED_STAKE=100000000 ECON_MIN_ENDPOINT_BOND=10000000 ECON_BASE_PENALTY=1000000 \
      npx tsx tools/tempo-localnet/setup-channel.ts http://127.0.0.1:18545
    ```
 

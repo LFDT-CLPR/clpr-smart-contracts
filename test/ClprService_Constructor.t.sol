@@ -25,7 +25,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -42,7 +43,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -59,7 +61,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             address(0),
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -76,7 +79,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             address(0),
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -93,7 +97,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             address(0),
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -110,6 +115,7 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
+            address(0),
             address(0)
         );
     }
@@ -128,7 +134,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -146,7 +153,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -164,7 +172,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             eoa,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -182,7 +191,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             eoa,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -200,7 +210,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             eoa,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
     }
 
@@ -218,7 +229,8 @@ contract ClprService_Constructor is ClprServiceTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            eoa
+            eoa,
+            address(0)
         );
     }
 

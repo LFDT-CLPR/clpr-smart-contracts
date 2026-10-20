@@ -456,7 +456,7 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
 
         // topUpConnectorStake
         vm.expectRevert(ClprTypes.ClprDisabled.selector);
-        service.topUpConnectorStake{value: 0}(channelId, connectorId);
+        service.topUpConnectorStake(channelId, connectorId, 0);
 
         // registerEndpoint
         ClprTypes.Endpoint memory ep =

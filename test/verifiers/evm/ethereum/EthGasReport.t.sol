@@ -315,7 +315,8 @@ abstract contract EthGasReportBase is EthBundleProofFactory {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0) // feeToken: native value
         );
         return ClprService(payable(deployCode("ClprService.sol:ClprService", args)));
     }

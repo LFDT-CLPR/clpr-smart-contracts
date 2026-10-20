@@ -145,6 +145,7 @@ Anvil sides need no `e2e:up` step (Vitest spawns `anvil` inline).
 |---|---|
 | `npm run test:e2e`        | Default — Anvil. Fast inner loop. |
 | `npm run test:e2e:anvil`  | Explicit Anvil run. |
+| `npm run test:e2e:anvil:token` | Anvil run with every ClprService on a 6-decimal USD fee token (`CLPR_E2E_FEE_TOKEN=1`). CI runs it after the native run. |
 | `npm run test:e2e:besu`   | Both chains Besu (inline Testcontainers or pre-started stack). |
 | `npm run test:e2e:solo`   | Both chains Solo (`e2e:up:solo` or `e2e:solo:up` first). Sequential specs (`vitest.solo.config.ts`). |
 | `npm run test:e2e:besu:solo` | Cross-verifier roundtrip (`besu-solo-roundtrip.spec.ts` only). |
@@ -170,6 +171,7 @@ Anvil sides need no `e2e:up` step (Vitest spawns `anvil` inline).
 |---|---|
 | `CLPR_BACKEND=anvil\|besu\|solo` | Same kind on A and B. |
 | `CLPR_BACKEND=a:b` | Mixed backends, e.g. `besu:solo`, `anvil:besu`. Specs sort alphabetically by kind (A = earlier, B = later). |
+| `CLPR_E2E_FEE_TOKEN=1` | Token mode: `deployAll` deploys a `MockFeeToken` (6 decimals) and passes it to the `ClprService` constructor, which fixes it for the life of the service. Stakes, bonds, charges and slash payouts are then in the token, with `TOKEN_ECON` amounts (100 USD stake, 10 USD bond, 1 USD penalty). Needs no `msg.value`, so it applies on Solo too. `economics.spec.ts` checks the charge flow in either mode. |
 | `SOLO_RPC_A`, `SOLO_RPC_B` | Override relay URLs (set automatically after `e2e:solo:up`). |
 | `CLPR_QBFT_VALIDATOR` | QBFT validator address for proof building (default: Besu genesis account #0). |
 | `CLPR_SOLO_LEDGER_ID` | Hiero ledger id bytes for `HieroVerifier` / trust anchors. |
