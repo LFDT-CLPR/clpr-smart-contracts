@@ -11,7 +11,7 @@ Solidity contracts for the CLPR protocol, built with [Foundry](https://book.getf
 ### Clone and install
 
 ```shell
-git clone --recurse-submodules https://github.com/hiero-hackers/clpr-smart-contracts.git
+git clone --recurse-submodules https://github.com/LFDT-CLPR/clpr-smart-contracts.git
 cd clpr-smart-contracts
 ```
 
