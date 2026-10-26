@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+name: "605: [FLOW] Slither Scan"
+
+on:
+  workflow_dispatch:
+  # No `branches:` filter on pull_request — it filters on the PR's BASE branch,
+  # which silently skips this scan for stacked PRs (a PR whose base is another
+  # feature branch). Run on every PR regardless of base; `push` stays main-only.
+  pull_request:
+  push:
+    branches: [main]
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: slither-scan-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  slither:
+    name: Slither
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Run Slither
+        uses: crytic/slither-action@b52cc1cbfee9ca3e8722dd5224299d16c9a6b80f # v0.4.2
+        with:
+          fail-on: high
+          slither-args: --disable-color --triage-database slither-baseline.json --json slither-results.json --filter-paths "(lib/|test/|script/)"
+        env:
+          PYTHONMALLOC: malloc
+
+      - name: Generate Slither Triage
+        if: always()
+        run: |
+          if [ -f slither-results.json ]; then
+            echo "# Slither Triage Document" > slither-triage.md
+            echo "This document lists findings that are suppressed in the baseline, along with their reasons." >> slither-triage.md
+            jq -r '.results.detectors[] | "- **\(.check)** (\(.impact)): Suppressed due to acceptable baseline risk. (ID: `\(.id)`)"' slither-results.json >> slither-triage.md
+          else
+            echo "slither-results.json not found, skipping triage generation."
+          fi
+
+      - name: Upload Slither Triage
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: slither-triage
+          path: slither-triage.md

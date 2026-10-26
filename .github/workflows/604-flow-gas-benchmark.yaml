@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+name: "604: [FLOW] Gas Benchmark"
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gas-benchmark-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  gas-regression:
+    name: Gas Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Run Forge build source
+        run: forge build src --deny warnings
+
+      - name: Run Forge build tests
+        run: FOUNDRY_PROFILE=test forge build --deny warnings
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Check gas regression (forge baselines)
+        run: npm run gas:check
