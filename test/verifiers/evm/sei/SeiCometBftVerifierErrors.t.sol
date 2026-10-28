@@ -2424,7 +2424,7 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         bytes memory spKey = abi.encodePacked(uint8(0x03), serviceAddr, bytes32(0));
         bytes32 expectedSlot;
         assembly {
-            expectedSlot := or(shl(96, serviceAddr), 0x28)
+            expectedSlot := or(serviceAddr, 0x28)
         }
         bytes memory spValue = abi.encodePacked(expectedSlot);
         (bytes memory storageEntry, bytes32 iavlRoot) = _buildStorageProofEntry(spKey, spValue);

@@ -206,7 +206,7 @@ contract SeiComplianceTest is ClprEvmStorageComplianceTest, SeiSyntheticProofs {
     function _serviceAddressSlotValue() private pure returns (bytes32 slotValue) {
         bytes20 svc20 = SERVICE_ADDR20;
         assembly {
-            slotValue := or(shl(96, svc20), 0x28)
+            slotValue := or(svc20, 0x28)
         }
     }
 

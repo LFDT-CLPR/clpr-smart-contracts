@@ -383,7 +383,7 @@ contract SeiCometBftVerifierTest is SeiSyntheticProofs {
 
         bytes32 expectedSlotValue;
         assembly {
-            expectedSlotValue := or(shl(96, serviceAddr20), 0x28)
+            expectedSlotValue := or(serviceAddr20, 0x28)
         }
 
         bytes memory spKey = abi.encodePacked(uint8(0x03), serviceAddr20, bytes32(0));
