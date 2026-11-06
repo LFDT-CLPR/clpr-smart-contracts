@@ -32,8 +32,7 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
 
     /// @dev The account proof authenticated a codeHash that does not match the pinned expected hash.
     error CodeHashMismatch();
-    /// @dev The storage proof did not carry the expected number of entries (5 for ACK-only bundles,
-    ///      6 when the bundle also carries outbound messages).
+    /// @dev The storage proof did not carry 5 or 6 entries.
     error InvalidStorageProofShape();
     /// @dev The supplied manifest preimage does not hash to the proven on-ledger commitment.
     error ManifestCommitmentMismatch();
@@ -41,11 +40,9 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
     error ManifestServiceAddressMismatch();
     /// @dev The proven manifest version is 0 (never a valid manifest; MUST be >= 1).
     error ManifestVersionZero();
-    /// @dev A 5-entry (message-bearing) storage proof was supplied for a channel whose proven
-    ///      nextMessageId is 0. Per the CLPR spec a channel's nextMessageId starts at 1 and only
-    ///      increments, so 0 means no message was ever sent and no last-message running-hash slot
-    ///      exists — the 5th entry cannot correspond to a real slot.
-    error InvalidNextMessageId();
+    /// @dev A message-bearing 6-entry storage proof has no non-`Channel` entry, or that entry is not the
+    ///      running-hash slot of any unacked message id that could end the bundle.
+    error LastMessageSlotNotFound();
     /// @dev Address is the wrong length.
     error InvalidServiceAddressLength();
 
@@ -60,9 +57,8 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
         address service,
         bytes32 expectedCodeHash
     ) internal pure returns (bytes32 storageRoot) {
-        bytes memory accountRlp = ClprEvmStateProof.verifyAccount(accountProofItem, stateRoot, service);
         bytes32 codeHash;
-        (storageRoot, codeHash) = ClprEvmStateProof.decodeAccount(accountRlp);
+        (storageRoot, codeHash) = ClprEvmStateProof.verifyAccountFields(accountProofItem, stateRoot, service);
         if (expectedCodeHash != bytes32(0) && codeHash != expectedCodeHash) revert CodeHashMismatch();
     }
 
@@ -89,9 +85,37 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
     /// @dev `_messageQueues[channelId][messageId].runningHashAfterProcessing` slot (struct base +1),
     ///      bound to `channelId` and `messageId`.
     function _lastMessageRunningHashSlot(bytes32 channelId, uint64 messageId) internal pure returns (bytes32) {
-        bytes32 qBase = keccak256(abi.encode(channelId, MESSAGE_QUEUES_BASE_SLOT));
+        return _messageRunningHashSlot(_messageQueueBase(channelId), messageId);
+    }
+
+    function _messageQueueBase(bytes32 channelId) private pure returns (bytes32) {
+        return keccak256(abi.encode(channelId, MESSAGE_QUEUES_BASE_SLOT));
+    }
+
+    function _messageRunningHashSlot(bytes32 qBase, uint256 messageId) private pure returns (bytes32) {
         bytes32 msgBase = keccak256(abi.encode(messageId, qBase));
         return bytes32(uint256(msgBase) + 1); // MessageValue.runningHashAfterProcessing (+1)
+    }
+
+    /// @dev Id of the message whose running-hash slot is `slot`: the last message of a bundle of
+    ///      `messageCount` messages. The bundle's messages are unacked by the sender, so the id lies
+    ///      in [ackedMessageId + messageCount, nextMessageId - 1]; the search is bounded by the
+    ///      sender's proven queue depth and hits on its first probe when the bundle starts at
+    ///      ackedMessageId + 1.
+    function _findLastMessageId(
+        bytes32 channelId,
+        bytes32 slot,
+        uint64 ackedMessageId,
+        uint64 nextMessageId,
+        uint256 messageCount
+    ) internal pure returns (uint64) {
+        bytes32 qBase = _messageQueueBase(channelId);
+        for (uint256 id = uint256(ackedMessageId) + messageCount; id < nextMessageId; id++) {
+            // casting to 'uint64' is safe because id < nextMessageId (uint64).
+            // forge-lint: disable-next-line(unsafe-typecast)
+            if (_messageRunningHashSlot(qBase, id) == slot) return uint64(id);
+        }
+        revert LastMessageSlotNotFound();
     }
 
     // ── Channel storage proof ──────────────────────────────────────────────
@@ -102,33 +126,67 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
     ///      bound to *this* channel — a relay cannot substitute another channel's slot, nor
     ///      reorder the values, because each entry must prove the exact slot the verifier asks for.
     ///      The proof carries the five `Channel` slots (the fifth being endpointManifestVersion),
-    ///      plus the last-message running-hash slot only when the bundle carries outbound messages
-    ///      (6 entries); ACK-only bundles carry 5.
-    function _verifyChannelStorage(Memory.Slice storageProofItem, bytes32 storageRoot, bytes32 channelId)
-        internal
-        pure
-        returns (ClprTypes.QueueMetadata memory metadata)
-    {
-        Memory.Slice[] memory entries = RLP.readList(storageProofItem);
-        if (entries.length != 5 && entries.length != 6) revert InvalidStorageProofShape();
+    ///      plus optionally the running-hash slot of the bundle's last message, from which
+    ///      `lastMessageId` and `lastMessageRunningHash` are derived. Without that entry a bundle with
+    ///      messages is taken to end at the sender's latest message (`nextMessageId - 1`,
+    ///      `sentRunningHash`), which BundleLib's running-hash check then enforces, and reverts with
+    ///      `ClprTypes.ClprBundleStartsAtOrBeforeAcked` if that start would not lie past the proven
+    ///      ackedMessageId. A sixth entry on a message-less bundle is ignored.
+    function _verifyChannelStorage(
+        Memory.Slice storageProofItem,
+        bytes32 storageRoot,
+        bytes32 channelId,
+        uint256 messageCount
+    ) internal pure returns (ClprTypes.QueueMetadata memory metadata) {
+        (bytes32[] memory labels, Memory.Slice[] memory proofs) = ClprEvmStateProof.indexEntries(storageProofItem);
+        if (labels.length != 5 && labels.length != 6) revert InvalidStorageProofShape();
 
-        bytes32[] memory connValues =
-            ClprEvmStateProof.verifyProvenSlots(entries, storageRoot, _channelMetadataSlots(channelId));
-        metadata = _buildQueueMetadata(connValues);
-
-        if (entries.length == 6) {
-            // A 6th entry proves the last sent message's running hash, which only exists once
-            // nextMessageId > 0. Guard explicitly so `nextMessageId - 1` cannot underflow into an
-            // opaque arithmetic panic; the proof is invalid either way.
-            if (metadata.nextMessageId == 0) revert InvalidNextMessageId();
-            bytes32[] memory msgSlots = new bytes32[](1);
-            msgSlots[0] = _lastMessageRunningHashSlot(channelId, uint64(metadata.nextMessageId - 1));
-
-            // Call verifyProvenSlots to validate the message slot exists in the storage proof.
-            // Return value (the proven hash) is not needed — we only verify the proof is valid.
-            // slither-disable=unused-return
-            ClprEvmStateProof.verifyProvenSlots(entries, storageRoot, msgSlots);
+        bytes32[] memory channelSlots = _channelMetadataSlots(channelId);
+        bytes32[] memory storageValues = ClprEvmStateProof.verifyIndexedSlots(labels, proofs, storageRoot, channelSlots);
+        metadata = _buildQueueMetadata(storageValues);
+        if (messageCount == 0) return metadata;
+        // casting to 'uint64' is safe: ackedMessageId is the low 64 bits of Channel slot +2.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 ackedMessageId = uint64(uint256(storageValues[1]));
+        if (labels.length == 5) {
+            // The bundle ends at nextMessageId - 1, so it starts at nextMessageId - messageCount,
+            // which must lie past the sender's proven ackedMessageId: this ledger has already
+            // acknowledged every message at or below it. Also keeps `nextMessageId - 1` from underflowing.
+            if (uint256(ackedMessageId) + messageCount >= metadata.nextMessageId) {
+                revert ClprTypes.ClprBundleStartsAtOrBeforeAcked();
+            }
+            metadata.lastMessageId = metadata.nextMessageId - 1;
+            metadata.lastMessageRunningHash = metadata.sentRunningHash;
+            return metadata;
         }
+
+        bytes32[] memory msgSlots = new bytes32[](1);
+        msgSlots[0] = _lastNonChannelLabel(labels, channelSlots);
+        metadata.lastMessageId =
+            _findLastMessageId(channelId, msgSlots[0], ackedMessageId, metadata.nextMessageId, messageCount);
+        metadata.lastMessageRunningHash = ClprEvmStateProof.verifyIndexedSlots(labels, proofs, storageRoot, msgSlots)[0];
+    }
+
+    /// @dev Scans from the end: relays append the message slot after the five `Channel` slots.
+    function _lastNonChannelLabel(bytes32[] memory labels, bytes32[] memory channelSlots)
+        private
+        pure
+        returns (bytes32)
+    {
+        for (uint256 i = labels.length; i > 0;) {
+            unchecked {
+                --i;
+            }
+            bool isChannelSlot;
+            for (uint256 j = 0; j < channelSlots.length; j++) {
+                if (labels[i] == channelSlots[j]) {
+                    isChannelSlot = true;
+                    break;
+                }
+            }
+            if (!isChannelSlot) return labels[i];
+        }
+        revert LastMessageSlotNotFound();
     }
 
     // ── Queue metadata decode ─────────────────────────────────────────────────
@@ -160,7 +218,9 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
             // Proven Channel.endpointManifestVersion (member slot +16, uint64 at offset 0):
             // the source's cached peer-manifest version, per QueueMetadata proto field 7.
             // forge-lint: disable-next-line(unsafe-typecast)
-            endpointManifestVersion: uint64(uint256(slots[4]))
+            endpointManifestVersion: uint64(uint256(slots[4])),
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
     }
 
@@ -204,8 +264,7 @@ abstract contract ClprEvmBundleVerifier is IClprVerifier {
     ) internal pure returns (ClprTypes.ClprEndpointManifest memory manifest) {
         bytes32[] memory slots = new bytes32[](1);
         slots[0] = bytes32(ENDPOINT_MANIFEST_COMMITMENT_SLOT);
-        bytes32[] memory proven =
-            ClprEvmStateProof.verifyProvenSlots(RLP.readList(manifestStorageProofItem), storageRoot, slots);
+        bytes32[] memory proven = ClprEvmStateProof.verifyProvenSlots(manifestStorageProofItem, storageRoot, slots);
 
         if (keccak256(manifestProtobuf) != proven[0]) revert ManifestCommitmentMismatch();
 

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+name: "601: [FLOW] PR Formatting"
+on:
+  pull_request_target:
+    # Only the events that can change the PR title. Events like `assigned`,
+    # `labeled`, and `review_requested` fire alongside `opened` and merely
+    # re-run an unchanged check.
+    types:
+      - opened
+      - reopened
+      - edited
+      - ready_for_review
+      - synchronize
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  statuses: write
+  pull-requests: read
+
+# `Title Check` is a required status check, and a cancelled check run blocks
+# the PR permanently -- it cannot be cleared without a manual re-run. Two
+# events arriving together must therefore both be allowed to finish; for a
+# ~20s job a redundant run is far cheaper than a wedged PR.
+concurrency:
+  group: pr-formatting-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  title-check:
+    name: Title Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Check PR Title
+        uses: step-security/action-semantic-pull-request@75d2dd5deafa3e9fccc1626ecd58d076ed1d2c79 # v6.1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

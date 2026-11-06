@@ -32,12 +32,15 @@ const SEI_MANAGED_KEYS = ["ED25519_VERIFIER", "SEI_VERIFIER"] as const;
 
 const ETH_MAINNET_MANAGED_KEYS = ["ETH_MAINNET_VERIFIER"] as const;
 
+const TEMPO_MANAGED_KEYS = ["TEMPO_VERIFIER"] as const;
+
 const MANAGED_KEYS = [
     ...CORE_MANAGED_KEYS,
     ...QBFT_MANAGED_KEYS,
     ...HIERO_MANAGED_KEYS,
     ...SEI_MANAGED_KEYS,
-    ...ETH_MAINNET_MANAGED_KEYS
+    ...ETH_MAINNET_MANAGED_KEYS,
+    ...TEMPO_MANAGED_KEYS
 ] as const;
 
 export type ManagedEnvKey = (typeof MANAGED_KEYS)[number];

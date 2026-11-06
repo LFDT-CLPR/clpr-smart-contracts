@@ -6,6 +6,9 @@ import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {IClprService} from "@hiero-ledger/clpr/interfaces/IClprService.sol";
 import {ClprServiceStorage} from "@hiero-ledger/clpr/ClprServiceStorage.sol";
 import {ManifestLib} from "@hiero-ledger/clpr/libraries/service/ManifestLib.sol";
+import {FeeAssetLib} from "@hiero-ledger/clpr/libraries/service/FeeAssetLib.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title ClprService
 /// @notice Immutable DELEGATECALL router for the CLPR protocol. All state lives
@@ -28,9 +31,13 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
     address private immutable _BUNDLE_LOGIC;
     address private immutable _CONNECTOR_LOGIC;
     address private immutable _ADMIN_LOGIC;
+    /// @dev Mirrors `_feeAsset.token` so receive() can reject native value without an SLOAD.
+    address private immutable _FEE_TOKEN;
 
     /// @notice Deploy the CLPR service router with the given logic module addresses.
     /// @dev Each logic address is validated non-zero and deployed (code.length > 0).
+    ///      Reverts with ClprInvalidFeeToken unless a non-zero feeToken's `decimals()` is readable
+    ///      and at most `FeeAssetLib.MAX_DECIMALS`.
     ///      The kill switch is initialized to disabled.
     ///      The service is inert until the owner explicitly calls setClprEnabled(true) after
     ///      configuring bonds, throttles, and ledger config. protocolVersion and chainId
@@ -44,6 +51,12 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
     /// @param connectorLogic Deployed ConnectorLogic contract address.
     /// @param adminLogic Deployed AdminLogic contract address.
     /// @param bundleDecodeHelper Deployed BundleDecodeHelper contract address.
+    /// @param feeToken ERC-20 that stakes, bonds, execution charges and slash proceeds are paid in, or
+    ///        `address(0)` for native value; fixed for the life of the service. The execution charge
+    ///        scales gasUsed × `tx.gasprice` to token units by 10^(decimals - 18), so
+    ///        `tx.gasprice` must be quoted in the token's currency at 18 decimals. Fee-on-transfer and
+    ///        rebasing tokens are unsupported: deposits revert unless the exact amount arrives, and
+    ///        held balances must not change on their own.
     constructor(
         address initialOwner,
         uint32 protocolVersion,
@@ -53,7 +66,8 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
         address bundleLogic,
         address connectorLogic,
         address adminLogic,
-        address bundleDecodeHelper
+        address bundleDecodeHelper,
+        address feeToken
     ) Ownable(initialOwner) {
         if (channelLogic == address(0)) revert ZeroLogicAddress();
         if (messagingLogic == address(0)) revert ZeroLogicAddress();
@@ -77,7 +91,15 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
         _CONNECTOR_LOGIC = connectorLogic;
         _ADMIN_LOGIC = adminLogic;
         _bundleDecodeHelper = bundleDecodeHelper;
-        // _clprEnabled stays false (Solidity default; spec §7 default clpr_enabled = false): the
+        // Zero is native mode.
+        // slither-disable-next-line missing-zero-check
+        _FEE_TOKEN = feeToken;
+        if (feeToken != address(0)) {
+            (bool ok, uint8 decimals) = SafeERC20.tryGetDecimals(IERC20(feeToken));
+            if (!ok || decimals > FeeAssetLib.MAX_DECIMALS) revert ClprTypes.ClprInvalidFeeToken();
+            _feeAsset = ClprTypes.FeeAsset({token: feeToken, decimals: decimals});
+        }
+        // _clprEnabled stays false (Solidity default; the spec's default clpr_enabled = false): the
         // service is inert until the owner runs initialize() and then setClprEnabled(true).
         // The local endpoint manifest is created empty at version 1 (see ClprEndpointManifest.version);
         // getEndpointManifest() therefore always returns a valid manifest (version >= 1). The
@@ -94,14 +116,14 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
         _authorizedService = address(this);
     }
 
-    /// @notice Accept ETH sent directly to the router (e.g. bond returns from removeConnector).
-    /// @dev ETH is not locked; it is withdrawn via:
-    ///      - removeConnector() — returns connector stake
-    ///      - removeEndpoint() — returns endpoint bond
-    ///      - collectPending() — pull-payment for failed transfers (e.g., if recipient is a contract)
-    ///      Follows checks-effects-interactions and pull-payment pattern for safety.
+    /// @notice Accept native value sent directly to the router (e.g. `payForExecution` in native mode).
+    /// @dev ConnectorLib.charge forwards a `payForExecution` payment to the bundle submitter or the owner,
+    ///      or credits it for {collectPending}. Reverts with ClprNativeValueMismatch in token mode, where
+    ///      every payout is in the fee token and native value would be locked.
     /// slither-disable-next-line locked-ether
-    receive() external payable {}
+    receive() external payable {
+        if (_FEE_TOKEN != address(0)) revert ClprTypes.ClprNativeValueMismatch();
+    }
 
     // ── Channel ─────────────────────────────────────────────────────────
 
@@ -167,12 +189,6 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
         _delegate(_BUNDLE_LOGIC);
     }
 
-    /// @notice Erase a queued message's payload. Owner-only.
-    /// @dev See MessagingLogic.redactMessage for full semantics.
-    function redactMessage(bytes32, uint64) external onlyOwner {
-        _delegate(_MESSAGING_LOGIC);
-    }
-
     /// @inheritdoc IClprService
     function getMessage(bytes32, uint64) external returns (ClprTypes.MessageValue memory) {
         _delegate(_MESSAGING_LOGIC);
@@ -204,7 +220,7 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
     }
 
     /// @inheritdoc IClprService
-    function topUpConnectorStake(bytes32, bytes32) external payable {
+    function topUpConnectorStake(bytes32, bytes32, uint256) external payable {
         _delegate(_CONNECTOR_LOGIC);
     }
 
@@ -235,6 +251,11 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
     }
 
     // ── Admin ──────────────────────────────────────────────────────────────
+
+    /// @inheritdoc IClprService
+    function getFeeToken() external returns (address) {
+        _delegate(_ADMIN_LOGIC);
+    }
 
     /// @inheritdoc IClprService
     function setClprEnabled(bool) external onlyOwner {
@@ -319,14 +340,20 @@ contract ClprService is ClprServiceStorage, Ownable, IClprService {
         _delegate(_ADMIN_LOGIC);
     }
 
-    /// @notice Pending ETH withdrawal balance for an account (pull-payment pattern).
+    /// @notice Pending fee-asset withdrawal balance for an account (pull-payment pattern).
     function pendingWithdrawals(address) external returns (uint256) {
         _delegate(_ADMIN_LOGIC);
     }
 
-    /// @notice Withdraw the caller's pending ETH balance.
+    /// @notice Withdraw the caller's pending fee-asset balance.
     /// @dev See AdminLogic.collectPending for full semantics.
     function collectPending() external {
+        _delegate(_ADMIN_LOGIC);
+    }
+
+    /// @notice Withdraw the caller's pending fee-asset balance to `recipient`.
+    /// @dev See AdminLogic.collectPendingTo for full semantics.
+    function collectPendingTo(address) external {
         _delegate(_ADMIN_LOGIC);
     }
 

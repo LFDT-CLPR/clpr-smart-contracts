@@ -11,7 +11,7 @@ Solidity contracts for the CLPR protocol, built with [Foundry](https://book.getf
 ### Clone and install
 
 ```shell
-git clone --recurse-submodules https://github.com/hiero-hackers/clpr-smart-contracts.git
+git clone --recurse-submodules https://github.com/LFDT-CLPR/clpr-smart-contracts.git
 cd clpr-smart-contracts
 ```
 
@@ -138,7 +138,7 @@ Copy `.env.example` to `.env` and fill in the values. The script reads:
 | `PROTOCOL_VERSION` | no | `1` | Baked into `LedgerConfiguration` at construction. |
 | `CHAIN_ID` | no | `eip155:1` | String chain id baked into `LedgerConfiguration`. |
 | `SERVICE_ADDRESS` | no | empty | Service address applied via `updateLedgerConfiguration` when deployer == owner. |
-| `ECON_*` | no | see `script/ClprConfig.sol` | Per-field overrides for `EconomicConfig`. |
+| `ECON_*` | no | see `script/ClprConfig.sol` | Per-field overrides for `EconomicConfig`. With `FEE_TOKEN`, `ECON_MIN_LOCKED_STAKE`, `ECON_MIN_ENDPOINT_BOND` and `ECON_BASE_PENALTY` are required, in the token's base units. |
 | `DEPLOY_GAS` | no | RPC auto-estimation | Manual gas-limit override for deployment transactions, bypassing RPC auto-estimation. Set this if your target RPC's `eth_estimateGas` misbehaves for contract-creation txs (e.g. pre-v0.159.0 Hiero Mirror Node — see the `HIERO_RPC` row below). |
 | `BESU_RPC` | no (`--rpc besu` with full URL) | — | RPC URL for the `besu` alias in `foundry.toml`. Not needed when running `bin/deploy.sh --rpc besu`, which manages the local compose stack and rewrites `$RPC` to the resolved host URL. |
 | `HIERO_RPC` | no (hiero only) | — | RPC URL referenced by the `hiero` alias in `foundry.toml`. Requires **Mirror Node v0.159.0 or later** (the default in Solo v0.83.0+) — earlier versions return `INSUFFICIENT_TX_FEE` from `eth_estimateGas` for contract-creation txs from ECDSA senders (hiero-ledger/hiero-mirror-node#13820), which breaks deployment unless `DEPLOY_GAS` is set manually. |
@@ -259,7 +259,9 @@ Exit codes: `0` success, `2` usage error, `3` missing env or zero-balance deploy
 
 When `INITIAL_OWNER` differs from the deployer (the production case), the script does **not** apply initial config — the multisig must submit two transactions from the owner account after the deploy, **in this order**:
 
-1. `initialize(serviceAddress, throttles, seedEndpoints, trustAnchor, trustAnchorId, econConfig)` — applies both the ledger and economic configuration atomically, in a single transaction, **while the service is still disabled**. Values are in `script/ClprConfig.sol::defaultThrottles()`, `defaultServiceAddress()`, and `defaultEconomicConfig()`. Reverts if called more than once (`ClprAlreadyInitialized`).
+The fee asset is not part of this checklist: it is the `feeToken` constructor argument (`FEE_TOKEN` in the deploy CLI), and no function can change it. With a fee token, every `econConfig` amount is in the token's base units, so the wei amounts in `script/ClprConfig.sol::defaultEconomicConfig()` do not apply.
+
+1. `initialize(serviceAddress, throttles, trustAnchor, trustAnchorId, econConfig)` — applies both the ledger and economic configuration atomically, in a single transaction, **while the service is still disabled**. Default throttles and economics are in `script/ClprConfig.sol::defaultThrottles()` and `defaultEconomicConfig()`; the deploy CLI takes the service address and trust anchor from `SERVICE_ADDRESS`, `TRUST_ANCHOR` and `TRUST_ANCHOR_ID` (`script/deploy/config.ts`). Reverts if called more than once (`ClprAlreadyInitialized`).
 2. `setClprEnabled(true)` — `clprEnabled` defaults to `false` on deploy; the service is inert until this call, and this call itself reverts (`ClprNotInitialized`) unless step 1 has already landed. Submit it once you've confirmed the config applied in step 1 is correct.
 
 Because step 1 is a single atomic transaction that sets both configs before anything is enabled, there's no intermediate window where the service is live with default (zero-value) config — unlike `updateLedgerConfiguration`/`updateEconomicConfiguration` (which remain available, individually, for *later* reconfiguration once the service is already running), `initialize()` exists specifically to close that gap for the bootstrap case.

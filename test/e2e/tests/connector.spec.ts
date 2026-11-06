@@ -1,5 +1,7 @@
 import {afterAll, beforeAll, describe, expect, it} from "vitest";
 import {parseEther} from "viem";
+import {TOKEN_CONNECTOR_FUND} from "../deploy/constants.js";
+import {activeEcon, feeAssetBalance, feeTokenMode, getFeeToken} from "../deploy/feeAsset.js";
 import {createBackend} from "../backend/index.js";
 import type {Backend} from "../backend/Backend.js";
 import type {ChainClients} from "../lib/clients.js";
@@ -28,7 +30,7 @@ describe("connector", () => {
     let channel: WiredChannel;
     let connector: WiredConnector;
 
-    // Per-side effective stake (0 on Solo relay; 0.1 ETH on dev chains).
+    // Per-side effective stake (minLockedStake in token mode; else 0 on Solo relay, 0.1 ETH on dev chains).
     let stakeA: bigint;
     let stakeB: bigint;
     // Per-side effective connector fund (gas-price-based on Solo; fixed on dev chains).
@@ -45,10 +47,11 @@ describe("connector", () => {
         A = suite.clientsA;
         B = suite.clientsB;
 
-        stakeA = backend.kindA() === "solo" ? 0n : parseEther("0.1");
-        stakeB = backend.kindB() === "solo" ? 0n : parseEther("0.1");
-        expectedFundA = BASE_FUND;
-        expectedFundB = BASE_FUND;
+        const tokenMode = feeTokenMode();
+        stakeA = tokenMode ? activeEcon().minLockedStake : backend.kindA() === "solo" ? 0n : parseEther("0.1");
+        stakeB = tokenMode ? activeEcon().minLockedStake : backend.kindB() === "solo" ? 0n : parseEther("0.1");
+        expectedFundA = tokenMode ? TOKEN_CONNECTOR_FUND : BASE_FUND;
+        expectedFundB = tokenMode ? TOKEN_CONNECTOR_FUND : BASE_FUND;
 
         ({addrsA, addrsB} = await deployE2EPair({
             clientsA: A,
@@ -170,16 +173,16 @@ describe("connector", () => {
         expect(cntB).toBe(1n);
     });
 
-    it("MockClprConnector contracts hold the funded ETH on both chains", async () => {
-        const balA = await A.publicClient.getBalance({address: addrsA.connectorContract});
-        const balB = await B.publicClient.getBalance({address: addrsB.connectorContract});
-        // Solo sides scale funding with gas price; dev-chain sides use BASE_FUND exactly.
-        if (backend.kindA() === "solo") {
+    it("MockClprConnector contracts hold the funded fee asset on both chains", async () => {
+        const balA = await feeAssetBalance(A, await getFeeToken(A, addrsA.clprService), addrsA.connectorContract);
+        const balB = await feeAssetBalance(B, await getFeeToken(B, addrsB.clprService), addrsB.connectorContract);
+        // Solo sides in native mode scale funding with gas price; every other side is funded exactly.
+        if (backend.kindA() === "solo" && !feeTokenMode()) {
             expect(balA).toBeGreaterThanOrEqual(expectedFundA);
         } else {
             expect(balA).toBe(expectedFundA);
         }
-        if (backend.kindB() === "solo") {
+        if (backend.kindB() === "solo" && !feeTokenMode()) {
             expect(balB).toBeGreaterThanOrEqual(expectedFundB);
         } else {
             expect(balB).toBe(expectedFundB);

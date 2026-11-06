@@ -1,2 +1,34 @@
+# --- OS / IDE ----------------------------------------------------------------
 .DS_Store
+Thumbs.db
 .idea/
+.vscode/
+
+# --- Foundry -----------------------------------------------------------------
+cache/
+out/
+broadcast/
+foundry.lock
+lcov.info
+.gas-snapshot
+
+# --- Environment -------------------------------------------------------------
+# Deployer keys live here; never commit it.
+.env
+
+# --- Node + e2e tooling ------------------------------------------------------
+node_modules/
+junit.xml
+.deployments.json
+test/verification-inputs/.channel.json
+test/e2e/backend/.solo-state/
+test/e2e/backend/solo/falcon/.falcon-*.generated.yaml
+test/e2e/backend/solo/falcon/.mirror-values-*.generated.yaml
+test/e2e/backend/.besu-state/
+*.log
+
+# --- Besu QBFT proof generator -----------------------------------------------
+# The *.hex fixtures are committed: IntegrationQBFT.t.sol reads them in CI. Only the
+# generator's debugging side-outputs stay local.
+test/verifiers/evm/qbft/fixtures/metadata.json
+test/verifiers/evm/qbft/fixtures/debug-proof-data.json

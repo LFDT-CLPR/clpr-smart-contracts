@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
+import {Vm} from "forge-std/Vm.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {BundleLib} from "@hiero-ledger/clpr/libraries/service/BundleLib.sol";
@@ -57,6 +58,33 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
         assertEq(connector.inboundCallCount(), 0); // mock didn't record (it reverted)
     }
 
+    /// A zero `connectorInboundGasStipend` turns the inbound notification off: the connector is not
+    /// called and no failure is reported. The payment has its own budget, `connectorPaymentGasLimit`,
+    /// so the connector still pays and is not slashed.
+    function test_zeroStipend_skipsTheNotification_butNotThePayment() public {
+        _registerTestConnector();
+        ClprTypes.EconomicConfig memory econ = service.getEconomicConfig();
+        econ.connectorInboundGasStipend = 0;
+        service.updateEconomicConfiguration(econ);
+        vm.txGasPrice(1 gwei);
+        uint256 submitterBefore = address(this).balance;
+
+        vm.recordLogs();
+        _submitSingleInboundMessage(
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F")
+        );
+
+        assertEq(connector.inboundCallCount(), 0, "the connector is not notified");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != BundleLib.ConnectorInboundCallbackFailed.selector, "and no failure is reported"
+            );
+        }
+        assertGt(address(this).balance, submitterBefore, "the payment still goes through");
+        assertEq(service.getConnector(channelId, connectorId).slashCount, 0, "and the connector is not slashed");
+    }
+
     // ── Additional: Multi-message bundle (DATA + CONTROL)
 
     function test_multiMessage_dataAndControl() public {
@@ -79,7 +107,9 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -96,6 +126,11 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
     ///      channel does NOT bounce inbound DATA; it delivers it and replies SUCCESS.
     function test_dataMessage_closingState_dispatchesNormally() public {
         _registerTestConnector();
+
+        // Keep an outbound DATA message unacked so admin-close stays at CLOSING
+        // instead of advancing immediately to DRAINED.
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"4441544130");
 
         // Close channel
         service.closeChannel(channelId);
@@ -115,7 +150,9 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -123,8 +160,8 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
         // The DATA message is dispatched to the application despite CLOSING ...
         assertEq(app.getMessageCallCount(), 1);
 
-        // ... and generates a SUCCESS Response Message.
-        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 1);
+        // ... and generates a SUCCESS Response Message (id 2: id 1 is our own outbound DATA).
+        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 2);
         assertTrue(reply.payload.length > 0);
         ClprTypes.DecodedReply memory decoded = ClprProtobuf.decodeReplyMessage(reply.payload);
         assertEq(uint8(decoded.status), uint8(ClprTypes.ReplyStatus.SUCCESS));
@@ -149,14 +186,4 @@ contract BundleLib_HappyPathTest is BundleLibTestBase {
     }
 
     receive() external payable {}
-
-    /// @dev An inbound REDACTED message (destination side) generates a REDACTED reply.
-    function test_inboundRedactedMessage_generatesRedactedReply() public {
-        bytes memory redacted = ClprProtobuf.encodeRedactedMessage(sha256("original payload"));
-        _submitSingleInboundMessage(redacted);
-
-        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 1);
-        ClprTypes.DecodedReply memory decoded = ClprProtobuf.decodeReplyMessage(reply.payload);
-        assertEq(uint8(decoded.status), uint8(ClprTypes.ReplyStatus.REDACTED), "REDACTED reply status");
-    }
 }

@@ -59,7 +59,9 @@ contract BundleLib_ReplayTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: h2
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -109,7 +111,9 @@ contract BundleLib_ReplayTest is BundleLibTestBase {
             receivedMessageId: 1, // acks our outbound REPLY at slot 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: h1
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -188,7 +192,9 @@ contract BundleLib_ReplayTest is BundleLibTestBase {
             receivedMessageId: 1, // B received A's slot 1 (DATA A1) — advances ackedMessageId
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 3,
+            lastMessageRunningHash: h3
         });
         verifier.setVerifyBundleResult(meta, msgs);
 

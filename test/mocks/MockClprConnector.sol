@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {IClprConnector} from "@hiero-ledger/clpr/interfaces/IClprConnector.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Mock connector contract used in tests. Configurable approve/reject for
 ///         outbound authorization, and a recorder for inbound notifications.
@@ -32,6 +33,7 @@ contract MockClprConnector is IClprConnector {
     bool private _reentrantOnAuthorize;
     address private _reentrantTarget;
     bytes private _reentrantCalldata;
+    address private _payToken;
 
     function setAuthorize(bool ok) external {
         _authorize = ok;
@@ -88,9 +90,18 @@ contract MockClprConnector is IClprConnector {
         return _authorize;
     }
 
+    /// @dev Pay `payForExecution` in this ERC-20 instead of native value (token-mode services).
+    function setPayToken(address token) external {
+        _payToken = token;
+    }
+
     function payForExecution(uint256 amount) external override {
         if (_payReverts) revert("pay revert");
         uint256 toPay = _payShortfall && amount > 0 ? amount - 1 : amount;
+        if (_payToken != address(0)) {
+            require(IERC20(_payToken).transfer(msg.sender, toPay), "pay transfer failed");
+            return;
+        }
         (bool ok,) = msg.sender.call{value: toPay}("");
         require(ok, "pay transfer failed");
     }

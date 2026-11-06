@@ -6,7 +6,7 @@ import {SeiE2EVerifier} from "@test/SeiE2EVerifier.sol";
 import {QbftE2EVerifier} from "@test/QbftE2EVerifier.sol";
 import {SeiCometBftVerifier} from "@hiero-ledger/clpr/verifiers/evm/sei/SeiCometBftVerifier.sol";
 import {Ed25519Verifier} from "@hiero-ledger/clpr/verifiers/evm/sei/Ed25519Verifier.sol";
-import {QBFTVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QBFTVerifier.sol";
+import {QbftHeaderModeVerifier} from "@hiero-ledger/clpr/verifiers/evm/qbft/QbftHeaderModeVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {CometBftLib} from "@hiero-ledger/clpr/libraries/proof/cometbft/CometBftLib.sol";
 
@@ -69,7 +69,7 @@ contract SeiE2EVerifierTest is Test {
 
     /// @dev Same guarantee for the QBFT E2E wrapper's setSeedEndpoints().
     function test_qbftWrapper_setSeedEndpoints_rejectsDnsName() public {
-        QbftE2EVerifier qbft = new QbftE2EVerifier(new QBFTVerifier(1));
+        QbftE2EVerifier qbft = new QbftE2EVerifier(new QbftHeaderModeVerifier());
         ClprTypes.Endpoint[] memory seeds = new ClprTypes.Endpoint[](1);
         seeds[0] =
             ClprTypes.Endpoint({ipAddress: "clpr-relay-besu-grpc", port: 50211, tlsCertificate: "", accountId: ""});

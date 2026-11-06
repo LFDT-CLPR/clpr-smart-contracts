@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ConnectorLib} from "@hiero-ledger/clpr/libraries/service/ConnectorLib.sol";
+import {FeeAssetLib} from "@hiero-ledger/clpr/libraries/service/FeeAssetLib.sol";
 import {LogicModuleBase} from "@hiero-ledger/clpr/logic/base/LogicModuleBase.sol";
 
 /// @title ConnectorLogic
@@ -66,13 +67,13 @@ contract ConnectorLogic is LogicModuleBase {
     ///      keccak256(connectorId || address(this)) — binding the reveal to this
     ///      ClprService deployment — checks connectorId derivation from
     ///      (channelId, pubKey, salt), and records the connector.
-    ///      Requires msg.value >= economicConfig.minConnectorBond.
-    ///      Emits {ConnectorCompleted}.
+    ///      The stake is `msg.value` in native mode (at least `economicConfig.minLockedStake`); in
+    ///      token mode exactly `minLockedStake` is pulled with `transferFrom` and `msg.value` must be 0.
+    ///      Emits {ConnectorRegistered}.
     /// @param connectorId Connector identifier derived via deriveConnectorId.
     /// @param pubKey Raw 64-byte uncompressed ECDSA public key.
     /// @param sig ECDSA signature over keccak256(connectorId || address(this)).
     /// @param salt Entropy used when the connectorId was derived.
-    /// @param channelId The channel to register the connector on.
     /// @param connectorContract Address of the IClprConnector application contract.
     /// @param admin Address authorised to deregister this connector.
     function completeConnector(
@@ -83,7 +84,7 @@ contract ConnectorLogic is LogicModuleBase {
         bytes32 channelId,
         address connectorContract,
         address admin
-    ) external payable onlyService whenEnabled {
+    ) external payable nonReentrant onlyService whenEnabled {
         if (!_channelExists[channelId]) revert ClprTypes.ClprChannelNotFound();
         if (economicConfig.maxConnectors > 0 && _connectorCount >= economicConfig.maxConnectors) {
             revert ClprTypes.ClprTooManyConnectors();
@@ -100,7 +101,7 @@ contract ConnectorLogic is LogicModuleBase {
             channelId,
             connectorContract,
             admin,
-            msg.value
+            FeeAssetLib.pullAtLeast(_feeAsset, economicConfig.minLockedStake)
         );
         unchecked {
             _connectorCount++;
@@ -109,13 +110,8 @@ contract ConnectorLogic is LogicModuleBase {
 
     /// @notice Remove a connector and return its bond to `recipient`.
     /// @dev Caller must be the connector's admin (enforced in ConnectorLib.deregister).
-    ///      Reverts if any messages for this connector are still in-flight.
-    ///      Bond is returned via direct ETH transfer; nonReentrant guard prevents
-    ///      recursive re-entry.
-    /// @param channelId The parent channel.
-    /// @param connectorId The connector to remove.
-    /// @param recipient Address to receive the returned bond.
-    // Caller authorization (admin check) is enforced inside ConnectorLib.deregister.
+    ///      Reverts if any messages for this connector are still in-flight. The bond is sent to
+    ///      `recipient` directly; a failed transfer reverts with ClprTransferFailed.
     function removeConnector(bytes32 channelId, bytes32 connectorId, address recipient)
         external
         nonReentrant
@@ -127,17 +123,22 @@ contract ConnectorLogic is LogicModuleBase {
         unchecked {
             _connectorCount--;
         }
-        if (stake > 0) {
-            (bool ok,) = recipient.call{value: stake}("");
-            if (!ok) revert ClprTypes.ClprTransferFailed();
-        }
+        if (stake > 0) FeeAssetLib.send(_feeAsset, recipient, stake);
     }
 
-    /// @notice Add ETH to an existing connector's bond.
-    /// @param channelId The parent channel.
-    /// @param connectorId The connector to top up.
-    function topUpConnectorStake(bytes32 channelId, bytes32 connectorId) external payable whenEnabled onlyService {
-        if (msg.value == 0) revert ClprTypes.ClprInsufficientStake();
-        ConnectorLib.topUpStake(_connectors, _connectorExists, channelId, connectorId, msg.value);
+    /// @notice Add `amount` of the fee asset to an existing connector's stake.
+    /// @dev Native mode requires `msg.value == amount`; token mode pulls `amount` with
+    ///      `transferFrom` and requires `msg.value == 0`.
+    /// @param amount Stake to add, in fee-asset units. Must be non-zero.
+    function topUpConnectorStake(bytes32 channelId, bytes32 connectorId, uint256 amount)
+        external
+        payable
+        nonReentrant
+        whenEnabled
+        onlyService
+    {
+        if (amount == 0) revert ClprTypes.ClprInsufficientStake();
+        FeeAssetLib.pullExact(_feeAsset, amount);
+        ConnectorLib.topUpStake(_connectors, _connectorExists, channelId, connectorId, amount);
     }
 }

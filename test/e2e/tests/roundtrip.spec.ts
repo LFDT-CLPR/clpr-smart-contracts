@@ -42,9 +42,6 @@ describe("roundtrip A->B->A (full bidirectional)", () => {
     const REQUEST    = "0x48454c4c4f"     as Hex;  // "HELLO"
     const REPLY_DATA = "0x57454c434f4d45" as Hex;  // "WELCOME" — pre-configured response on B
 
-    // Besu single-node genesis validator — matches infra/besu-genesis.json.
-    const BESU_VALIDATOR = "0xf39Fd6e51aad88F6f4ce6aB8827279cffFb92266" as Hex;
-
     beforeAll(async () => {
         backend = createBackend();
         await backend.start();
@@ -68,8 +65,7 @@ describe("roundtrip A->B->A (full bidirectional)", () => {
             const conn = await wireChannel({
                 chainA: A, chainB: B,
                 caipA: backend.caipA(), caipB: backend.caipB(),
-                addrsA: a, addrsB: b,
-                validatorAddr: BESU_VALIDATOR
+                addrsA: a, addrsB: b
             });
             channelId = conn.channelId;
 
@@ -137,7 +133,7 @@ describe("roundtrip A->B->A (full bidirectional)", () => {
             // Ferry messageId=1 from A to B.
             await ferryQbft({
                 source: A, dest: B, sourceAddrs: addrsA, destAddrs: addrsB,
-                channelId, validatorAddr: BESU_VALIDATOR,
+                channelId,
                 range: {fromId: 1n, throughId: 1n}
             });
 
@@ -146,7 +142,7 @@ describe("roundtrip A->B->A (full bidirectional)", () => {
             await waitForBlock(backend.rpcB(), Number(blockB) + 2, 30_000);
             await ferryQbft({
                 source: B, dest: A, sourceAddrs: addrsB, destAddrs: addrsA,
-                channelId, validatorAddr: BESU_VALIDATOR,
+                channelId,
                 range: {fromId: 1n, throughId: 1n}
             });
         } else {

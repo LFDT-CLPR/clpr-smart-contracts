@@ -37,6 +37,8 @@ services:
   besu-node1:
     image: hyperledger/besu:24.10.0
     container_name: qbft-node1
+    ports:
+      - "18546:8545"
     volumes:
       - ./genesis.json:/opt/besu/genesis.json:ro
       - ./node-key-1:/tmp/node-key:ro
@@ -73,6 +75,8 @@ services:
   besu-node2:
     image: hyperledger/besu:24.10.0
     container_name: qbft-node2
+    ports:
+      - "18547:8545"
     volumes:
       - ./genesis.json:/opt/besu/genesis.json:ro
       - ./node-key-2:/tmp/node-key:ro

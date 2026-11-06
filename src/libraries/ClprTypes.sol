@@ -26,19 +26,15 @@ library ClprTypes {
         SUCCESS,
         APPLICATION_ERROR,
         CONNECTOR_NOT_FOUND,
-        CONNECTOR_UNDERFUNDED,
-        REDACTED,
-        CHANNEL_CLOSED,
-        NOT_HANDLED
+        CONNECTOR_UNDERFUNDED
     }
 
     /// @notice CLPR wire message discriminator. Maps to the `oneof` field number in
-    ///         `clpr_message.proto` (field 1 = DATA, 2 = REPLY, 3 = CONTROL, 4 = REDACTED).
+    ///         `clpr_message.proto` (field 1 = DATA, 2 = REPLY, 3 = CONTROL).
     enum MessageType {
         DATA,
         REPLY,
-        CONTROL,
-        REDACTED
+        CONTROL
     }
 
     /// @notice Allowance, in bytes, for everything a single-message bundle adds on
@@ -119,26 +115,25 @@ library ClprTypes {
         uint64 ackedMessageId;
         uint64 receivedMessageId;
         /// @dev The messageId of the next outbound DATA message for which we expect a REPLY.
-        ///      Initialized to 1 at channel creation. Incremented past each matched (or
-        ///      redacted) DATA id as REPLYs arrive. Ensures cross-bundle ordering is enforced.
+        ///      Initialized to 1 at channel creation. Incremented past each matched DATA id as
+        ///      REPLYs arrive. Ensures cross-bundle ordering is enforced.
         uint64 nextExpectedReplyId;
         // Timestamps derived from proto Timestamp{seconds,nanos} stored as nanosSinceEpoch (uint96).
-        // NOTE: These no longer pack into a single 32-byte slot — each uint96 occupies 12 bytes.
+        // slot 3: peerConfigTimestamp (12) + lastConfigTimestamp (12) = 24 bytes
         uint96 peerConfigTimestamp;
         uint96 lastConfigTimestamp;
-        // slots 3–5: three bytes32 values
+        // slots 4–6: three bytes32 values
         bytes32 sentRunningHash;
         bytes32 receivedRunningHash;
         bytes32 ownershipCommitment;
-        // slot 6: salt for channel derivation validation
+        // slot 7: salt for channel derivation validation
         bytes32 salt;
         // dynamic-length fields (each slot holds a pointer)
         string chainId;
         bytes peerServiceAddress;
         Throttles peerThrottles;
-        /// @dev Opaque trust anchor bytes managed by the verifier. Stateless verifiers (Hiero)
-        ///      leave this empty. EVM verifiers store the current signing-key state here
-        ///      (e.g. sync committee, IBFT validator set hash, BLS aggregate key).
+        /// @dev Opaque trust anchor bytes managed by the verifier. EVM verifiers store the current
+        ///      signing-key state here (e.g. sync committee, IBFT validator set hash, BLS aggregate key).
         bytes trustAnchor;
         /// @dev Highest message ID ever assigned to an outbound DATA message (sendMessage).
         ///      Zero when no DATA messages have been sent. Used by the CLOSING->DRAINED
@@ -179,8 +174,7 @@ library ClprTypes {
         bytes payload; // protobuf-encoded ClprMessagePayload
         bytes32 runningHashAfterProcessing;
         /// @dev For outbound DATA messages: the connectorId, so REPLY processing can decrement the
-        ///      in-flight counter and perform source-side slashing even after the payload has been
-        ///      replaced with a ClprRedactedMessage marker. `bytes32(0)` for CONTROL/REPLY messages
+        ///      in-flight and quota counters and perform source-side slashing. `bytes32(0)` for CONTROL/REPLY messages
         ///      (a real connectorId is a keccak256 hash, so it can never collide with the zero sentinel).
         bytes32 connectorIdForReply;
     }
@@ -190,6 +184,9 @@ library ClprTypes {
         uint32 maxQueueDepth;
     }
 
+    /// @dev The sender's proven channel state at the proof's block. A bundle may carry only a prefix
+    ///      of the sender's queue, so `nextMessageId`/`sentRunningHash` can run ahead of the bundle's
+    ///      messages; `lastMessageId`/`lastMessageRunningHash` pin the bundle's own last message.
     struct QueueMetadata {
         uint64 nextMessageId;
         bytes32 sentRunningHash;
@@ -200,6 +197,10 @@ library ClprTypes {
         ///      receiver detect whether the remote endpoint manifest has advanced since the last sync
         ///      without a full state query. Zero indicates the (source) Channel is PENDING.
         uint64 endpointManifestVersion;
+        /// @dev Id of the bundle's last message; 0 when the bundle carries no messages.
+        uint64 lastMessageId;
+        /// @dev The sender's running hash after `lastMessageId`; zero when the bundle carries no messages.
+        bytes32 lastMessageRunningHash;
     }
 
     /// @param maxLocalEndpoints Max endpoints registrable locally on this ledger (via
@@ -329,6 +330,12 @@ library ClprTypes {
     }
 
     struct EconomicConfig {
+        /// @dev Read only as zero / non-zero. Non-zero charges the connector for inbound DATA
+        ///      execution and REPLY callbacks (gasUsed × gasprice plus an `endpointMarginPercent`
+        ///      margin, converted to fee-asset units, paid to the submitter) and slashes it when
+        ///      it cannot pay for DATA. Zero makes that execution free: no balance check, charge or
+        ///      slash. In native mode on a chain without native value every connector balance reads
+        ///      zero, so only zero works there.
         uint256 messageExecutionCost;
         uint256 endpointMarginPercent;
         uint256 minLockedStake;
@@ -337,14 +344,38 @@ library ClprTypes {
         uint256 penaltyMultiplier;
         uint32 slashBanThreshold;
         uint32 connectorQueueQuotaPct;
-        /// @dev Gas stipend for IClprConnector.onInboundMessage callbacks. Intentionally
-        ///      smaller than throttles.maxGasPerMessage — the inbound hook is a
-        ///      notification for state tracking, not message handling.
+        /// @dev Gas forwarded to each IClprConnector.onInboundMessage notification, less the CALL's own
+        ///      cost; 0 means onInboundMessage is not called. If `stipend + stipend / 63` exceeds what the
+        ///      chain's per-transaction gas cap leaves after proof verification, every bundle that notifies a
+        ///      connector reverts.
         uint64 connectorInboundGasStipend;
         /// @dev Maximum number of channels allowed. 0 means no limit.
         uint32 maxChannels;
         /// @dev Maximum number of connectors allowed across all channels. 0 means no limit.
         uint32 maxConnectors;
+        /// @dev Gas forwarded to each IClprConnector.payForExecution call, less the CALL's own cost; a payment
+        ///      that runs out of it fails the charge, which for an inbound DATA message slashes the connector.
+        ///      At least `MIN_CONNECTOR_PAYMENT_GAS_LIMIT`. If `limit + limit / 63` exceeds what the chain's
+        ///      per-transaction gas cap leaves after proof verification, every bundle that charges a connector
+        ///      reverts.
+        uint64 connectorPaymentGasLimit;
+    }
+
+    /// @notice Smallest `EconomicConfig.connectorPaymentGasLimit` the configuration accepts.
+    /// @dev Keeps the limit well above a plain transfer back to the service (about 9,500 gas): a limit too
+    ///      small for any payment would fail every charge, slashing even a funded connector for each inbound
+    ///      DATA message.
+    uint256 internal constant MIN_CONNECTOR_PAYMENT_GAS_LIMIT = 50_000;
+
+    /// @dev The asset stakes, bonds, execution charges and slash proceeds are held and paid in.
+    ///      Every amount in `EconomicConfig` is denominated in it.
+    struct FeeAsset {
+        /// @dev `address(0)` for native value; otherwise an ERC-20.
+        address token;
+        /// @dev The token's `decimals()`. An 18-decimal gas cost is scaled to token units by
+        ///      10^(decimals - 18), which assumes `tx.gasprice` is quoted in the token's own currency.
+        ///      Zero in native mode, whose amounts are wei (18 decimals).
+        uint8 decimals;
     }
 
     /// @dev Decoded fields from a protobuf ClprMessage (DATA type)
@@ -418,6 +449,8 @@ library ClprTypes {
     error ClprRunningHashMismatch();
     /// @notice The bundle's acknowledged range has already been processed (replay).
     error ClprReplayDetected();
+    /// @notice The bundle's first message is at or before the sender's proven ackedMessageId.
+    error ClprBundleStartsAtOrBeforeAcked();
     /// @notice A ConfigUpdate control message declared a protocol_version this ledger
     ///         does not recognize.
     error ClprProtocolVersionMismatch();
@@ -425,18 +458,13 @@ library ClprTypes {
     error ClprAckVerificationFailed();
     /// @notice An invariant violation was detected; indicates a contract bug.
     error ClprInternalStateCorruption();
-    /// @notice The message has already been redacted.
-    error ClprMessageAlreadyRedacted();
-
-    /// @notice Only Data Messages may be redacted; attempted on a non-DATA slot.
-    error ClprMessageNotRedactable();
     /// @notice A configuration parameter fails a protocol validity check.
     error ClprInvalidConfiguration();
     /// @notice msg.sender is already registered as an endpoint.
     error ClprEndpointAlreadyRegistered();
     /// @notice msg.sender (or the given account) is not a registered endpoint.
     error ClprEndpointNotRegistered();
-    /// @notice The supplied ETH bond is below the configured minimum.
+    /// @notice The supplied bond is below the configured minimum.
     error ClprInsufficientBond();
     /// @notice `addEndpoint`/`updateEndpointManifest` would push the live manifest past
     ///         `maxLocalEndpoints`.
@@ -456,12 +484,19 @@ library ClprTypes {
     /// @dev Reverted by submitBundle when the channel's maxBundlesPerSec limit is exceeded
     ///      within the current one-second window. Zero means unlimited (not enforced).
     error ClprBundleRateLimitExceeded();
-    /// @notice An ETH transfer to the intended recipient failed.
+    /// @notice A fee-asset transfer to the intended recipient failed, or a fee-token deposit delivered
+    ///         a different amount than requested.
     error ClprTransferFailed();
+    /// @notice The ClprService constructor was given a fee token whose `decimals()` cannot be read
+    ///         or exceeds `FeeAssetLib.MAX_DECIMALS`.
+    error ClprInvalidFeeToken();
+    /// @notice `msg.value` differs from what the fee asset requires: the stated amount in native
+    ///         mode, zero in token mode.
+    error ClprNativeValueMismatch();
     /// @notice The pull-payment balance is zero; nothing to withdraw.
     error ClprNothingToCollect();
-    /// @notice The message id is outside the live (ackedMessageId, nextMessageId) window.
-    error ClprInvalidMessageId();
+    /// @notice `collectPendingTo` was given the zero address as the recipient.
+    error ClprZeroRecipient();
     /// @notice A chain identifier passed to _sortChains / deriveChannelId was empty.
     error ClprInvalidChainId();
     /// @notice An endpoint's IP address is not a valid numeric IPv4 or IPv6 address.

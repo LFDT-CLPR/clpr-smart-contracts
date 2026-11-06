@@ -60,7 +60,7 @@ export function g1ToCompressed(pt: G1Point): Buffer {
     return Buffer.from(pt.toRawBytes(true));
 }
 
-/// Hash a 32-byte signing root to a G2 point under the ETH2 POP ciphersuite (matches `_hashToG2`).
+/// Hash a 32-byte signing root to a G2 point under the ETH2 POP ciphersuite (matches `ClprBls12381.hashToG2`).
 export function hashToG2(signingRoot: Buffer): G2Point {
     const raw = bls12_381.G2.hashToCurve(Uint8Array.from(signingRoot), {DST: BLS_POP_DST});
     return G2.fromAffine(raw.toAffine());

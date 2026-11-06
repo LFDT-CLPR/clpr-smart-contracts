@@ -202,12 +202,9 @@ contract SeiComplianceTest is ClprEvmStorageComplianceTest, SeiSyntheticProofs {
     }
 
     /// @dev The proven value the verifier demands in the `_config.serviceAddress` slot:
-    ///      Solidity's short-bytes(20) layout [addr 20B][zeros 11B][len*2 = 0x28].
-    function _serviceAddressSlotValue() private pure returns (bytes32 slotValue) {
-        bytes20 svc20 = SERVICE_ADDR20;
-        assembly {
-            slotValue := or(shl(96, svc20), 0x28)
-        }
+    ///      Solidity's short-bytes(20) layout [addr 20B][zeros 11B][len*2 = 0x28], spelled out for SERVICE_ADDR.
+    function _serviceAddressSlotValue() private pure returns (bytes32) {
+        return 0x5e7c1ce1acce5e7c1ce1acce5e7c1ce1acce5e7c000000000000000000000028;
     }
 
     /// @dev Assemble a config proof around an already-built IAVL storage entry and its root, so a
@@ -291,6 +288,23 @@ contract SeiComplianceTest is ClprEvmStorageComplianceTest, SeiSyntheticProofs {
             expectedNextMessageId: 100,
             expectedPayloadCount: 1
         });
+    }
+
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        view
+        override
+        returns (bytes memory, bytes memory, bytes memory)
+    {
+        bytes32[5] memory values = _successValues();
+        values[0] = bytes32((uint256(1) << 160) | (uint256(nextMessageId) << 168));
+        values[1] = bytes32(0);
+        values[2] = sentRunningHash;
+        return (
+            _bundle(CHANNEL_ID, SERVICE_ADDR20, values, bundleContent),
+            _trustAnchor(),
+            _ctxFor(CHANNEL_ID, SERVICE_ADDR20)
+        );
     }
 
     function _runningHashVector() internal view override returns (RunningHashVector memory) {

@@ -29,7 +29,9 @@ library InvariantBundleHelper {
             receivedMessageId: channel.ackedMessageId,
             receivedRunningHash: channel.sentRunningHash,
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: channel.receivedMessageId + 1,
+            lastMessageRunningHash: hash
         });
     }
 
@@ -45,7 +47,9 @@ library InvariantBundleHelper {
             receivedMessageId: channel.ackedMessageId,
             receivedRunningHash: channel.sentRunningHash,
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: channel.receivedMessageId,
+            lastMessageRunningHash: channel.receivedRunningHash
         });
     }
 
@@ -61,7 +65,9 @@ library InvariantBundleHelper {
             receivedMessageId: channel.nextMessageId - 1,
             receivedRunningHash: channel.sentRunningHash,
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: channel.receivedMessageId,
+            lastMessageRunningHash: channel.receivedRunningHash
         });
     }
 

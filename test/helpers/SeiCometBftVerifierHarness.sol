@@ -28,6 +28,18 @@ contract SeiCometBftVerifierHarness is SeiCometBftVerifier {
 
     // ── Expose internal helpers ───────────────────────────────────────────────
 
+    function findLastMessageId(bytes32 channelId, bytes32 slot, uint64 acked, uint64 next, uint256 count)
+        external
+        pure
+        returns (uint64)
+    {
+        return _findLastMessageId(channelId, slot, acked, next, count);
+    }
+
+    function lastMessageRunningHashSlot(bytes32 channelId, uint64 messageId) external pure returns (bytes32) {
+        return _lastMessageRunningHashSlot(channelId, messageId);
+    }
+
     function decodeBundleContent(bytes memory data) external pure returns (bytes[] memory messages) {
         return _decodeBundleContent(data);
     }

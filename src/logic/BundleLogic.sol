@@ -16,13 +16,13 @@ contract BundleLogic is LogicModuleBase {
     ///         message cursor and crediting submitter rewards.
     /// @dev Permissionless: any caller may submit. Bundle correctness is secured by
     ///      the channel's verifier; the submitter (msg.sender) is the recipient of
-    ///      connector charges and slash proceeds for messages in this bundle. Heavy
-    ///      decoding and state mutation is delegated to BundleLib.processBundle.
-    /// @param _channelId The channel the bundle belongs to.
+    ///      connector charges and slash proceeds for messages in this bundle.
     /// @param proofBytes Encoded proof blob; format is defined by the channel's verifier.
     function submitBundle(bytes32 _channelId, bytes calldata proofBytes) external nonReentrant onlyService whenEnabled {
         uint256 connectorCountSlot;
-        assembly { connectorCountSlot := _connectorCount.slot }
+        assembly {
+            connectorCountSlot := _connectorCount.slot
+        }
         BundleLib.processBundle(
             _channels,
             _channelExists,
@@ -41,7 +41,8 @@ contract BundleLogic is LogicModuleBase {
                 decodeHelperAddr: _bundleDecodeHelper,
                 fallbackRecipient: _getOwner(),
                 config: _config,
-                econ: economicConfig
+                econ: economicConfig,
+                feeAsset: _feeAsset
             })
         );
     }

@@ -5,16 +5,13 @@ import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
 
 /// @title ClprQbftSeal
-/// @notice Verifies that a Besu QBFT block header's committed-seals list contains at
-///         least MIN_COMMITTED_SEALS entries and that the expected validator signed at
-///         least one of them.  Reconstructs the sealing-header digest (same header with
+/// @notice Reads a Besu QBFT block header's `extraData`: the validator list it carries and the
+///         committed seals over it. Reconstructs the sealing-header digest (same header with
 ///         `committedSeals = []` in extraData) and recovers each seal via `ecrecover`.
 library ClprQbftSeal {
     error InvalidExtraData();
-    error WrongSealCount(uint256 got);
     error SealLengthMismatch(uint256 got);
     error SealRecoverFailed();
-    error ValidatorSealNotFound(address expected);
 
     /// @dev Index of the `extraData` field within an Ethereum block header. QBFT carries
     ///      its consensus metadata here.
@@ -22,48 +19,66 @@ library ClprQbftSeal {
 
     // QBFT extraData layout: [vanity, validators[], vote, round, committedSeals[]]
     uint8 private constant EXTRA_FIELDS = 5;
+    uint8 private constant EXTRA_INDEX_VALIDATORS = 1;
     uint8 private constant EXTRA_INDEX_COMMITTED_SEALS = 4;
     uint8 private constant SEAL_LENGTH = 65;
 
-    /// @dev Verify that `header[12]` (extraData) contains at least minCommittedSeals
-    ///      committed seals and that `expectedValidator` signed at least one of them.
-    ///      Reverts on any structural mismatch, recovery failure, or missing validator.
-    function verify(uint8 minCommittedSeals, Memory.Slice[] memory header, address expectedValidator) internal pure {
+    /// @notice A header's `extraData`, decoded once: the digest the seals signed, the seals, and the
+    ///         validator list. A verifier that needs both the list and the seals reads them from one
+    ///         of these instead of decoding the header twice.
+    struct HeaderExtra {
+        bytes32 sealHash;
+        Memory.Slice[] seals;
+        Memory.Slice validators;
+    }
+
+    /// @dev Decode `header[12]` (extraData) exactly once. Reverts `InvalidExtraData` when it is
+    ///      empty or not the 5-item QBFT layout.
+    function decodeHeader(Memory.Slice[] memory header) internal pure returns (HeaderExtra memory x) {
+        Memory.Slice[] memory extra = _decodeExtra(header);
+        x.seals = RLP.readList(extra[EXTRA_INDEX_COMMITTED_SEALS]);
+        x.validators = extra[EXTRA_INDEX_VALIDATORS];
+        x.sealHash = _sealingDigest(header, extra);
+    }
+
+    /// @dev The seals and the digest they signed, for a caller that reads no validator list from
+    ///      the header.
+    function decodeSealsContextFromHeader(Memory.Slice[] memory header)
+        internal
+        pure
+        returns (bytes32 sealHash, Memory.Slice[] memory seals)
+    {
+        Memory.Slice[] memory extra = _decodeExtra(header);
+        seals = RLP.readList(extra[EXTRA_INDEX_COMMITTED_SEALS]);
+        sealHash = _sealingDigest(header, extra);
+    }
+
+    function _decodeExtra(Memory.Slice[] memory header) private pure returns (Memory.Slice[] memory extra) {
         bytes memory extraDataInner = RLP.readBytes(header[HEADER_EXTRA_DATA_INDEX]);
-        Memory.Slice[] memory extra = RLP.decodeList(extraDataInner);
+        // Guard the empty case explicitly: RLP.decodeList would otherwise reject it with the
+        // generic RLPInvalidEncoding instead of this library's structural error.
+        if (extraDataInner.length == 0) revert InvalidExtraData();
+        extra = RLP.decodeList(extraDataInner);
         if (extra.length != EXTRA_FIELDS) revert InvalidExtraData();
+    }
 
-        Memory.Slice[] memory seals = RLP.readList(extra[EXTRA_INDEX_COMMITTED_SEALS]);
-        if (seals.length < minCommittedSeals) revert WrongSealCount(seals.length);
+    /// @dev Recover the signer of one committed seal over `sealHash`. Reverts on a bad length or a
+    ///      failed recovery. QBFT seals carry v in {0,1}; the precompile wants {27,28}, so normalize.
+    function recoverSeal(bytes32 sealHash, Memory.Slice sealSlice) internal pure returns (address recovered) {
+        bytes memory seal = RLP.readBytes(sealSlice);
+        if (seal.length != SEAL_LENGTH) revert SealLengthMismatch(seal.length);
 
-        bytes32 sealHash = _sealingDigest(header, extra);
-
-        bool found = false;
-        for (uint256 i = 0; i < seals.length;) {
-            bytes memory seal = RLP.readBytes(seals[i]);
-            if (seal.length != SEAL_LENGTH) revert SealLengthMismatch(seal.length);
-
-            // QBFT seals carry v ∈ {0,1}; precompile expects {27,28}. Normalize.
-            bytes32 r;
-            bytes32 s;
-            uint8 v;
-            assembly {
-                r := mload(add(seal, 0x20))
-                s := mload(add(seal, 0x40))
-                v := byte(0, mload(add(seal, 0x60)))
-            }
-            if (v < 27) v += 27;
-            address recovered = ecrecover(sealHash, v, r, s);
-            if (recovered == address(0)) revert SealRecoverFailed();
-            if (recovered == expectedValidator) {
-                found = true;
-                break;
-            }
-            unchecked {
-                i++;
-            }
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(seal, 0x20))
+            s := mload(add(seal, 0x40))
+            v := byte(0, mload(add(seal, 0x60)))
         }
-        if (!found) revert ValidatorSealNotFound(expectedValidator);
+        if (v < 27) v += 27;
+        recovered = ecrecover(sealHash, v, r, s);
+        if (recovered == address(0)) revert SealRecoverFailed();
     }
 
     /// @dev Reconstruct `keccak256(RLP(header_with_empty_seals))` — the digest the
@@ -77,16 +92,20 @@ library ClprQbftSeal {
             }
         }
         sealingExtraItems[EXTRA_INDEX_COMMITTED_SEALS] = RLP.encode(new bytes[](0));
-        bytes memory sealingExtraData = RLP.encode(sealingExtraItems);
+        return _hashWithExtra(header, sealingExtraItems);
+    }
 
-        bytes[] memory sealingHeaderItems = new bytes[](header.length);
+    /// @dev Hash the header with its extraData replaced by the re-encoded `extraItems`.
+    function _hashWithExtra(Memory.Slice[] memory header, bytes[] memory extraItems) private pure returns (bytes32) {
+        bytes memory newExtraData = RLP.encode(extraItems);
+        bytes[] memory headerItems = new bytes[](header.length);
         for (uint256 i = 0; i < header.length;) {
-            sealingHeaderItems[i] =
-                (i == uint256(HEADER_EXTRA_DATA_INDEX)) ? RLP.encode(sealingExtraData) : Memory.toBytes(header[i]);
+            headerItems[i] =
+                (i == uint256(HEADER_EXTRA_DATA_INDEX)) ? RLP.encode(newExtraData) : Memory.toBytes(header[i]);
             unchecked {
                 ++i;
             }
         }
-        return keccak256(RLP.encode(sealingHeaderItems));
+        return keccak256(RLP.encode(headerItems));
     }
 }

@@ -36,7 +36,6 @@ library ClprProtobuf {
         if (fieldNumber == 1) return (true, ClprTypes.MessageType.DATA);
         if (fieldNumber == 2) return (true, ClprTypes.MessageType.REPLY);
         if (fieldNumber == 3) return (true, ClprTypes.MessageType.CONTROL);
-        if (fieldNumber == 4) return (true, ClprTypes.MessageType.REDACTED);
         return (false, ClprTypes.MessageType.DATA);
     }
 
@@ -114,14 +113,6 @@ library ClprProtobuf {
         bytes memory configUpdate = abi.encodePacked(PB.encodeFieldKey(1, 2), PB.encodeLengthDelimited(configMsg));
         bytes memory controlMsg = abi.encodePacked(PB.encodeFieldKey(1, 2), PB.encodeLengthDelimited(configUpdate));
         return abi.encodePacked(PB.encodeFieldKey(3, 2), PB.encodeLengthDelimited(controlMsg));
-    }
-
-    /// @notice Encode a REDACTED message as `ClprMessage { redacted: ClprRedactedMessage { message_hash: ... } }`.
-    /// @param messageHash SHA-256 of the original serialized payload.
-    /// @return Encoded protobuf bytes.
-    function encodeRedactedMessage(bytes32 messageHash) internal pure returns (bytes memory) {
-        bytes memory inner = PB.encodeBytesField(1, abi.encodePacked(messageHash));
-        return abi.encodePacked(PB.encodeFieldKey(4, 2), PB.encodeLengthDelimited(inner));
     }
 
     function _encodeThrottles(ClprTypes.Throttles memory t) internal pure returns (bytes memory) {
@@ -281,7 +272,6 @@ library ClprProtobuf {
 
     /// @notice Decode a CONTROL message encoded by `encodeControlMessage`.
     /// @param payload Full `ClprMessage` bytes (outer field 3 wraps the `ControlMessage`).
-    /// @return result Decoded `DecodedControl` including the embedded `LedgerConfiguration`.
     function decodeControlMessage(bytes memory payload) internal pure returns (ClprTypes.DecodedControl memory result) {
         uint256 offset;
         // Layer 1: ClprMessagePayload field 3 (control)
@@ -289,7 +279,6 @@ library ClprProtobuf {
         bytes memory controlMsg;
         (controlMsg,) = PB.decodeLengthDelimited(payload, offset);
         // Layer 2: ClprControlMessage — must be exactly field 1 (config_update oneof).
-        // Any unknown oneof variant causes bundle rejection to avoid processing an unrecognized control path.
         {
             uint64 ctrlField;
             (ctrlField,, offset) = PB.decodeFieldKey(controlMsg, 0);
@@ -305,12 +294,10 @@ library ClprProtobuf {
         uint256 pos = 0;
         while (pos < configMsg.length) {
             uint64 fieldNum;
-            uint8 wireType;
-            (fieldNum, wireType, pos) = PB.decodeFieldKey(configMsg, pos);
+            (fieldNum,, pos) = PB.decodeFieldKey(configMsg, pos);
             if (fieldNum == 1) {
                 uint64 v;
                 (v, pos) = PB.decodeVarint(configMsg, pos);
-                // Bound-check: peer-supplied `v` larger than uint32 would truncate silently.
                 if (v > type(uint32).max) revert ClprTypes.ClprBundleVerificationFailed();
                 // casting to 'uint32' is safe because of the bound check above.
                 // forge-lint: disable-next-line(unsafe-typecast)
@@ -349,10 +336,6 @@ library ClprProtobuf {
                 (result.config.trustAnchorId, pos) = PB.decodeLengthDelimited(configMsg, pos);
             } else {
                 // Strict wire format: every unrecognized field number rejects the whole bundle.
-                // This includes the retired field 6 (`seed_endpoints`) — the endpoint set moved out
-                // of LedgerConfiguration into the versioned endpoint manifest, and the peer protos
-                // (clpr-evm-endpoint, clpr-hiero) dropped it too, so a peer still sending it is
-                // speaking a configuration dialect this ledger does not understand.
                 revert ClprTypes.ClprUnknownWireField(fieldNum);
             }
         }
@@ -493,7 +476,9 @@ library ClprProtobuf {
         }
     }
 
-    /// @notice Decode a BundleContent proto encoded by {encodeBundleContent}.
+    /// @notice Decode a BundleContent proto encoded by {encodeBundleContent}. BundleContent has no
+    ///         last-message fields, so a message-bearing bundle is taken to end at the sender's latest
+    ///         message: `lastMessageId = nextMessageId - 1`, `lastMessageRunningHash = sentRunningHash`.
     function decodeBundleContent(bytes calldata data)
         internal
         pure
@@ -571,6 +556,10 @@ library ClprProtobuf {
                 (messagePayloads[idx++], pos) = PB.decodeLengthDelimited(data, pos);
             }
         }
+        if (messagePayloads.length > 0 && meta.nextMessageId > 0) {
+            meta.lastMessageId = meta.nextMessageId - 1;
+            meta.lastMessageRunningHash = meta.sentRunningHash;
+        }
     }
 
     /// @notice Decode a `ClprChannel` (proven state-item value) from memory bytes.
@@ -631,7 +620,11 @@ library ClprProtobuf {
                     channel.endpointManifestVersion = v;
                 }
             } else if (wireType == 2) {
-                if (fieldNum == 3) {
+                if (fieldNum == 1) {
+                    bytes memory val;
+                    (val, pos) = PB.decodeLengthDelimited(data, pos);
+                    if (val.length == 32) channel.channelId = _bytes32From(val);
+                } else if (fieldNum == 3) {
                     (channel.peerServiceAddress, pos) = PB.decodeLengthDelimited(data, pos);
                 } else if (fieldNum == 10) {
                     bytes memory val;
@@ -643,7 +636,7 @@ library ClprProtobuf {
                     if (val.length == 32) channel.receivedRunningHash = _bytes32From(val);
                 } else {
                     // Skip every other length-delimited field without copying
-                    // its body — channel_id, chain_id, verifier_contract,
+                    // its body — chain_id, verifier_contract,
                     // verifier_fingerprint, the two Timestamps,
                     // ownership_commitment, trust_anchor.
                     pos = PB.skipField(data, pos, wireType);

@@ -3,15 +3,35 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {MerklePatriciaProof} from "@hiero-ledger/clpr/libraries/proof/evm/MerklePatriciaProof.sol";
+import {RlpCursor} from "@hiero-ledger/clpr/libraries/proof/evm/RlpCursor.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
+import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
+import {MptWire} from "@test/helpers/MptWire.sol";
+import {MptWalk} from "@test/helpers/MptWalk.sol";
 
 contract MPTHarness {
+    using Memory for bytes;
+
     function verifyInclusion(bytes32 root, bytes32 keyHash, bytes[] memory proof) external pure returns (bytes memory) {
-        return MerklePatriciaProof.verifyInclusion(root, keyHash, proof);
+        return MptWalk.verifyInclusion(root, keyHash, _asProofItem(proof));
     }
 
     function getOrEmpty(bytes32 root, bytes32 keyHash, bytes[] memory proof) external pure returns (bytes memory) {
-        return MerklePatriciaProof.getOrEmpty(root, keyHash, proof);
+        return MptWalk.getOrEmpty(root, keyHash, _asProofItem(proof));
+    }
+
+    /// @dev The walker on a raw, already-encoded proof item (for malformed-container tests).
+    function verifyInclusionRaw(bytes32 root, bytes32 keyHash, bytes memory proofItemRlp)
+        external
+        pure
+        returns (bytes memory)
+    {
+        return MptWalk.verifyInclusion(root, keyHash, proofItemRlp.asSlice());
+    }
+
+    /// @dev Raw node bytes → the wire shape the walker consumes (shared with {EvmMptBuilder}).
+    function _asProofItem(bytes[] memory nodes) private pure returns (Memory.Slice) {
+        return MptWire.wrap(nodes).asSlice();
     }
 }
 
@@ -22,6 +42,7 @@ contract MerklePatriciaProofTest is Test {
     bytes32 internal constant KEY_HASH_1 = bytes32(uint256(1));
     // keyHash all zeros
     bytes32 internal constant KEY_HASH_0 = bytes32(0);
+    bytes internal constant VALUE = hex"cafe";
 
     function setUp() public {
         h = new MPTHarness();
@@ -109,7 +130,7 @@ contract MerklePatriciaProofTest is Test {
         bytes32 root = keccak256(badNode);
         bytes[] memory proof = new bytes[](1);
         proof[0] = badNode;
-        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
         h.verifyInclusion(root, KEY_HASH_0, proof);
     }
 
@@ -231,7 +252,7 @@ contract MerklePatriciaProofTest is Test {
     function test_verifyInclusion_emptyPathLeaf_reverts() public {
         // Build a leaf whose path item is RLP-encoded as an empty byte string.
         // When verifyInclusion traverses this leaf, _decodePathPrefix reverts on
-        // the zero-length path (line 172).
+        // the zero-length path.
         bytes[] memory leafItems = new bytes[](2);
         leafItems[0] = RLP.encode(new bytes(0)); // RLP zero-length → decodes as bytes(0)
         leafItems[1] = RLP.encode(bytes(hex"aa"));
@@ -245,7 +266,7 @@ contract MerklePatriciaProofTest is Test {
 
     function test_getOrEmpty_branchPointsToEmptyChild_returnsEmpty() public view {
         // Branch with all slots encoding empty byte strings. For KEY_HASH_0 nibble0=0,
-        // items[0] decodes to bytes(0) → child.length == 0 triggers line 111 in getOrEmpty.
+        // slot 0 holds the empty string → the lenient walk reads the key as absent.
         bytes[] memory branchItems = new bytes[](17);
         for (uint256 i = 0; i < 17; i++) {
             branchItems[i] = RLP.encode(new bytes(0)); // empty byte string at every slot
@@ -253,7 +274,7 @@ contract MerklePatriciaProofTest is Test {
         bytes memory branchNode = RLP.encode(branchItems);
         bytes32 root = keccak256(branchNode);
 
-        // KEY_HASH_0 nibble0=0 → items[0] = bytes(0) → child.length==0 → line 111
+        // KEY_HASH_0 nibble0=0 → slot 0 is empty → absent → empty result
         bytes[] memory proof = new bytes[](1);
         proof[0] = branchNode;
         bytes memory got = h.getOrEmpty(root, KEY_HASH_0, proof);
@@ -286,7 +307,7 @@ contract MerklePatriciaProofTest is Test {
         bytes memory branchNode = RLP.encode(branchItems);
         bytes32 root = keccak256(branchNode);
 
-        // _decodePathPrefix: isOdd=true at line 180 (prefixNib=3), pathLen=63.
+        // _decodePathPrefix: odd prefix (prefixNib=3), pathNibbles=63.
         // keyIdx = 1 + 63 = 64 == 64 ✓ → returns leaf value.
         bytes[] memory proof = new bytes[](2);
         proof[0] = branchNode;
@@ -296,9 +317,9 @@ contract MerklePatriciaProofTest is Test {
         assertEq(got, RLP.encode(bytes(hex"deadbeef")));
     }
 
-    // ── BRDA:105 — branch-node terminal at keyIdx==64 ────────────────────────
+    // ── Branch-node terminal at keyIdx==64 ─────────────────────────────────────
 
-    /// @dev BRDA:105,15,0,- — `if (keyIdx >= 64) return Memory.toBytes(items[16])`
+    /// @dev The `target == 16` return in `_walk`: the value stored at a branch terminal.
     ///
     ///      A value can be stored directly in the "value" slot (item[16]) of a branch node
     ///      when the full 64-nibble key has been consumed by the time that node is reached.
@@ -333,6 +354,116 @@ contract MerklePatriciaProofTest is Test {
         assertEq(got, RLP.encode(value));
     }
 
+    /// @dev Same key-exhausting shape, but the branch terminal (item 16) is EMPTY: the key is
+    ///      absent, so the strict walk reverts and the lenient walk reads empty — not `0x80`.
+    function test_branchNodeAtKeyDepth64_emptyTerminal_isAbsent() public {
+        bytes[] memory branchItems = new bytes[](17);
+        for (uint256 i = 0; i < 17; i++) {
+            branchItems[i] = RLP.encode(new bytes(0));
+        }
+        bytes memory branchNode = RLP.encode(branchItems);
+
+        bytes memory extPath = new bytes(33);
+        extPath[0] = 0x00; // ext, even, 64 zero nibbles
+        bytes[] memory extItems = new bytes[](2);
+        extItems[0] = RLP.encode(extPath);
+        extItems[1] = RLP.encode(abi.encodePacked(keccak256(branchNode)));
+        bytes memory extNode = RLP.encode(extItems);
+
+        bytes[] memory proof = new bytes[](2);
+        proof[0] = extNode;
+        proof[1] = branchNode;
+
+        assertEq(h.getOrEmpty(keccak256(extNode), KEY_HASH_0, proof).length, 0, "absent reads as empty");
+        vm.expectRevert(MerklePatriciaProof.MPTKeyAbsent.selector);
+        h.verifyInclusion(keccak256(extNode), KEY_HASH_0, proof);
+    }
+
+    /// @dev extension [0, split) → leaf [split, 64): path lengths 1..63 on both sides, so odd and
+    ///      even compact encodings and every `keyIdx` for the leaf compare.
+    function testFuzz_pathMatches_extensionLeafSplit(bytes32 keyHash, uint8 splitSeed, uint8 flipSeed) public {
+        uint256 split = bound(splitSeed, 1, 63);
+        uint256 flip = bound(flipSeed, 0, 63);
+        bytes memory leaf = _pathNode(keyHash, split, 64, true, RLP.encode(bytes(hex"cafe")));
+        bytes memory ext = _pathNode(keyHash, 0, split, false, RLP.encode(abi.encodePacked(keccak256(leaf))));
+        bytes[] memory proof = new bytes[](2);
+        proof[0] = ext;
+        proof[1] = leaf;
+        _assertHitAndMiss(keccak256(ext), keyHash, flip, proof);
+    }
+
+    /// @dev branch (nibble 0) → extension [1, split) → leaf [split, 64): the extension compare
+    ///      starts at a non-zero key index, so its `keySegment` shift is exercised too.
+    function testFuzz_pathMatches_branchExtensionLeafSplit(bytes32 keyHash, uint8 splitSeed, uint8 flipSeed) public {
+        uint256 split = bound(splitSeed, 2, 63);
+        // Nibble 0 is consumed by the branch (a flip there is MPTKeyAbsent, not a path mismatch).
+        uint256 flip = bound(flipSeed, 1, 63);
+        bytes memory leaf = _pathNode(keyHash, split, 64, true, RLP.encode(bytes(hex"cafe")));
+        bytes memory ext = _pathNode(keyHash, 1, split, false, RLP.encode(abi.encodePacked(keccak256(leaf))));
+        bytes[] memory branchItems = new bytes[](17);
+        for (uint256 i = 0; i < 17; i++) {
+            branchItems[i] = RLP.encode(new bytes(0));
+        }
+        branchItems[_nibAt(keyHash, 0)] = RLP.encode(abi.encodePacked(keccak256(ext)));
+        bytes memory branch = RLP.encode(branchItems);
+        bytes[] memory proof = new bytes[](3);
+        proof[0] = branch;
+        proof[1] = ext;
+        proof[2] = leaf;
+        _assertHitAndMiss(keccak256(branch), keyHash, flip, proof);
+    }
+
+    /// @dev A single 64-nibble even leaf: the 33-byte path whose last nibble lives in the byte
+    ///      after the aligned 32-byte word. Flipping nibble 63 must still miss.
+    function testFuzz_pathMatches_fullLeafPath(bytes32 keyHash, uint8 flipSeed) public {
+        uint256 flip = bound(flipSeed, 0, 63);
+        (bytes32 root, bytes[] memory proof) = _leafProof(keyHash, hex"cafe");
+        _assertHitAndMiss(root, keyHash, flip, proof);
+        _assertHitAndMiss(root, keyHash, 63, proof);
+    }
+
+    function _assertHitAndMiss(bytes32 root, bytes32 keyHash, uint256 flipNibble, bytes[] memory proof) private {
+        assertEq(h.verifyInclusion(root, keyHash, proof), RLP.encode(bytes(hex"cafe")), "hit");
+        bytes32 other = _flipNibble(keyHash, flipNibble);
+        assertEq(h.getOrEmpty(root, other, proof).length, 0, "miss reads as absent");
+        vm.expectRevert(MerklePatriciaProof.MPTKeyMismatch.selector);
+        h.verifyInclusion(root, other, proof);
+    }
+
+    /// @dev `keyHash` with nibble `i` XOR-ed by a non-zero value (0x1 .. 0xf keeps it a nibble).
+    function _flipNibble(bytes32 keyHash, uint256 i) private pure returns (bytes32) {
+        uint256 shift = 4 * (63 - i);
+        uint256 delta = ((uint256(keyHash) >> shift) & 0xf) == 0xf ? 0x1 : 0xf; // never zero
+        return bytes32(uint256(keyHash) ^ (delta << shift));
+    }
+
+    /// @dev A 2-item node whose compact path covers `keyHash` nibbles [from, to) and whose second
+    ///      item is `item` (an RLP-encoded value for a leaf, a hash reference for an extension).
+    function _pathNode(bytes32 keyHash, uint256 from, uint256 to, bool isLeaf, bytes memory item)
+        private
+        pure
+        returns (bytes memory)
+    {
+        uint256 n = to - from;
+        bytes memory path = new bytes(1 + n / 2);
+        uint8 prefix = isLeaf ? 2 : 0;
+        uint256 cursor = from;
+        if (n % 2 == 1) {
+            path[0] = bytes1(((prefix | 1) << 4) | _nibAt(keyHash, cursor));
+            cursor++;
+        } else {
+            path[0] = bytes1(prefix << 4);
+        }
+        for (uint256 b = 1; b < path.length; b++) {
+            path[b] = bytes1((_nibAt(keyHash, cursor) << 4) | _nibAt(keyHash, cursor + 1));
+            cursor += 2;
+        }
+        bytes[] memory items = new bytes[](2);
+        items[0] = RLP.encode(path);
+        items[1] = item;
+        return RLP.encode(items);
+    }
+
     // ── proof-building helpers ─────────────────────────────────────────────────
 
     /// @dev Single-leaf proof for `keyHash` with even 64-nibble path.
@@ -341,15 +472,7 @@ contract MerklePatriciaProofTest is Test {
         pure
         returns (bytes32 root, bytes[] memory proof)
     {
-        bytes memory path = new bytes(33);
-        path[0] = 0x20; // leaf, even
-        for (uint256 i = 0; i < 32; i++) {
-            path[i + 1] = keyHash[i];
-        }
-        bytes[] memory leafItems = new bytes[](2);
-        leafItems[0] = RLP.encode(path);
-        leafItems[1] = RLP.encode(value);
-        bytes memory leafNode = RLP.encode(leafItems);
+        bytes memory leafNode = MptWire.leaf(keyHash, RLP.encode(value));
         root = keccak256(leafNode);
         proof = new bytes[](1);
         proof[0] = leafNode;
@@ -613,7 +736,7 @@ contract MerklePatriciaProofTest is Test {
         bytes32 root = keccak256(badNode);
         bytes[] memory proof = new bytes[](1);
         proof[0] = badNode;
-        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
         h.getOrEmpty(root, KEY_HASH_0, proof);
     }
 
@@ -645,6 +768,103 @@ contract MerklePatriciaProofTest is Test {
         h.verifyInclusion(root, KEY_HASH_0, proof);
     }
 
+    // ── Malformed containers and node shapes ──────────────────────────────────
+
+    function test_verifyInclusion_proofItemNotAList_reverts() public {
+        // The proof item must be an RLP list of node strings; a byte string is rejected.
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusionRaw(bytes32(0), KEY_HASH_0, RLP.encode(bytes(hex"deadbeef")));
+    }
+
+    /// @dev A 2-item node whose path item is a list: rejected as a malformed node.
+    function test_verifyInclusion_pathItemIsList_reverts() public {
+        bytes[] memory pathAsList = new bytes[](1);
+        pathAsList[0] = RLP.encode(bytes(hex"20"));
+        bytes[] memory items = new bytes[](2);
+        items[0] = RLP.encode(pathAsList);
+        items[1] = RLP.encode(bytes(hex"cafe"));
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = RLP.encode(items);
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusion(keccak256(proof[0]), KEY_HASH_0, proof);
+    }
+
+    function test_verifyInclusion_trailingBytesAfterProofList_reverts() public {
+        // A well-formed proof list followed by a stray byte: the container must fill its
+        // range exactly.
+        (bytes32 root, bytes[] memory proof) = _leafProof(KEY_HASH_0, hex"cafe");
+        bytes memory withTrailer = bytes.concat(MptWire.wrap(proof), hex"00");
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusionRaw(root, KEY_HASH_0, withTrailer);
+    }
+
+    function test_verifyInclusion_nodeEnvelopeIsList_reverts() public {
+        // A proof element that is itself a list (instead of a byte string wrapping node RLP).
+        bytes[] memory inner = new bytes[](1);
+        inner[0] = RLP.encode(bytes(hex"aa"));
+        bytes[] memory outer = new bytes[](1);
+        outer[0] = RLP.encode(inner); // list element, not a string envelope
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusionRaw(bytes32(0), KEY_HASH_0, RLP.encode(outer));
+    }
+
+    function test_verifyInclusion_singleItemNode_reverts() public {
+        bytes[] memory items = new bytes[](1);
+        items[0] = RLP.encode(bytes(hex"aa"));
+        bytes memory badNode = RLP.encode(items);
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = badNode;
+        vm.expectRevert(RlpCursor.RlpCursorOutOfBounds.selector);
+        h.verifyInclusion(keccak256(badNode), KEY_HASH_0, proof);
+    }
+
+    /// @dev Only the walked prefix of a branch is validated: items after the target are not parsed,
+    ///      so an over-long node whose target child is empty reads as absent.
+    function test_verifyInclusion_eighteenItemNode_targetEmpty_readsAbsent() public {
+        bytes[] memory items = new bytes[](18);
+        for (uint256 i = 0; i < 18; i++) {
+            items[i] = RLP.encode(new bytes(0));
+        }
+        bytes memory badNode = RLP.encode(items);
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = badNode;
+        vm.expectRevert(MerklePatriciaProof.MPTKeyAbsent.selector);
+        h.verifyInclusion(keccak256(badNode), KEY_HASH_0, proof);
+    }
+
+    function test_verifyInclusion_extensionChildIsList_reverts() public {
+        // Extension node whose child field is an inline list (an embedded node).
+        bytes memory extPath = new bytes(17);
+        extPath[0] = 0x00; // extension, even
+        bytes[] memory embedded = new bytes[](1);
+        embedded[0] = RLP.encode(bytes(hex"aa"));
+        bytes[] memory extItems = new bytes[](2);
+        extItems[0] = RLP.encode(extPath);
+        extItems[1] = RLP.encode(embedded); // list child
+        bytes memory extNode = RLP.encode(extItems);
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = extNode;
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
+        h.verifyInclusion(keccak256(extNode), KEY_HASH_0, proof);
+    }
+
+    function test_verifyInclusion_branchChildIsList_reverts() public {
+        // Branch node whose slot-0 child is an inline list (an embedded node).
+        bytes[] memory embedded = new bytes[](2);
+        embedded[0] = RLP.encode(bytes(hex"20"));
+        embedded[1] = RLP.encode(bytes(hex"aa"));
+        bytes[] memory branchItems = new bytes[](17);
+        for (uint256 i = 0; i < 17; i++) {
+            branchItems[i] = i == 0 ? RLP.encode(embedded) : RLP.encode(new bytes(0));
+        }
+        bytes memory branchNode = RLP.encode(branchItems);
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = branchNode;
+        // KEY_HASH_0 nibble0 = 0 → hits the list child → revert
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
+        h.verifyInclusion(keccak256(branchNode), KEY_HASH_0, proof);
+    }
+
     // ── getOrEmpty: extension with path divergence returns empty ──────────────
 
     /// @dev Extension path covers nibbles 0..31 of KEY_HASH_0 (all zeros). Looked up
@@ -666,5 +886,253 @@ contract MerklePatriciaProofTest is Test {
         // Looking up keyHashB whose nibble 0 = 1 ≠ 0 (extension path nibble 0) → diverges → empty
         bytes memory got = h.getOrEmpty(root, keyHashB, proof);
         assertEq(got.length, 0);
+    }
+
+    // ── _branchTarget: skip, bounds and trailing-item behaviour ────────────────
+
+    /// @dev Routes on a key whose first nibble is `t`; the child at `t` is the hash of a 63-nibble leaf.
+    function _routedKey(uint256 t) private pure returns (bytes32) {
+        return bytes32((t << 252) | (uint256(keccak256("branch-target-key")) >> 4));
+    }
+
+    function _leafRef(bytes32 key) private pure returns (bytes memory leafNode, bytes memory ref) {
+        leafNode = _pathNode(key, 1, 64, true, RLP.encode(VALUE));
+        ref = RLP.encode(abi.encodePacked(keccak256(leafNode)));
+    }
+
+    /// @dev A well-formed RLP item picked by `kind % 6`: empty string, 32-byte string, empty list,
+    ///      single byte, 40-byte string, list of three empty strings. Only the first two take the
+    ///      prefix-byte shortcut in `_branchTarget`; the rest take the `RlpCursor.head` path.
+    function _filler(uint256 kind, uint256 i) private pure returns (bytes memory) {
+        kind %= 6;
+        if (kind == 0) return hex"80";
+        if (kind == 1) return RLP.encode(abi.encodePacked(keccak256(abi.encode(i))));
+        if (kind == 2) return hex"c0";
+        if (kind == 3) return hex"05";
+        if (kind == 4) return RLP.encode(new bytes(40));
+        return hex"c3808080";
+    }
+
+    function _fillerKind(uint256 mask, uint256 i) private pure returns (uint256) {
+        return (mask >> (4 * i)) & 0xf;
+    }
+
+    /// @dev `n` raw items: fillers everywhere except slot `t`, which holds `ref`.
+    function _branchItems(uint256 t, uint256 mask, uint256 n, bytes memory ref)
+        private
+        pure
+        returns (bytes[] memory items)
+    {
+        items = new bytes[](n);
+        for (uint256 i = 0; i < n; i++) {
+            items[i] = i == t ? ref : _filler(_fillerKind(mask, i), i);
+        }
+    }
+
+    function _branchProof(bytes[] memory items, bytes memory leafNode)
+        private
+        pure
+        returns (bytes32 root, bytes[] memory proof)
+    {
+        bytes memory branch = RLP.encode(items);
+        root = keccak256(branch);
+        proof = new bytes[](2);
+        proof[0] = branch;
+        proof[1] = leafNode;
+    }
+
+    function test_branchTarget_everyIndex_everyFillerKind() public view {
+        for (uint256 t = 2; t <= 15; t++) {
+            bytes32 key = _routedKey(t);
+            (bytes memory leafNode, bytes memory ref) = _leafRef(key);
+            for (uint256 kind = 0; kind < 6; kind++) {
+                uint256 mask;
+                for (uint256 i = 0; i < 16; i++) {
+                    mask |= kind << (4 * i);
+                }
+                (bytes32 root, bytes[] memory proof) = _branchProof(_branchItems(t, mask, 17, ref), leafNode);
+                assertEq(h.verifyInclusion(root, key, proof), RLP.encode(VALUE), "hit");
+            }
+        }
+    }
+
+    function testFuzz_branchTarget_mixedFillers(uint256 t, uint256 mask) public view {
+        t = bound(t, 2, 15);
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode, bytes memory ref) = _leafRef(key);
+        (bytes32 root, bytes[] memory proof) = _branchProof(_branchItems(t, mask, 17, ref), leafNode);
+        assertEq(h.verifyInclusion(root, key, proof), RLP.encode(VALUE));
+    }
+
+    /// @dev Items after the target are never parsed, so even unparseable bytes there are accepted.
+    function test_branchTarget_garbageAfterTarget_isNotParsed() public view {
+        uint256 t = 5;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode, bytes memory ref) = _leafRef(key);
+        bytes[] memory items = _branchItems(t, 0, 17, ref);
+        items[9] = hex"b9ffff";
+        items[16] = hex"f8";
+        (bytes32 root, bytes[] memory proof) = _branchProof(items, leafNode);
+        assertEq(h.verifyInclusion(root, key, proof), RLP.encode(VALUE));
+    }
+
+    /// @dev Accepted shape deviation: a branch shorter than 17 items verifies when the target is present.
+    function test_branchTarget_shortNode_targetPresent_isAccepted() public view {
+        uint256 t = 2;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode, bytes memory ref) = _leafRef(key);
+        (bytes32 root, bytes[] memory proof) = _branchProof(_branchItems(t, 0, 3, ref), leafNode);
+        assertEq(h.verifyInclusion(root, key, proof), RLP.encode(VALUE));
+    }
+
+    function test_branchTarget_shortNode_targetPastEnd_reverts() public {
+        uint256 t = 5;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode,) = _leafRef(key);
+        (bytes32 root, bytes[] memory proof) = _branchProof(_branchItems(t, 0, 3, hex"80"), leafNode);
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusion(root, key, proof);
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.getOrEmpty(root, key, proof);
+    }
+
+    /// @dev An item claiming 32 bytes (`0xa0`) but truncated: the skip lands mid-item and the next
+    ///      head read runs out of bounds.
+    function test_branchTarget_hashSkipOvershootsNode_reverts() public {
+        uint256 t = 4;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode, bytes memory ref) = _leafRef(key);
+        bytes[] memory items = _branchItems(t, 0, 5, ref);
+        items[2] = hex"a0aabbcc";
+        (bytes32 root, bytes[] memory proof) = _branchProof(items, leafNode);
+        vm.expectRevert(RlpCursor.RlpCursorOutOfBounds.selector);
+        h.verifyInclusion(root, key, proof);
+    }
+
+    /// @dev The `0xa0` skip ends exactly at `nodeEnd`: nothing is left for the target to read.
+    function test_branchTarget_hashSkipEndsAtNodeEnd_reverts() public {
+        uint256 t = 3;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode,) = _leafRef(key);
+        bytes[] memory items = new bytes[](3);
+        items[0] = hex"80";
+        items[1] = hex"80";
+        items[2] = RLP.encode(abi.encodePacked(keccak256("x")));
+        (bytes32 root, bytes[] memory proof) = _branchProof(items, leafNode);
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusion(root, key, proof);
+    }
+
+    /// @dev A truncated long-string header before the target takes the `head` path, which rejects it.
+    function test_branchTarget_truncatedItemBeforeTarget_reverts() public {
+        uint256 t = 4;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode, bytes memory ref) = _leafRef(key);
+        bytes[] memory items = _branchItems(t, 0, 5, ref);
+        items[3] = hex"b8";
+        (bytes32 root, bytes[] memory proof) = _branchProof(items, leafNode);
+        vm.expectRevert();
+        h.verifyInclusion(root, key, proof);
+    }
+
+    function test_branchTarget_targetIsList_reverts() public {
+        uint256 t = 7;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode,) = _leafRef(key);
+        (bytes32 root, bytes[] memory proof) = _branchProof(_branchItems(t, 0, 17, hex"c0"), leafNode);
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
+        h.verifyInclusion(root, key, proof);
+    }
+
+    function test_branchTarget_targetNot32Bytes_reverts() public {
+        uint256 t = 7;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode,) = _leafRef(key);
+        bytes[] memory items = _branchItems(t, 0, 17, RLP.encode(new bytes(31)));
+        (bytes32 root, bytes[] memory proof) = _branchProof(items, leafNode);
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
+        h.verifyInclusion(root, key, proof);
+    }
+
+    function test_branchTarget_emptyTarget_strictReverts_lenientReturnsEmpty() public {
+        uint256 t = 11;
+        bytes32 key = _routedKey(t);
+        (bytes memory leafNode,) = _leafRef(key);
+        (bytes32 root, bytes[] memory proof) = _branchProof(_branchItems(t, 0x1111111111111111, 17, hex"80"), leafNode);
+        assertEq(h.getOrEmpty(root, key, proof).length, 0);
+        vm.expectRevert(MerklePatriciaProof.MPTKeyAbsent.selector);
+        h.verifyInclusion(root, key, proof);
+    }
+
+    // Item 16 (terminal value) must end the node.
+
+    /// @dev ext (nibbles 0..62) -> branch (nibble 63) -> terminal branch with `terminalItems`.
+    function _terminalProofWith(bytes[] memory terminalItems)
+        private
+        pure
+        returns (bytes32 root, bytes[] memory proof)
+    {
+        bytes memory terminal = RLP.encode(terminalItems);
+        bytes[] memory b1Items = new bytes[](17);
+        bytes memory empty = hex"80";
+        for (uint256 i = 0; i < 17; i++) {
+            b1Items[i] = i == 1 ? RLP.encode(abi.encodePacked(keccak256(terminal))) : empty;
+        }
+        bytes memory b1 = RLP.encode(b1Items);
+        bytes memory ext = _pathNode(KEY_HASH_1, 0, 63, false, RLP.encode(abi.encodePacked(keccak256(b1))));
+        root = keccak256(ext);
+        proof = new bytes[](3);
+        proof[0] = ext;
+        proof[1] = b1;
+        proof[2] = terminal;
+    }
+
+    function _terminalItems(uint256 mask, uint256 n) private pure returns (bytes[] memory items) {
+        items = new bytes[](n);
+        for (uint256 i = 0; i < n; i++) {
+            items[i] = i == 16 ? RLP.encode(VALUE) : _filler(_fillerKind(mask, i), i);
+        }
+    }
+
+    function testFuzz_branchTarget_terminalValue_mixedFillers(uint256 mask) public view {
+        (bytes32 root, bytes[] memory proof) = _terminalProofWith(_terminalItems(mask, 17));
+        assertEq(h.verifyInclusion(root, KEY_HASH_1, proof), RLP.encode(VALUE));
+    }
+
+    function test_branchTarget_terminal_trailingItem_reverts() public {
+        (bytes32 root, bytes[] memory proof) = _terminalProofWith(_terminalItems(0, 18));
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusion(root, KEY_HASH_1, proof);
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.getOrEmpty(root, KEY_HASH_1, proof);
+    }
+
+    function test_branchTarget_terminal_missingItem16_reverts() public {
+        (bytes32 root, bytes[] memory proof) = _terminalProofWith(_terminalItems(0, 16));
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidNode.selector);
+        h.verifyInclusion(root, KEY_HASH_1, proof);
+    }
+
+    // ── node-shape checks left to the hash binding ─────────────────────────────
+
+    /// @dev A node that is a byte string, not a list, is no longer rejected up front; its payload is
+    ///      parsed as items and fails on whatever it holds (here an empty path).
+    function test_verifyInclusion_stringNode_failsOnItsPayload() public {
+        bytes memory node = RLP.encode(bytes(hex"8080"));
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = node;
+        vm.expectRevert(MerklePatriciaProof.MPTInvalidPathPrefix.selector);
+        h.verifyInclusion(keccak256(node), KEY_HASH_0, proof);
+    }
+
+    /// @dev Bytes after the node's list are not rejected up front; the extra length makes a
+    ///      2-item leaf read as a branch, so the walk fails on the leaf's path item instead.
+    function test_verifyInclusion_trailingBytesAfterNodeList_failOnReinterpretation() public {
+        (, bytes[] memory leafProof) = _leafProof(KEY_HASH_0, hex"cafe");
+        bytes memory node = abi.encodePacked(leafProof[0], hex"00");
+        bytes[] memory proof = new bytes[](1);
+        proof[0] = node;
+        vm.expectRevert(MerklePatriciaProof.MPTInlineNodeUnsupported.selector);
+        h.verifyInclusion(keccak256(node), KEY_HASH_0, proof);
     }
 }

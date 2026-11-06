@@ -42,7 +42,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -79,7 +81,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -118,7 +122,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -146,7 +152,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -194,7 +202,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -264,7 +274,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -316,7 +328,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -363,7 +377,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -395,7 +411,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -408,10 +426,10 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
         assertEq(channel.nextMessageId, 1, "no replies queued on a rejected bundle");
     }
 
-    /// @dev An inbound REDACTED message (ClprMessage oneof field 4) is dispatched by generating a
-    ///      REDACTED reply for the destination. No application call, channel stays ACTIVE.
-    function test_redactedMessage_enqueuesRedactedReply() public {
-        // 0x22 = (field_number=4 << 3) | wire_type=2 → REDACTED, empty ClprRedactedMessage body.
+    /// @dev A payload carrying ClprMessagePayload field 4 (the former `redacted_message` variant) is an
+    ///      unknown wire field: the whole bundle is rejected.
+    function test_redactedMessage_rejectsBundle() public {
+        // 0x22 = (field_number=4 << 3) | wire_type=2, empty body.
         bytes memory redacted = hex"2200";
 
         bytes[] memory msgs = new bytes[](1);
@@ -423,21 +441,54 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
+        vm.expectRevert(abi.encodeWithSelector(ClprTypes.ClprUnknownWireField.selector, uint64(4)));
         service.submitBundle(channelId, hex"00FF");
+    }
+
+    function test_replyWithRemovedStatus_rejectsBundle() public {
+        _registerTestConnector();
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"0001");
+
+        for (uint64 status = 4; status <= 5; status++) {
+            bytes memory reply = abi.encodePacked(
+                ClprProtobufHelpers.encodeFieldKey(2, 2),
+                ClprProtobufHelpers.encodeLengthDelimited(
+                    abi.encodePacked(
+                        ClprProtobufHelpers.encodeVarintField(1, 1), ClprProtobufHelpers.encodeVarintField(2, status)
+                    )
+                )
+            );
+            bytes[] memory msgs = new bytes[](1);
+            msgs[0] = reply;
+            bytes32 hash = sha256(abi.encodePacked(bytes32(0), sha256(reply)));
+            verifier.setVerifyBundleResult(
+                ClprTypes.QueueMetadata({
+                    nextMessageId: 2,
+                    sentRunningHash: hash,
+                    receivedMessageId: 1,
+                    receivedRunningHash: bytes32(0),
+                    state: ClprTypes.ChannelStatus.ACTIVE,
+                    endpointManifestVersion: 0,
+                    lastMessageId: 1,
+                    lastMessageRunningHash: hash
+                }),
+                msgs
+            );
+
+            vm.expectRevert(ClprTypes.ClprBundleVerificationFailed.selector);
+            service.submitBundle(channelId, hex"00FF");
+        }
 
         ClprTypes.Channel memory channel = service.getChannel(channelId);
-        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "channel stays ACTIVE");
-        assertEq(channel.receivedMessageId, 1, "the redacted message is marked received");
-        assertEq(channel.nextMessageId, 2, "a REDACTED reply is queued");
-
-        ClprTypes.MessageValue memory reply = service.getMessage(channelId, 1);
-        ClprTypes.DecodedReply memory dr = ClprProtobuf.decodeReplyMessage(reply.payload);
-        assertEq(dr.messageId, 1);
-        assertEq(uint8(dr.status), uint8(ClprTypes.ReplyStatus.REDACTED));
+        assertEq(channel.ackedMessageId, 0, "the outbound DATA stays unacked");
+        assertEq(channel.receivedMessageId, 0, "no inbound progress on a rejected bundle");
+        assertGt(service.getMessage(channelId, 1).payload.length, 0, "the outbound DATA stays queued");
     }
 
     /// @dev An empty-payload message is unclassifiable (getMessageType has nothing to read). It is
@@ -455,7 +506,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -495,7 +548,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 3,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -556,7 +611,9 @@ contract BundleLib_ParseFailureTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -599,7 +656,8 @@ contract BundleProcessor_ReplyDecodeFailTest is ClprTestBase {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            address(0)
         );
 
         verifier = new MockClprVerifier();
@@ -671,7 +729,9 @@ contract BundleProcessor_ReplyDecodeFailTest is ClprTestBase {
             receivedMessageId: 4,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 4,
+            lastMessageRunningHash: h
         });
         verifier.setVerifyBundleResult(meta, msgs);
 

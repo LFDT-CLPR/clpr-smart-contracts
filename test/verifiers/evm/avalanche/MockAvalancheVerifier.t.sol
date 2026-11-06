@@ -82,7 +82,9 @@ contract MockAvalancheVerifierTest is Test {
             receivedMessageId: 6,
             receivedRunningHash: keccak256("recv"),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 6,
+            lastMessageRunningHash: keccak256("sent")
         });
         bytes memory encoded = ClprProtobuf.encodeBundleContent(meta, payloads);
 

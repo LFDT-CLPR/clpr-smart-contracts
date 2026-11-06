@@ -26,6 +26,7 @@ export interface EconomicConfig {
     connectorInboundGasStipend: bigint;
     maxChannels: number;
     maxConnectors: number;
+    connectorPaymentGasLimit: bigint;
 }
 
 /// Mirrors `script/ClprConfig.sol` defaults.
@@ -50,7 +51,8 @@ export const defaultEconomicConfig: EconomicConfig = {
     connectorQueueQuotaPct: 50,
     connectorInboundGasStipend: 500_000n,
     maxChannels: 0,
-    maxConnectors: 0
+    maxConnectors: 0,
+    connectorPaymentGasLimit: 200_000n
 };
 
 export interface ClprModules {
@@ -82,7 +84,16 @@ export interface DeployParams {
     trustAnchor: `0x${string}`;
     trustAnchorId: `0x${string}`;
     econ: EconomicConfig;
+    /// ERC-20 the service holds and pays stakes, bonds and charges in. Unset means native value.
+    /// Passed to the ClprService constructor; it cannot change afterwards.
+    feeToken?: `0x${string}`;
+    /// `FEE_TOKEN_AMOUNT_ENV` names left unset, so `econ` holds their native-value (wei) defaults.
+    defaultedEconAmounts?: string[];
 }
+
+/// Amounts `applyInitialConfig` will not default for a fee-token service: the defaults are in wei,
+/// while a fee-token service counts them in the token's base units.
+export const FEE_TOKEN_AMOUNT_ENV = ["ECON_MIN_LOCKED_STAKE", "ECON_MIN_ENDPOINT_BOND", "ECON_BASE_PENALTY"] as const;
 
 export function envBigInt(name: string, fallback: bigint): bigint {
     const raw = process.env[name];
@@ -119,7 +130,11 @@ export function loadDeployParams(privateKey: string): DeployParams {
             defaultEconomicConfig.connectorInboundGasStipend
         ),
         maxChannels: envNumber("ECON_MAX_CHANNELS", defaultEconomicConfig.maxChannels),
-        maxConnectors: envNumber("ECON_MAX_CONNECTORS", defaultEconomicConfig.maxConnectors)
+        maxConnectors: envNumber("ECON_MAX_CONNECTORS", defaultEconomicConfig.maxConnectors),
+        connectorPaymentGasLimit: envBigInt(
+            "ECON_CONNECTOR_PAYMENT_GAS_LIMIT",
+            defaultEconomicConfig.connectorPaymentGasLimit
+        )
     };
 
     const serviceAddressRaw = process.env.SERVICE_ADDRESS ?? "";
@@ -141,6 +156,8 @@ export function loadDeployParams(privateKey: string): DeployParams {
               : `0x${trustAnchorIdRaw}`
     ) as `0x${string}`;
 
+    const feeTokenRaw = process.env.FEE_TOKEN ?? "";
+
     return {
         initialOwner,
         protocolVersion: envNumber("PROTOCOL_VERSION", 1),
@@ -149,7 +166,9 @@ export function loadDeployParams(privateKey: string): DeployParams {
         throttles: defaultThrottles,
         trustAnchor,
         trustAnchorId,
-        econ
+        econ,
+        feeToken: feeTokenRaw === "" ? undefined : (feeTokenRaw as `0x${string}`),
+        defaultedEconAmounts: FEE_TOKEN_AMOUNT_ENV.filter((name) => (process.env[name] ?? "") === "")
     };
 }
 

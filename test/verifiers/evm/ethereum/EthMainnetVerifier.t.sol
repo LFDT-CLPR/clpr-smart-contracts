@@ -3,105 +3,18 @@ pragma solidity ^0.8.28;
 
 import {EthMainnetVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthMainnetVerifier.sol";
 import {EthCommitteeFixtures} from "@test/verifiers/evm/ethereum/EthCommitteeFixtures.sol";
+import {
+    EthMainnetVerifierTestHarness,
+    EthMainnetVerifierProofHarness
+} from "@test/verifiers/evm/ethereum/EthVerifierHarnesses.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
 import {ClprCommitteeMerkle} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprCommitteeMerkle.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {ClprBeaconBls} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconBls.sol";
+import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
-import {Memory} from "@openzeppelin/contracts/utils/Memory.sol";
-
-/// @dev Exposes the verifier internals (new sync-committee model) for unit testing.
-contract EthMainnetVerifierTestHarness is EthMainnetVerifier {
-    constructor() {}
-
-    function decodeTrustAnchor(bytes calldata ta)
-        external
-        pure
-        returns (
-            bytes32 committeeRoot,
-            bytes memory aggregatePubkey,
-            bytes32 gvr,
-            bytes memory forkVersion,
-            bytes32 channelId,
-            bytes32 codeHash
-        )
-    {
-        // Mirror verifyBundle's flat-anchor reads (fixed offsets).
-        if (ta.length != TRUST_ANCHOR_LENGTH) revert InvalidTrustAnchor();
-        gvr = bytes32(ta[ANCHOR_OFF_GVR:ANCHOR_OFF_GVR + 32]);
-        forkVersion = ta[ANCHOR_OFF_FORK_VERSION:ANCHOR_OFF_FORK_VERSION + FORK_VERSION_LENGTH];
-        channelId = bytes32(ta[ANCHOR_OFF_CHANNEL_ID:ANCHOR_OFF_CHANNEL_ID + 32]);
-        aggregatePubkey = ta[ANCHOR_OFF_AGGREGATE:ANCHOR_OFF_AGGREGATE + BLS_PUBKEY_LENGTH];
-        committeeRoot = bytes32(ta[ANCHOR_OFF_COMMITTEE_ROOT:ANCHOR_OFF_COMMITTEE_ROOT + 32]);
-        codeHash = bytes32(ta[ANCHOR_OFF_CODE_HASH:ANCHOR_OFF_CODE_HASH + 32]);
-    }
-
-    function encodeTrustAnchor(
-        bytes[] memory pubkeys,
-        bytes memory aggregatePubkey,
-        bytes32 gvr,
-        bytes memory forkVersion,
-        bytes32 channelId,
-        bytes32 codeHash
-    ) external pure returns (bytes memory) {
-        return _encodeTrustAnchor(pubkeys, aggregatePubkey, gvr, forkVersion, channelId, codeHash);
-    }
-
-    function decodeBundleContent(bytes memory data) external pure returns (bytes[] memory messages) {
-        return _decodeBundleContent(data);
-    }
-
-    // External wrappers so vm.expectRevert can catch reverts from the internal library functions.
-    function merkleizeExt(bytes32[] memory chunks) external pure returns (bytes32) {
-        return ClprBeaconSsz.merkleize(chunks);
-    }
-}
-
-/// @dev Exposes the internal BLS + rotation paths so they can be exercised directly with a
-///      SELF-CONSISTENT instance (every committee member is the G1 generator, secret key 1), without a
-///      full MPT/SSZ bundle or a live chain. The aggregate of N members is N·G1 and the matching
-///      signature is N·H(signingRoot), so `aggregateVerifyComplement` succeeds; the rotation committees are
-///      the (compressed, uncompressed) generator so the compress-and-bind check passes and the SSZ
-///      committee root is provable. (forge coverage only sees Foundry tests, so these paths — covered
-///      end-to-end by the e2e spec — also need a Foundry exercise.)
-contract EthMainnetVerifierProofHarness is EthMainnetVerifier {
-    constructor() {}
-
-    /// `nonSignerWrapperRlp` is `RLP[nonSignerProofs]` (a single-item outer list), so this mirrors
-    /// how `verifyBundle` slices payload item 9 before calling `_verifyBls`.
-    function verifyBlsExt(
-        bytes calldata trustAnchor,
-        bytes memory nonSignerWrapperRlp,
-        bytes memory signature,
-        bytes memory bits,
-        bytes32 beaconBlockRoot,
-        bytes memory forkVersion,
-        bytes32 gvr
-    ) external view {
-        Memory.Slice[] memory items = RLP.decodeList(nonSignerWrapperRlp);
-        _verifyBls(trustAnchor, items[0], signature, bits, beaconBlockRoot, forkVersion, gvr);
-    }
-
-    /// `rotationRlp` is `RLP[nextCommittee, nextCommitteeBranch]` (the two bundle items), so this
-    /// mirrors how `verifyBundle` slices the payload before calling `_verifyRotation`.
-    function verifyRotationExt(
-        bytes memory rotationRlp,
-        bytes32 stateRoot,
-        bytes32 gvr,
-        bytes memory forkVersion,
-        bytes32 channelId,
-        bytes32 codeHash
-    ) external view returns (bytes memory) {
-        Memory.Slice[] memory items = RLP.decodeList(rotationRlp);
-        return _verifyRotation(items[0], items[1], stateRoot, gvr, forkVersion, channelId, codeHash);
-    }
-
-    function verifyProofOrRevertExt(bytes32 leaf, bytes32[] memory proof, bytes32 root, uint256 gindex) external pure {
-        ClprBeaconSsz.verifyProofOrRevert(leaf, proof, root, gindex);
-    }
-}
 
 /// @dev Unit tests for the sync-committee EthMainnetVerifier: the SSZ primitives, the RLP
 ///      trust-anchor round-trip, the decoders, verifyConfig, payload-shape and supermajority guards.
@@ -109,13 +22,9 @@ contract EthMainnetVerifierProofHarness is EthMainnetVerifier {
 ///      test/e2e/tests/verifiers/eth-verifier.spec.ts.
 contract EthMainnetVerifierTest is EthCommitteeFixtures {
     address internal constant SERVICE_ADDR = 0x5e7c1Ce1acCE5E7C1Ce1ACCe5e7c1CE1ACce5e7C;
-    bytes32 internal constant SERVICE_CODE_HASH = bytes32(uint256(0xC0DE));
-    bytes4 internal constant FORK_VERSION = 0x04000000; // Deneb mainnet
-    bytes32 internal constant GVR = bytes32(uint256(0x9999));
 
-    uint256 internal constant GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE = 87;
     bytes32 internal constant BEACON_BLOCK_ROOT = bytes32(uint256(0x1234));
-    bytes32 internal constant CHANNEL_ID = bytes32(uint256(0xC04EC));
+    uint64 internal constant ANCHOR_PERIOD = 4; // window { C4, C5 } for the shape/guard tests
 
     EthMainnetVerifierTestHarness internal exposed; // BLS-bypass harness + exposed internals
     EthMainnetVerifierProofHarness internal harness; // Exposing bls (not bypassed)
@@ -206,26 +115,29 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
     function test_trustAnchor_encodeDecode_roundtrip() public view {
         bytes[] memory pubkeys = _pubkeys(0x33);
         bytes memory agg = _pubkey(0x44);
-        bytes memory forkVersion = abi.encodePacked(FORK_VERSION);
-        bytes32 channelId = bytes32(uint256(0xC04EC));
+        bytes[] memory nextPubkeys = _pubkeys(0x55);
+        bytes memory nextAgg = _pubkey(0x66);
+        EthMainnetVerifier.AnchorScalars memory scalars = _scalars(ANCHOR_PERIOD);
+        bytes memory anchor = exposed.encodeTrustAnchor(scalars, pubkeys, agg, nextPubkeys, nextAgg);
+        assertEq(anchor.length, 428, "window anchor is 428 bytes");
 
-        bytes memory anchor = exposed.encodeTrustAnchor(pubkeys, agg, GVR, forkVersion, channelId, SERVICE_CODE_HASH);
-        assertEq(anchor.length, 260, "flat anchor is 260 bytes");
-        (
-            bytes32 gotRoot,
-            bytes memory gotAgg,
-            bytes32 gotGvr,
-            bytes memory gotFork,
-            bytes32 gotChannelId,
-            bytes32 gotCodeHash
-        ) = exposed.decodeTrustAnchor(anchor);
+        EthMainnetVerifier.AnchorScalars memory got = exposed.decodeTrustAnchor(anchor);
+        assertEq(got.gvr, GVR);
+        assertEq(keccak256(got.forkVersion), keccak256(scalars.forkVersion));
+        assertEq(got.channelId, CHANNEL_ID);
+        assertEq(got.codeHash, SERVICE_CODE_HASH, "code hash committed");
+        assertEq(got.period, ANCHOR_PERIOD, "window start period committed");
 
-        assertEq(gotRoot, ClprCommitteeMerkle.root(pubkeys), "committee Merkle root committed");
-        assertEq(keccak256(gotAgg), keccak256(agg));
-        assertEq(gotGvr, GVR);
-        assertEq(keccak256(gotFork), keccak256(forkVersion));
-        assertEq(gotChannelId, channelId);
-        assertEq(gotCodeHash, SERVICE_CODE_HASH, "code hash committed");
+        (bytes memory gotAgg, bytes32 gotRoot) = exposed.decodeCommitteeSlot(anchor, 0);
+        assertEq(keccak256(gotAgg), keccak256(agg), "current aggregate");
+        assertEq(gotRoot, ClprCommitteeMerkle.root(pubkeys), "current committee Merkle root");
+
+        (bytes memory gotNextAgg, bytes32 gotNextRoot) = exposed.decodeCommitteeSlot(anchor, 1);
+        assertEq(keccak256(gotNextAgg), keccak256(nextAgg), "next aggregate");
+        assertEq(gotNextRoot, ClprCommitteeMerkle.root(nextPubkeys), "next committee Merkle root");
+
+        // The two members must be independently addressable — a stride bug would alias them.
+        assertTrue(keccak256(gotAgg) != keccak256(gotNextAgg), "window members are distinct");
     }
 
     function test_decodeTrustAnchor_revertsOnWrongLength() public {
@@ -289,10 +201,57 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         // _toBytes4 and the complement BLS path (aggregate − 170 non-participants = 342 participants,
         // matching the 342·H signature).
         bytes memory anchor = exposed.encodeTrustAnchor(
-            pubkeys, aggregate, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
+            _scalars(ANCHOR_PERIOD),
+            pubkeys,
+            aggregate,
+            _pubkeys(0x55), // `next` is filler: these exercise committee 0 only
+            _pubkey(0x66)
         );
         bytes memory wrapper = _nonSignerWrapper(genUncompressed, SYNC_COMMITTEE_SIZE - SUPERMAJORITY);
         harness.verifyBlsExt(anchor, wrapper, sig, bits, BEACON_BLOCK_ROOT, abi.encodePacked(FORK_VERSION), GVR);
+    }
+
+    /// @dev Guards the fixture generalisation the window tests rest on: two committees at different
+    ///      secret keys must differ in BOTH the stored aggregate and the committee Merkle root, and a
+    ///      signature by one must fail against the other.
+    function test_fixtures_distinctSecretKeys_produceDistinctCommittees() public view {
+        bytes[] memory keys1 = _uncompressedKeys(SYNC_COMMITTEE_SIZE, 1);
+        bytes[] memory keys2 = _uncompressedKeys(SYNC_COMMITTEE_SIZE, 2);
+        bytes memory agg1 = _committeeAggregate(1);
+        bytes memory agg2 = _committeeAggregate(2);
+
+        assertTrue(keccak256(keys1[0]) != keccak256(keys2[0]), "member keys must differ");
+        assertTrue(keccak256(agg1) != keccak256(agg2), "aggregates must differ");
+        assertTrue(
+            ClprCommitteeMerkle.root(keys1) != ClprCommitteeMerkle.root(keys2), "committee Merkle roots must differ"
+        );
+        assertTrue(
+            ClprBeaconSsz.syncCommitteeRootFromUncompressed(keys1, agg1)
+                != ClprBeaconSsz.syncCommitteeRootFromUncompressed(keys2, agg2),
+            "SSZ committee roots must differ"
+        );
+    }
+
+    /// @dev The other half of the guard: committee 2's signature must not verify under committee 1.
+    function test_fixtures_signatureFromOtherCommittee_reverts() public {
+        bytes[] memory pubkeys = _uncompressedKeys(SYNC_COMMITTEE_SIZE, 1);
+        bytes memory aggregate = _committeeAggregate(1);
+        bytes memory bits = _bits(SYNC_COMMITTEE_SIZE);
+
+        bytes32 domain = ClprBeaconSsz.computeSyncCommitteeDomain(FORK_VERSION, GVR);
+        bytes32 signingRoot = ClprBeaconSsz.computeSigningRoot(BEACON_BLOCK_ROOT, domain);
+        bytes memory wrongSig = _aggSig(signingRoot, SYNC_COMMITTEE_SIZE, 2); // signed by committee 2
+
+        bytes memory anchor = exposed.encodeTrustAnchor(
+            _scalars(ANCHOR_PERIOD),
+            pubkeys,
+            aggregate,
+            _pubkeys(0x55), // `next` is filler: these exercise committee 0 only
+            _pubkey(0x66)
+        );
+        bytes memory wrapper = _nonSignerWrapper(genUncompressed, 0);
+        vm.expectRevert();
+        harness.verifyBlsExt(anchor, wrapper, wrongSig, bits, BEACON_BLOCK_ROOT, abi.encodePacked(FORK_VERSION), GVR);
     }
 
     function test_verifyBls_revertsBelowSupermajority() public {
@@ -304,7 +263,11 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory sig = _aggSig(signingRoot, SUPERMAJORITY - 1);
 
         bytes memory anchor = exposed.encodeTrustAnchor(
-            pubkeys, aggregate, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
+            _scalars(ANCHOR_PERIOD),
+            pubkeys,
+            aggregate,
+            _pubkeys(0x55), // `next` is filler: these exercise committee 0 only
+            _pubkey(0x66)
         );
         // Supermajority is decided from the bits BEFORE any proof material is touched, so an empty
         // non-signer item is fine here.
@@ -330,7 +293,11 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory sig = _aggSig(signingRoot, SUPERMAJORITY);
 
         bytes memory anchor = exposed.encodeTrustAnchor(
-            pubkeys, aggregate, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
+            _scalars(ANCHOR_PERIOD),
+            pubkeys,
+            aggregate,
+            _pubkeys(0x55), // `next` is filler: these exercise committee 0 only
+            _pubkey(0x66)
         );
         // Entries built from a DIFFERENT key than the committee's → root mismatch.
         bytes memory wrapper = _nonSignerWrapper(_pubkey(0x77), SYNC_COMMITTEE_SIZE - SUPERMAJORITY);
@@ -349,7 +316,11 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory sig = _aggSig(signingRoot, SUPERMAJORITY);
 
         bytes memory anchor = exposed.encodeTrustAnchor(
-            pubkeys, aggregate, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
+            _scalars(ANCHOR_PERIOD),
+            pubkeys,
+            aggregate,
+            _pubkeys(0x55), // `next` is filler: these exercise committee 0 only
+            _pubkey(0x66)
         );
         bytes memory wrapper = _nonSignerWrapper(genUncompressed, 0); // …but zero entries supplied
         vm.expectRevert(
@@ -383,11 +354,13 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
     // ── _verifyRotation (uncompressed committee → derive compressed → SSZ root → successor anchor) ─
 
     function test_verifyRotation_succeeds_returnsUncompressedAnchor() public view {
-        (bytes memory rotationRlp, bytes32 stateRoot) = _rotationWithStateRoot(new bytes(0));
+        // Signed one period ahead of the anchor (verified by `next`), proving committee 2 → the window
+        // shifts and a successor anchor comes back.
+        (bytes memory rotationRlp, bytes32 stateRoot) = _rotationPair(2, "");
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
 
-        bytes memory newAnchor = harness.verifyRotationExt(
-            rotationRlp, stateRoot, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        bytes memory newAnchor =
+            harness.verifyRotationExt(rotationRlp, stateRoot, anchor, ANCHOR_PERIOD + 1, ANCHOR_PERIOD + 1, 1);
         assertTrue(newAnchor.length > 0, "successor anchor non-empty");
     }
 
@@ -397,9 +370,8 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = RLP.encode(new bytes[](0)); // nextCommitteeBranch absent → empty RLP list (0xc0)
         bytes memory rotationRlp = RLP.encode(pair);
 
-        bytes memory newAnchor = harness.verifyRotationExt(
-            rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        bytes memory newAnchor =
+            harness.verifyRotationExt(rotationRlp, bytes32(0), _anchor(), ANCHOR_PERIOD, ANCHOR_PERIOD, 0);
         assertEq(newAnchor.length, 0, "no rotation -> empty anchor");
     }
 
@@ -408,11 +380,11 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         // negated generator): it passes the G1ADD on-curve gate, but its sign flag flips the
         // compressed leaf, so the reconstructed root fails the branch → NextCommitteeBranchInvalid.
         (bytes memory rotationRlp, bytes32 stateRoot) =
-            _rotationWithStateRoot(abi.encodePacked(bytes16(0), G1_GEN_X, bytes16(0), G1_GEN_Y_NEG));
+            _rotationPair(1, abi.encodePacked(bytes16(0), G1_GEN_X, bytes16(0), G1_GEN_Y_NEG));
+        // External call precomputed: an armed expectRevert would consume it.
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
         vm.expectRevert(EthMainnetVerifier.NextCommitteeBranchInvalid.selector);
-        harness.verifyRotationExt(
-            rotationRlp, stateRoot, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        harness.verifyRotationExt(rotationRlp, stateRoot, anchor, ANCHOR_PERIOD + 1, ANCHOR_PERIOD + 1, 1);
     }
 
     function test_verifyRotation_revertsOnOffCurveKey() public {
@@ -422,17 +394,17 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         bytes memory garbageY = G1_GEN_Y;
         garbageY[47] = bytes1(uint8(garbageY[47]) + 1);
         (bytes memory rotationRlp, bytes32 stateRoot) =
-            _rotationWithStateRoot(abi.encodePacked(bytes16(0), G1_GEN_X, bytes16(0), garbageY));
+            _rotationPair(1, abi.encodePacked(bytes16(0), G1_GEN_X, bytes16(0), garbageY));
+        // External call precomputed: an armed expectRevert would consume it.
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
         vm.expectRevert(ClprBeaconBls.BlsPointNotOnCurveG1.selector);
-        harness.verifyRotationExt(
-            rotationRlp, stateRoot, GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        harness.verifyRotationExt(rotationRlp, stateRoot, anchor, ANCHOR_PERIOD + 1, ANCHOR_PERIOD + 1, 1);
     }
 
     // ── verifyConfig (non-empty bootstrap) ────────────────────────────────────
 
     function test_verifyConfig_nonEmpty_returnsAnchorAndPeriodId() public view {
-        uint256 slot = 8192 * 5 + 17; // period 5
+        uint256 slot = uint256(SLOTS_PER_SYNC_COMMITTEE_PERIOD) * 5 + 17; // period 5
         bytes memory configRlp = _configPayload(slot);
 
         (,,,,, bytes memory anchor, bytes memory anchorId,) = harness.verifyConfig(configRlp, CHANNEL_ID, "");
@@ -444,18 +416,19 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
     /// @notice The endpoint-limit throttles (maxLocalEndpoints/maxPeerEndpoints) embedded in the
     ///         config proof's ledger configuration round-trip through verifyConfig — not dropped.
     function test_verifyConfig_nonEmpty_carriesEndpointLimits() public view {
-        uint256 slot = 8192 * 5 + 17; // period 5
+        uint256 slot = uint256(SLOTS_PER_SYNC_COMMITTEE_PERIOD) * 5 + 17; // period 5
         bytes[] memory pubkeys = _uncompressedKeys(SYNC_COMMITTEE_SIZE);
         ClprTypes.LedgerConfiguration memory lc;
         lc.throttles.maxLocalEndpoints = 7;
         lc.throttles.maxPeerEndpoints = 13;
-        bytes[] memory cfg = new bytes[](6);
+        bytes[] memory cfg = new bytes[](7);
         cfg[0] = RLP.encode(slot);
         cfg[1] = _encodeCommittee(pubkeys, genUncompressed);
-        cfg[2] = RLP.encode(abi.encodePacked(GVR));
-        cfg[3] = RLP.encode(abi.encodePacked(FORK_VERSION));
-        cfg[4] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
-        cfg[5] = RLP.encode(abi.encodePacked(bytes32(uint256(0xC0DE)))); // expected code hash
+        cfg[2] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 2), _memberKey(2));
+        cfg[3] = RLP.encode(abi.encodePacked(GVR));
+        cfg[4] = RLP.encode(abi.encodePacked(FORK_VERSION));
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(abi.encodePacked(bytes32(uint256(0xC0DE)))); // expected code hash
 
         (,,,, ClprTypes.Throttles memory throttles,,,) = harness.verifyConfig(RLP.encode(cfg), CHANNEL_ID, "");
         assertEq(throttles.maxLocalEndpoints, 7, "maxLocalEndpoints must survive the config proof");
@@ -463,7 +436,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
     }
 
     function test_verifyConfig_revertsOnWrongFieldCount() public {
-        bytes[] memory items = new bytes[](4); // CONFIG_FIELDS is 6
+        bytes[] memory items = new bytes[](4); // CONFIG_FIELDS is 7
         for (uint256 i = 0; i < 4; i++) {
             items[i] = RLP.encode(uint256(0));
         }
@@ -475,7 +448,7 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
     ///      manifest path now verifies the proof (8-field beacon+MPT shape) instead of ignoring it.
     ///      (Full happy-path — real BLS + MPT — is covered by the eth-pos e2e, like verifyBundle.)
     function test_verifyConfig_revertsOnMalformedManifestProof() public {
-        bytes memory configRlp = _configPayload(8192 * 5 + 17);
+        bytes memory configRlp = _configPayload(uint256(SLOTS_PER_SYNC_COMMITTEE_PERIOD) * 5 + 17);
         bytes[] memory badManifestProof = new bytes[](3); // must be CONFIG_MANIFEST_PROOF_FIELDS (8)
         for (uint256 i = 0; i < 3; i++) {
             badManifestProof[i] = RLP.encode(uint256(0));
@@ -484,8 +457,49 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         harness.verifyConfig(configRlp, CHANNEL_ID, RLP.encode(badManifestProof));
     }
 
+    /// @dev The config-time manifest proof is verified against the window's CURRENT member, so its
+    ///      attested header must sit inside the config slot's period.
+    function test_verifyConfig_revertsOnManifestProofOutsideConfigPeriod() public {
+        uint64 configPeriod = 5;
+        bytes memory configRlp = _configPayload(uint256(configPeriod) * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 17);
+
+        bytes[] memory header = new bytes[](5);
+        header[0] = RLP.encode(uint256(17)); // slot 17 → period 0, not the config's period 5
+        header[1] = RLP.encode(uint256(0));
+        header[2] = RLP.encode(bytes32(0));
+        header[3] = RLP.encode(bytes32(0));
+        header[4] = RLP.encode(bytes32(0));
+
+        bytes[] memory manifestProof = new bytes[](8);
+        manifestProof[0] = RLP.encode(header);
+        for (uint256 i = 1; i < 8; i++) {
+            manifestProof[i] = RLP.encode(uint256(0));
+        }
+
+        vm.expectRevert(
+            abi.encodeWithSelector(EthMainnetVerifier.ConfigManifestPeriodMismatch.selector, uint64(0), configPeriod)
+        );
+        harness.verifyConfig(configRlp, CHANNEL_ID, RLP.encode(manifestProof));
+    }
+
+    function test_verifyConfig_revertsWhenBothWindowMembersAreTheSameCommittee() public {
+        bytes[] memory cfg = new bytes[](7);
+        cfg[0] = RLP.encode(uint256(SLOTS_PER_SYNC_COMMITTEE_PERIOD) * 5 + 17);
+        cfg[1] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 1), genUncompressed);
+        cfg[2] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 1), genUncompressed); // same again
+        cfg[3] = RLP.encode(abi.encodePacked(GVR));
+        cfg[4] = RLP.encode(abi.encodePacked(FORK_VERSION));
+        ClprTypes.LedgerConfiguration memory lc;
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
+
+        bytes memory configRlp = RLP.encode(cfg);
+        vm.expectRevert(EthMainnetVerifier.ConfigWindowNotDistinct.selector);
+        harness.verifyConfig(configRlp, CHANNEL_ID, "");
+    }
+
     function test_verifyConfig_revertsOnBadForkVersionLength() public {
-        bytes memory configRlp = _configPayload(8192, abi.encodePacked(bytes3(0x040000))); // 3 bytes, not 4
+        bytes memory configRlp = _configPayload(SLOTS_PER_SYNC_COMMITTEE_PERIOD, abi.encodePacked(bytes3(0x040000))); // 3 bytes, not 4
         vm.expectRevert(EthMainnetVerifier.InvalidConfigPayload.selector);
         harness.verifyConfig(configRlp, CHANNEL_ID, "");
     }
@@ -498,10 +512,10 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[0] = RLP.encode(uint256(1)); // present (first byte != 0x80)
         pair[1] = RLP.encode(new bytes[](0)); // absent branch (0xc0)
         bytes memory rotationRlp = RLP.encode(pair);
+        // External call precomputed: an armed expectRevert would consume it.
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
         vm.expectRevert(EthMainnetVerifier.RotationPairMismatch.selector);
-        harness.verifyRotationExt(
-            rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        harness.verifyRotationExt(rotationRlp, bytes32(0), anchor, ANCHOR_PERIOD, ANCHOR_PERIOD, 0);
     }
 
     function test_verifyRotation_revertsOnInvalidCommitteeShape() public {
@@ -516,10 +530,10 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = _encodeBranch(branch);
         bytes memory rotationRlp = RLP.encode(pair);
 
+        // External call precomputed: an armed expectRevert would consume it.
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
         vm.expectRevert(EthMainnetVerifier.InvalidCommittee.selector);
-        harness.verifyRotationExt(
-            rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        harness.verifyRotationExt(rotationRlp, bytes32(0), anchor, ANCHOR_PERIOD, ANCHOR_PERIOD, 0);
     }
 
     function test_verifyRotation_revertsOnBadBranchDepth() public {
@@ -533,10 +547,10 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = _encodeBranch(branch);
         bytes memory rotationRlp = RLP.encode(pair);
 
+        // External call precomputed: an armed expectRevert would consume it.
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
         vm.expectRevert(EthMainnetVerifier.InvalidBranch.selector);
-        harness.verifyRotationExt(
-            rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        harness.verifyRotationExt(rotationRlp, bytes32(0), anchor, ANCHOR_PERIOD, ANCHOR_PERIOD, 0);
     }
 
     function test_verifyRotation_revertsOnWrongCommitteeShape() public {
@@ -549,10 +563,10 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         pair[1] = _encodeBranch(branch);
         bytes memory rotationRlp = RLP.encode(pair);
 
+        // External call precomputed: an armed expectRevert would consume it.
+        bytes memory anchor = _windowAnchor(exposed, ANCHOR_PERIOD, 1);
         vm.expectRevert(EthMainnetVerifier.InvalidCommittee.selector);
-        harness.verifyRotationExt(
-            rotationRlp, bytes32(0), GVR, abi.encodePacked(FORK_VERSION), CHANNEL_ID, SERVICE_CODE_HASH
-        );
+        harness.verifyRotationExt(rotationRlp, bytes32(0), anchor, ANCHOR_PERIOD, ANCHOR_PERIOD, 0);
     }
 
     // ── ClprBeaconSsz.verifyProofOrRevert convenience wrapper ─────────────────
@@ -579,45 +593,6 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         }
     }
 
-    /// RLP `[nextCommittee, nextCommitteeBranch]` for a generator committee, plus the matching stateRoot
-    /// (the committee root folded up the branch at gindex 87). `mismatch` swaps an uncompressed key.
-    function _rotationWithStateRoot(bytes memory key0Override)
-        internal
-        pure
-        returns (bytes memory rotationRlp, bytes32 stateRoot)
-    {
-        bytes[] memory uncompressed = new bytes[](SYNC_COMMITTEE_SIZE);
-        bytes memory gen = abi.encodePacked(bytes16(0), G1_GEN_X, bytes16(0), G1_GEN_Y);
-        for (uint256 i = 0; i < SYNC_COMMITTEE_SIZE; i++) {
-            uncompressed[i] = gen;
-        }
-        bytes memory uncompressedAgg = gen;
-
-        // Expected SSZ committee root computed INDEPENDENTLY from the compressed keys (test-side
-        // reference), then folded up a synthetic 6-sibling branch — cross-checks the contract's
-        // uncompressed-input reconstruction against the beacon-native encoding.
-        bytes32 committeeRoot = _committeeRootFromCompressed(_compressedKeys(SYNC_COMMITTEE_SIZE), G1_GEN_COMPRESSED);
-        bytes32[] memory branch = new bytes32[](6);
-        for (uint256 i = 0; i < 6; i++) {
-            branch[i] = keccak256(abi.encodePacked("next-committee-branch", i));
-        }
-        stateRoot = _fold(committeeRoot, branch, GINDEX_NEXT_SYNC_COMMITTEE_IN_STATE);
-
-        if (key0Override.length != 0) {
-            uncompressed[0] = key0Override;
-        }
-
-        // Uncompressed-only nextCommittee `[pubkeys512, aggregate]`; the contract derives the compressed
-        // form on-chain to reconstruct the committee root.
-        bytes memory nextCommittee = _encodeCommittee(uncompressed, uncompressedAgg);
-        bytes memory branchRlp = _encodeBranch(branch);
-
-        bytes[] memory pair = new bytes[](2);
-        pair[0] = nextCommittee;
-        pair[1] = branchRlp;
-        rotationRlp = RLP.encode(pair);
-    }
-
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     function _pubkey(uint8 fill) internal pure returns (bytes memory b) {
@@ -636,23 +611,31 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         }
     }
 
+    /// A window anchor over two placeholder committees, current period `ANCHOR_PERIOD`.
     function _anchor() internal view returns (bytes memory) {
-        return exposed.encodeTrustAnchor(
-            _pubkeys(0x33),
-            _pubkey(0x44),
-            GVR,
-            abi.encodePacked(FORK_VERSION),
-            bytes32(uint256(0xC04EC)),
-            SERVICE_CODE_HASH
-        );
+        return _anchor(ANCHOR_PERIOD);
     }
 
-    /// @dev A 10-item bundle whose header + sync aggregate are well-formed (so verifyBundle reaches
+    function _anchor(uint64 period) internal view returns (bytes memory) {
+        return exposed.encodeTrustAnchor(_scalars(period), _pubkeys(0x33), _pubkey(0x44), _pubkeys(0x55), _pubkey(0x66));
+    }
+
+    function _scalars(uint64 period) internal pure returns (EthMainnetVerifier.AnchorScalars memory) {
+        return EthMainnetVerifier.AnchorScalars({
+            gvr: GVR,
+            forkVersion: abi.encodePacked(FORK_VERSION),
+            channelId: CHANNEL_ID,
+            codeHash: SERVICE_CODE_HASH,
+            period: period
+        });
+    }
+
+    /// @dev An 11-item bundle whose header + sync aggregate are well-formed (so verifyBundle reaches
     ///      `_verifyBls`); the bits are all-zero ⇒ zero participants ⇒ the supermajority gate reverts
     ///      (before the non-signer item is touched). The remaining items are placeholders.
     function _payloadReachingBls() internal pure returns (bytes memory) {
         bytes[] memory header = new bytes[](5);
-        header[0] = RLP.encode(uint256(100)); // slot
+        header[0] = RLP.encode(uint256(ANCHOR_PERIOD) * SLOTS_PER_SYNC_COMMITTEE_PERIOD); // slot, inside the anchor period
         header[1] = RLP.encode(uint256(7)); // proposerIndex
         header[2] = RLP.encode(bytes32(uint256(1))); // parentRoot
         header[3] = RLP.encode(bytes32(uint256(2))); // stateRoot
@@ -662,61 +645,37 @@ contract EthMainnetVerifierTest is EthCommitteeFixtures {
         agg[0] = RLP.encode(new bytes(64)); // bits
         agg[1] = RLP.encode(new bytes(256)); // signature (256-byte uncompressed G2)
 
-        bytes[] memory top = new bytes[](10);
+        bytes[] memory top = new bytes[](11);
         top[0] = RLP.encode(header);
-        top[1] = RLP.encode(agg);
-        top[2] = RLP.encode(bytes32(uint256(0xEE))); // executionStateRoot
-        top[3] = hex"c0"; // executionBranch: empty list ⇒ depth mismatch (InvalidBranch)
-        top[4] = hex"80"; // nextCommittee absent
-        top[5] = hex"c0"; // nextCommitteeBranch absent
-        top[6] = hex"c0"; // accountProof
-        top[7] = hex"c0"; // storageProof
-        top[8] = RLP.encode(new bytes(0)); // bundleContent
-        top[9] = hex"c0"; // nonSignerProofs: empty list
+        // signatureSlot: one slot after the attested header, so the same period selects `current`.
+        top[1] = RLP.encode(uint256(ANCHOR_PERIOD) * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1);
+        top[2] = RLP.encode(agg);
+        top[3] = RLP.encode(bytes32(uint256(0xEE))); // executionStateRoot
+        top[4] = hex"c0"; // executionBranch: empty list ⇒ depth mismatch (InvalidBranch)
+        top[5] = hex"80"; // nextCommittee absent
+        top[6] = hex"c0"; // nextCommitteeBranch absent
+        top[7] = hex"c0"; // accountProof
+        top[8] = hex"c0"; // storageProof
+        top[9] = RLP.encode(new bytes(0)); // bundleContent
+        top[10] = hex"c0"; // nonSignerProofs: empty list
         return RLP.encode(top);
     }
 
-    /// Config payload RLP `[slot, syncCommittee, gvr, forkVersion, ledgerConfiguration]`. The committee
-    /// is the (uncompressed) generator (verifyConfig does not BLS-verify); the ledger is empty bytes so
-    /// `decodeControlMessage` returns defaults.
     function _configPayload(uint256 slot) internal view returns (bytes memory) {
         return _configPayload(slot, abi.encodePacked(FORK_VERSION));
     }
 
     function _configPayload(uint256 slot, bytes memory forkVersion) internal view returns (bytes memory) {
-        bytes[] memory pubkeys = _uncompressedKeys(SYNC_COMMITTEE_SIZE);
-        bytes[] memory cfg = new bytes[](6);
+        bytes[] memory cfg = new bytes[](7);
         cfg[0] = RLP.encode(slot);
-        cfg[1] = _encodeCommittee(pubkeys, genUncompressed);
-        cfg[2] = RLP.encode(abi.encodePacked(GVR));
-        cfg[3] = RLP.encode(forkVersion);
+        cfg[1] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 1), genUncompressed);
+        cfg[2] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 2), _memberKey(2));
+        cfg[3] = RLP.encode(abi.encodePacked(GVR));
+        cfg[4] = RLP.encode(forkVersion);
         // A valid (default) ControlMessage so decodeControlMessage round-trips.
         ClprTypes.LedgerConfiguration memory lc;
-        cfg[4] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
-        cfg[5] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
         return RLP.encode(cfg);
-    }
-
-    function _encodeBranch(bytes32[] memory branch) internal pure returns (bytes memory) {
-        bytes[] memory enc = new bytes[](branch.length);
-        for (uint256 i = 0; i < branch.length; i++) {
-            enc[i] = RLP.encode(abi.encodePacked(branch[i]));
-        }
-        return RLP.encode(enc);
-    }
-
-    /// Fold a leaf up to its SSZ root using the same rule as ClprBeaconSsz.verifyProof.
-    function _fold(bytes32 leaf, bytes32[] memory branch, uint256 gindex) internal pure returns (bytes32) {
-        bytes32 computed = leaf;
-        uint256 idx = gindex;
-        for (uint256 i = 0; i < branch.length; i++) {
-            if (idx & 1 == 1) {
-                computed = sha256(abi.encodePacked(branch[i], computed));
-            } else {
-                computed = sha256(abi.encodePacked(computed, branch[i]));
-            }
-            idx >>= 1;
-        }
-        return computed;
     }
 }

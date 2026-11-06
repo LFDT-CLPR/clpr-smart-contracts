@@ -8,6 +8,7 @@ import {WRAPSVerifierContract} from "@hiero-ledger/clpr/verifiers/hiero/wraps/WR
 import {PoseidonBN254Contract} from "@hiero-ledger/clpr/verifiers/hiero/wraps/PoseidonBN254Contract.sol";
 import {PoseidonPermuteA} from "@hiero-ledger/clpr/verifiers/hiero/wraps/PoseidonPermuteA.sol";
 import {PoseidonPermuteB} from "@hiero-ledger/clpr/verifiers/hiero/wraps/PoseidonPermuteB.sol";
+import {BN254Util} from "@hiero-ledger/clpr/verifiers/hiero/wraps/BN254Util.sol";
 import {HieroVerifier} from "@hiero-ledger/clpr/verifiers/hiero/HieroVerifier.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprStateProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprStateProof.sol";
@@ -15,6 +16,7 @@ import {ClprMerkleProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprMerk
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {Sha384} from "@hiero-ledger/clpr/libraries/crypto/Sha384.sol";
 
 /// @dev Integration test for HieroVerifier.verifyBundle using real state-proof data
 ///      captured from a localnet block. Fixtures live in test/verifiers/hiero/fixtures/.
@@ -40,6 +42,11 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 contract HieroVerifierTest is Test {
     TSSVerifier internal tssVerifier;
     HieroVerifier internal hieroVerifier;
+    address internal poseidon;
+
+    // Lower bound on the Poseidon hash of the hinTS VK (~1.63M measured on the fixture); a cached
+    // anchor must save at least this much over the cold path.
+    uint256 internal constant POSEIDON_GAS_FLOOR = 1_000_000;
 
     // First 128 bytes of the blockSignature (hintsVK section, n=4).
     // Used as the pinned key in the HieroVerifier constructor.
@@ -57,10 +64,17 @@ contract HieroVerifierTest is Test {
     bytes32 internal constant EXPECTED_RECV_RUNNING_HASH =
         0xfafa3f38458c8b54b86d393432de11d60420705a627f5183d26f18b5f03c6a28;
 
+    // channel_id (field 1) and service_address (field 3) proven in the fixture's ClprChannel leaf.
+    bytes32 internal constant EXPECTED_CHANNEL_ID = 0xe1022276af73c7a88c9fa00f7e844bbc4a8fda0cc6051d9c99926b74cf9c3d84;
+    bytes internal constant PEER_SERVICE_ADDRESS = hex"ade986b5973ec38f3996f3a128f7d8c3e8ffcd9d";
+
+    bytes32 internal constant HINTS_VK_1 = keccak256("hintsVk#1");
+    bytes32 internal constant HINTS_VK_2 = keccak256("hintsVk#2");
+
     function setUp() public {
         address permuteA = deployCode("PoseidonPermuteA.sol:PoseidonPermuteA");
         address permuteB = deployCode("PoseidonPermuteB.sol:PoseidonPermuteB");
-        address poseidon = deployCode("PoseidonBN254Contract.sol:PoseidonBN254Contract", abi.encode(permuteA, permuteB));
+        poseidon = deployCode("PoseidonBN254Contract.sol:PoseidonBN254Contract", abi.encode(permuteA, permuteB));
         address wraps = deployCode("WRAPSVerifierContract.sol:WRAPSVerifierContract", abi.encode(poseidon));
         tssVerifier = TSSVerifier(deployCode("TSSVerifier.sol:TSSVerifier", abi.encode(wraps)));
         hieroVerifier =
@@ -75,6 +89,13 @@ contract HieroVerifierTest is Test {
 
     function _loadTrustAnchor() internal view returns (bytes memory) {
         return vm.readFileBinary("test/verifiers/hiero/fixtures/trustAnchor.bin");
+    }
+
+    /// @dev A channelContext bound to the fixture's proven channel id.
+    function _ctx() internal pure returns (bytes memory) {
+        return ClprTypes.encodeChannelContext(
+            ClprTypes.ChannelContext({channelId: EXPECTED_CHANNEL_ID, remoteServiceAddress: PEER_SERVICE_ADDRESS})
+        );
     }
 
     // ── Decode smoke: state-proof can be parsed and has 2 paths ─────────────
@@ -121,9 +142,16 @@ contract HieroVerifierTest is Test {
         ClprStateProof.StateProofDecoded memory sp = ClprStateProof.decode(proof);
         bytes memory blockRoot = ClprMerkleProof.computeChainedRoot(sp.paths, 0);
 
-        (ClprTypes.Channel memory channel, bytes[] memory payloads, bytes memory manifestWire) =
-            ClprStateProof.extractDecodedQueueData(sp.paths, blockRoot);
+        (
+            ClprTypes.Channel memory channel,
+            bytes[] memory payloads,
+            bytes memory manifestWire,
+            uint64 lastMessageId,
+            bytes32 lastMessageRunningHash
+        ) = ClprStateProof.extractDecodedQueueData(sp.paths, blockRoot);
         assertEq(manifestWire.length, 0, "fixture carries no manifest leaf");
+        assertEq(lastMessageId, 1, "last message id read from the message leaf key");
+        assertEq(lastMessageRunningHash, EXPECTED_SENT_RUNNING_HASH, "bundle ends at the sender's latest message");
 
         // Channel
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "status must be ACTIVE");
@@ -147,24 +175,43 @@ contract HieroVerifierTest is Test {
         bytes memory ta = _loadTrustAnchor();
 
         (ClprTypes.QueueMetadata memory meta, bytes[] memory payloads, bytes memory newTrustAnchor,,) =
-            hieroVerifier.verifyBundle(proof, ta, "");
+            hieroVerifier.verifyBundle(proof, ta, _ctx());
 
         // Structural checks
         assertEq(uint8(meta.state), uint8(ClprTypes.ChannelStatus.ACTIVE), "state must be ACTIVE");
-        assertEq(meta.nextMessageId, 2, "nextMessageId = ackedMessageId(0) + 1 + payloads.length(1)");
+        assertEq(meta.nextMessageId, 2, "nextMessageId is the sender's channel.nextMessageId");
+        assertEq(meta.lastMessageId, 1, "lastMessageId from the message leaf key");
+        assertEq(meta.lastMessageRunningHash, EXPECTED_SENT_RUNNING_HASH, "lastMessageRunningHash mismatch");
         assertEq(meta.receivedMessageId, 1, "receivedMessageId == 1");
         assertEq(meta.sentRunningHash, EXPECTED_SENT_RUNNING_HASH, "sentRunningHash mismatch");
         assertEq(meta.receivedRunningHash, EXPECTED_RECV_RUNNING_HASH, "receivedRunningHash mismatch");
 
         assertEq(payloads.length, 1, "must contain exactly 1 message payload");
         assertTrue(payloads[0].length > 0, "payload must not be empty");
-        assertEq(newTrustAnchor.length, 32, "HieroVerifier returns newTrustAnchor = keccak256(hintsVK)");
+        assertEq(newTrustAnchor.length, 64, "HieroVerifier returns newTrustAnchor = keccak256(hintsVK) || WRAPS step");
 
         console.log("nextMessageId:", meta.nextMessageId);
         console.log("receivedMessageId:", meta.receivedMessageId);
         console.log("payload[0] length:", payloads[0].length);
         console.logBytes32(meta.sentRunningHash);
         console.logBytes32(meta.receivedRunningHash);
+    }
+
+    /// @notice A genuine, correctly-signed proof of one channel must not be accepted for a
+    ///         different local channel id (Finding 2: leaves not bound to the channel).
+    function test_verifyBundle_wrongChannelId_reverts() public {
+        bytes memory proof = _loadProof();
+        bytes memory ta = _loadTrustAnchor();
+
+        bytes memory foreignCtx = ClprTypes.encodeChannelContext(
+            ClprTypes.ChannelContext({
+                channelId: bytes32(uint256(0xBEEF)), // not the fixture's proven channel id
+                remoteServiceAddress: PEER_SERVICE_ADDRESS
+            })
+        );
+
+        vm.expectRevert(HieroVerifier.ClprHieroChannelMismatch.selector);
+        hieroVerifier.verifyBundle(proof, ta, foreignCtx);
     }
 
     // ── Negative tests ───────────────────────────────────────────────────────
@@ -335,15 +382,17 @@ contract HieroVerifierTest is Test {
         hieroVerifier.verifyBundle(new bytes(0), LEDGER_ID, "");
     }
 
-    function test_verifyBundle_shortBlockRoot_reverts() public {
+    function test_verifyBundle_ambiguousContentPath_reverts() public {
         bytes memory dummySig = hex"0102030405";
         bytes memory tssProof = PB.encodeBytesField(ClprStateProof.SBP_BLOCK_SIGNATURE, dummySig);
-        // Path has both MP_HASH (4 bytes) and MP_STATE_ITEM_LEAF set, plus TERMINATOR.
-        // findFirstPath(StateItemLeaf) matches (stateItemLeaf non-empty), but _baseHashOf
-        // checks explicitHash first → returns the 4-byte hash → length check fails at line 84.
+        // Path has both MP_HASH and MP_STATE_ITEM_LEAF set — the leaf-forgery shape:
+        // an explicit hash supplied *alongside* the leaf so authentication would use one
+        // field and extraction the other. _baseHashOf now rejects this ambiguity: a
+        // leaf-bearing path is authenticated by hashing the leaf that extraction consumes,
+        // never by a separately-supplied hash. See HieroLeafForgeryPoC for the exploit.
         bytes memory path = abi.encodePacked(
             PB.encodeVarintField(ClprStateProof.MP_NEXT_PATH_INDEX, uint64(type(uint32).max)), // TERMINATOR
-            PB.encodeBytesField(ClprStateProof.MP_HASH, hex"aabbccdd"), // 4-byte explicitHash
+            PB.encodeBytesField(ClprStateProof.MP_HASH, hex"aabbccdd"), // explicitHash alongside a leaf
             PB.encodeBytesField(ClprStateProof.MP_STATE_ITEM_LEAF, hex"abcd")
         );
         bytes memory stateProof = abi.encodePacked(
@@ -351,7 +400,7 @@ contract HieroVerifierTest is Test {
             PB.encodeBytesField(ClprStateProof.SP_SIGNED_BLOCK_PROOF, tssProof)
         );
 
-        vm.expectRevert(abi.encodeWithSelector(HieroVerifier.ClprHieroBlockHashLength.selector, uint256(4)));
+        vm.expectRevert(ClprStateProof.StateProofPathAmbiguousContent.selector);
         hieroVerifier.verifyBundle(stateProof, LEDGER_ID, "");
     }
 
@@ -393,6 +442,156 @@ contract HieroVerifierTest is Test {
 
         vm.expectRevert(HieroVerifier.ClprHieroNoStateItemLeaf.selector);
         hieroVerifier.verifyBundle(stateProof, LEDGER_ID, "");
+    }
+
+    /// @dev The fixture's message leaf is message 1: with ackedMessageId 1 the bundle starts at acked.
+    function test_verifyBundle_startsAtAcked_reverts() public {
+        _mockTssValid();
+        vm.expectRevert(ClprTypes.ClprBundleStartsAtOrBeforeAcked.selector);
+        hieroVerifier.verifyBundle(_proofWithChannelAcked(1), LEDGER_ID, _ctx());
+    }
+
+    function test_verifyBundle_startsAfterAcked_succeeds() public {
+        _mockTssValid();
+        (ClprTypes.QueueMetadata memory meta, bytes[] memory payloads,,,) =
+            hieroVerifier.verifyBundle(_proofWithChannelAcked(0), LEDGER_ID, _ctx());
+        assertEq(payloads.length, 1);
+        assertEq(meta.lastMessageId, 1);
+    }
+
+    function _mockTssValid() internal {
+        vm.mockCall(address(tssVerifier), abi.encodeWithSelector(TSSVerifier.verifyTss.selector), abi.encode(true, ""));
+    }
+
+    /// @dev A two-leaf StateProof: a synthetic ACTIVE ClprChannel (EXPECTED_CHANNEL_ID, nextMessageId 2,
+    ///      the given ackedMessageId) and the fixture's message-1 leaf, each carrying the other's leaf
+    ///      hash as its sibling so both paths converge on one root.
+    function _proofWithChannelAcked(uint64 ackedMessageId) internal view returns (bytes memory) {
+        return _proofWithChannelAcked(ackedMessageId, hex"01");
+    }
+
+    function _proofWithChannelAcked(uint64 ackedMessageId, bytes memory signature)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes memory channel = abi.encodePacked(
+            PB.encodeBytesField(1, abi.encodePacked(EXPECTED_CHANNEL_ID)),
+            PB.encodeVarintField(7, uint64(ClprTypes.ChannelStatus.ACTIVE)),
+            PB.encodeVarintField(8, 2),
+            PB.encodeVarintField(9, ackedMessageId)
+        );
+        // SV_CHANNEL_TAG is the full wire tag (field << 3 | wire type 2); >> 3 is the field number.
+        bytes memory channelLeaf = PB.encodeBytesField(
+            ClprStateProof.STATE_ITEM_VALUE_FIELD, PB.encodeBytesField(ClprStateProof.SV_CHANNEL_TAG >> 3, channel)
+        );
+        bytes memory messageLeaf = ClprStateProof.decode(_loadProof()).paths[1].stateItemLeaf;
+
+        bytes memory channelHash = Sha384.hash(abi.encodePacked(bytes1(0x00), channelLeaf));
+        bytes memory messageHash = Sha384.hash(abi.encodePacked(bytes1(0x00), messageLeaf));
+        return abi.encodePacked(
+            PB.encodeBytesField(ClprStateProof.SP_PATHS, _leafPath(channelLeaf, messageHash, false)),
+            PB.encodeBytesField(ClprStateProof.SP_PATHS, _leafPath(messageLeaf, channelHash, true)),
+            PB.encodeBytesField(
+                ClprStateProof.SP_SIGNED_BLOCK_PROOF, PB.encodeBytesField(ClprStateProof.SBP_BLOCK_SIGNATURE, signature)
+            )
+        );
+    }
+
+    function _leafPath(bytes memory leaf, bytes memory siblingHash, bool siblingIsLeft)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bytes memory sibling = PB.encodeBytesField(ClprStateProof.SIB_HASH, siblingHash);
+        if (siblingIsLeft) sibling = abi.encodePacked(PB.encodeVarintField(ClprStateProof.SIB_IS_LEFT, 1), sibling);
+        return abi.encodePacked(
+            PB.encodeBytesField(ClprStateProof.MP_SIBLINGS, sibling),
+            PB.encodeVarintField(ClprStateProof.MP_NEXT_PATH_INDEX, uint64(type(uint32).max)),
+            PB.encodeBytesField(ClprStateProof.MP_STATE_ITEM_LEAF, leaf)
+        );
+    }
+
+    function _verifyUnderVk(bytes32 vkHash, uint256 step, bytes memory anchor) internal returns (bytes memory) {
+        bytes memory signature = new bytes(3432);
+        bytes32 stepLe = bytes32(BN254Util._bswap32(step));
+        assembly {
+            mstore(add(add(signature, 0x20), 2728), stepLe)
+        }
+        vm.mockCall(
+            address(tssVerifier),
+            abi.encodeWithSelector(TSSVerifier.verifyTss.selector),
+            abi.encode(true, abi.encodePacked(vkHash))
+        );
+        (,, bytes memory newTrustAnchor,,) =
+            hieroVerifier.verifyBundle(_proofWithChannelAcked(0, signature), anchor, _ctx());
+        return newTrustAnchor;
+    }
+
+    function _applied(bytes memory anchor, bytes memory reported) internal pure returns (bytes memory) {
+        return reported.length > 0 && keccak256(reported) != keccak256(anchor) ? reported : anchor;
+    }
+
+    function test_verifyBundle_hintsVkReplay_2_1_2_keepsNewestAnchor() public {
+        bytes memory anchor = LEDGER_ID;
+
+        bytes memory reported = _verifyUnderVk(HINTS_VK_2, 2, anchor);
+        assertEq(reported, abi.encodePacked(HINTS_VK_2, uint256(2)), "#2 is installed over the ledger id");
+        anchor = _applied(anchor, reported);
+
+        reported = _verifyUnderVk(HINTS_VK_1, 1, anchor);
+        assertEq(reported.length, 0, "older #1 reports no anchor");
+        anchor = _applied(anchor, reported);
+
+        reported = _verifyUnderVk(HINTS_VK_2, 2, anchor);
+        assertEq(reported.length, 0, "current #2 reports no anchor");
+        anchor = _applied(anchor, reported);
+
+        assertEq(anchor, abi.encodePacked(HINTS_VK_2, uint256(2)), "anchor stays at #2");
+    }
+
+    function test_verifyBundle_hintsVkRotation_1_2_movesAnchor() public {
+        bytes memory anchor = _applied(LEDGER_ID, _verifyUnderVk(HINTS_VK_1, 1, LEDGER_ID));
+        assertEq(anchor, abi.encodePacked(HINTS_VK_1, uint256(1)), "#1 installed");
+
+        anchor = _applied(anchor, _verifyUnderVk(HINTS_VK_2, 2, anchor));
+        assertEq(anchor, abi.encodePacked(HINTS_VK_2, uint256(2)), "#2 replaces #1");
+    }
+
+    function test_verifyBundle_otherVkSameStep_reportsNoAnchor() public {
+        bytes memory anchor = abi.encodePacked(HINTS_VK_2, uint256(2));
+        assertEq(_verifyUnderVk(HINTS_VK_1, 2, anchor).length, 0);
+    }
+
+    function test_verifyBundle_realProof_anchorCarriesWrapsStep() public view {
+        bytes memory proof = _loadProof();
+        bytes memory signature = ClprStateProof.decode(proof).signature;
+        bytes memory hintsVk = new bytes(1096);
+        for (uint256 i = 0; i < 1096; i++) {
+            hintsVk[i] = signature[i];
+        }
+
+        (,, bytes memory anchor,,) = hieroVerifier.verifyBundle(proof, _loadTrustAnchor(), _ctx());
+        assertEq(anchor, abi.encodePacked(keccak256(hintsVk), uint256(2)), "keccak256(hintsVk) || step 2");
+
+        (,, bytes memory again,,) = hieroVerifier.verifyBundle(proof, anchor, _ctx());
+        assertEq(again.length, 0, "same VK reports no anchor");
+    }
+
+    function test_verifyBundle_realProof_storedAnchorSkipsPoseidon() public {
+        bytes memory proof = _loadProof();
+
+        uint256 gasBefore = gasleft();
+        (,, bytes memory anchor,,) = hieroVerifier.verifyBundle(proof, _loadTrustAnchor(), _ctx());
+        uint256 coldGas = gasBefore - gasleft();
+        assertEq(anchor.length, 64, "stored anchor is keccak256(hintsVk) || step");
+
+        vm.expectCall(poseidon, abi.encodeWithSelector(PoseidonBN254Contract.hashHintsVk.selector), 0);
+        gasBefore = gasleft();
+        hieroVerifier.verifyBundle(proof, anchor, _ctx());
+        uint256 cachedGas = gasBefore - gasleft();
+
+        assertLt(cachedGas + POSEIDON_GAS_FLOOR, coldGas, "stored anchor must skip the Poseidon hash");
     }
 }
 

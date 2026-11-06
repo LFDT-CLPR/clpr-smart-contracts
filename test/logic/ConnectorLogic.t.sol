@@ -64,13 +64,13 @@ contract ConnectorLogicTest is ClprTestBase {
         _registerTestConnector();
 
         vm.expectRevert(ClprTypes.ClprInsufficientStake.selector);
-        service.topUpConnectorStake{value: 0}(channelId, connectorId);
+        service.topUpConnectorStake(channelId, connectorId, 0);
     }
 
     function test_topUpConnectorStake_revert_connectorNotFound() public {
         bytes32 unknownConnector = keccak256("unknown-connector");
         vm.expectRevert(ClprTypes.ClprConnectorNotFound.selector);
-        service.topUpConnectorStake{value: 0.1 ether}(channelId, unknownConnector);
+        service.topUpConnectorStake{value: 0.1 ether}(channelId, unknownConnector, 0.1 ether);
     }
 
     function test_topUpConnectorStake_success_increasesStake() public {
@@ -79,7 +79,7 @@ contract ConnectorLogicTest is ClprTestBase {
         ClprTypes.Connector memory before = service.getConnector(channelId, connectorId);
         uint256 topUp = 0.2 ether;
 
-        service.topUpConnectorStake{value: topUp}(channelId, connectorId);
+        service.topUpConnectorStake{value: topUp}(channelId, connectorId, topUp);
 
         ClprTypes.Connector memory after_ = service.getConnector(channelId, connectorId);
         assertEq(after_.lockedStake, before.lockedStake + topUp);
@@ -289,7 +289,7 @@ contract ConnectorManagerTest is ClprTestBase {
 
     function test_topUpStake() public {
         _register(1 ether);
-        service.topUpConnectorStake{value: 0.5 ether}(channelId, cid);
+        service.topUpConnectorStake{value: 0.5 ether}(channelId, cid, 0.5 ether);
         assertEq(service.getConnector(channelId, cid).lockedStake, 1.5 ether);
     }
 
@@ -306,24 +306,6 @@ contract ConnectorManagerTest is ClprTestBase {
         vm.prank(admin);
         vm.expectRevert(ClprTypes.ClprConnectorHasInflightMessages.selector);
         service.removeConnector(channelId, cid, address(0x20));
-    }
-
-    function test_removeConnector_succeedsAfterRedact() public {
-        _register(1 ether);
-        _setupChannelForInflightTest();
-
-        uint64 msgId = service.sendMessage(channelId, cid, abi.encodePacked(address(0xDEAD)), hex"01");
-
-        // Owner redacts the DATA message → inflight counter decremented so removeConnector can succeed
-        service.redactMessage(channelId, msgId);
-
-        // removeConnector must now succeed
-        address recipient = address(0x40);
-        vm.prank(admin);
-        service.removeConnector(channelId, cid, recipient);
-
-        assertFalse(service.hasConnector(channelId, cid));
-        assertEq(recipient.balance, 1 ether);
     }
 
     function test_removeConnector_succeeds_afterInflightReplyProcessed() public {

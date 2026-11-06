@@ -312,18 +312,18 @@ contract TSSVerifierHarnessTest is Test {
         }
     }
 
-    // ── _isFpAboveHalf — hi == BLS_FP_HALF_HI (line 552)
+    // ── _isFpAboveHalf — hi == ClprBls12381.P_HALF_HI (line 552)
 
-    /// @dev hi exactly equals BLS_FP_HALF_HI → falls through to line 552 compare.
-    ///      lo32 = 0xFF..FF > BLS_FP_HALF_LO → returns true.
+    /// @dev hi exactly equals ClprBls12381.P_HALF_HI → falls through to line 552 compare.
+    ///      lo32 = 0xFF..FF > ClprBls12381.P_HALF_LO → returns true.
     function test_isFpAboveHalf_hiEquals_coversLine552() public view {
-        // 48-byte Fp value: top 16 bytes = BLS_FP_HALF_HI, bottom 32 = 0xFF..FF
+        // 48-byte Fp value: top 16 bytes = ClprBls12381.P_HALF_HI, bottom 32 = 0xFF..FF
         bytes memory src = abi.encodePacked(
-            bytes16(0x0d0088f51cbff34d258dd3db21a5d66b), // hi == BLS_FP_HALF_HI
-            bytes32(type(uint256).max) // lo32 = 0xFFFF..FF > BLS_FP_HALF_LO
+            bytes16(0x0d0088f51cbff34d258dd3db21a5d66b), // hi == ClprBls12381.P_HALF_HI
+            bytes32(type(uint256).max) // lo32 = 0xFFFF..FF > ClprBls12381.P_HALF_LO
         );
         bool result = harness.callIsFpAboveHalf(src, 0);
-        assertTrue(result, "hi==BLS_FP_HALF_HI and lo32>BLS_FP_HALF_LO should be true");
+        assertTrue(result, "hi==ClprBls12381.P_HALF_HI and lo32>ClprBls12381.P_HALF_LO should be true");
     }
 
     // ── _compressG2Ark — ySign = true (line 621)

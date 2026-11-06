@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ClprTypes, ChannelStatusChanged} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
+import {BundleLib} from "@hiero-ledger/clpr/libraries/service/BundleLib.sol";
 import {ConnectorLib} from "@hiero-ledger/clpr/libraries/service/ConnectorLib.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {LogicModuleBase} from "@hiero-ledger/clpr/logic/base/LogicModuleBase.sol";
@@ -134,30 +135,43 @@ contract ChannelLogic is LogicModuleBase {
     }
 
     /// @notice Close a channel or abandon an unfinished pending commitment.
-    /// @dev Owner-only. Handles two cases:
+    /// @dev Owner-only. Handles three cases:
     ///
-    ///      1. **Active/Paused channel** — transitions the channel to CLOSING
-    ///         and also deletes any pending commitment that shares this channelId
-    ///         (e.g. if the same operator registered a commitment but the channel
-    ///         was completed via a separate reveal flow).
+    ///      1. **Active/Paused channel** — transitions the channel to CLOSING, advancing
+    ///         straight to DRAINED in the same call if no Data Messages remain
+    ///         in the outbound queue. Also deletes any pending commitment that
+    ///         shares this channelId (e.g. if the same operator registered a
+    ///         commitment but the channel was completed via a separate reveal flow).
     ///
-    ///      2. **Pending-only** (registered commitment, no completeChannel yet) —
+    ///      2. **Drained channel** — closes directly to CLOSED, but only once
+    ///         every outbound message has been acknowledged; reverts with
+    ///         `ClprInvalidChannelStatus` otherwise.
+    ///
+    ///      3. **Pending-only** (registered commitment, no completeChannel yet) —
     ///         the channel does not exist in `_channels`, so we look up the
     ///         pending commitment via the reverse index (`_channelIdToCommitment`)
     ///         and delete it. This allows an admin to close an
     ///         abandoned commitment without it accruing forever.
     ///
-    ///      Reverts with `ClprChannelNotFound` if neither a channel record nor
-    ///      a pending commitment exists for the given channelId.
+    ///      Reverts with `ClprInvalidChannelStatus` if the channel exists but is
+    ///      in some status other than ACTIVE, PAUSED, or DRAINED (e.g. already
+    ///      CLOSING or CLOSED), and with `ClprChannelNotFound` if neither a
+    ///      channel record nor a pending commitment exists for the given
+    ///      channelId.
     /// @param _channelId The channel or pending commitment to close.
     function closeChannel(bytes32 _channelId) external onlyService whenEnabled {
         if (_channelExists[_channelId]) {
             ClprTypes.Channel storage channel = _channels[_channelId];
 
-            // DRAINED: admin recovery path (§3.4) — when the endpoint cannot deliver the
-            // close-notification bundle, the admin may force-close directly to CLOSED.
-            // The outbound queue is already fully acknowledged at DRAINED entry.
+            // DRAINED: admin recovery path — when the endpoint cannot deliver the
+            // close-notification bundle, the admin may force-close directly to CLOSED,
+            // but only once every outbound message (including in-flight Responses
+            // generated during CLOSING) has been acknowledged; otherwise this would
+            // abandon a message the peer never received.
             if (channel.status == ClprTypes.ChannelStatus.DRAINED) {
+                if (!BundleLib._allOutboundAcked(channel.nextMessageId, channel.ackedMessageId)) {
+                    revert ClprTypes.ClprInvalidChannelStatus();
+                }
                 channel.status = ClprTypes.ChannelStatus.CLOSED;
                 emit ChannelStatusChanged(_channelId, ClprTypes.ChannelStatus.CLOSED);
                 return;
@@ -167,9 +181,18 @@ contract ChannelLogic is LogicModuleBase {
                 revert ClprTypes.ClprInvalidChannelStatus();
             }
             channel.status = ClprTypes.ChannelStatus.CLOSING;
+            emit ChannelStatusChanged(_channelId, ClprTypes.ChannelStatus.CLOSING);
+
+            // Same drain condition the bundle path uses for CLOSING -> DRAINED: skip
+            // straight to DRAINED when the outbound queue is already empty.
+            if (BundleLib._allDataAcked(channel.lastDataMessageId, channel.ackedMessageId, channel.nextExpectedReplyId))
+            {
+                channel.status = ClprTypes.ChannelStatus.DRAINED;
+                emit ChannelStatusChanged(_channelId, ClprTypes.ChannelStatus.DRAINED);
+            }
+
             // Also delete any pending commitment for this channelId (belt-and-suspenders:
             // normally completeChannel already deleted it, but clean up if not).
-            // cleanup pending commitment only if needed
             bytes32 pendingForCleanup = _channelIdToCommitment[_channelId];
             if (pendingForCleanup != bytes32(0) && _pendingCommitments[pendingForCleanup]) {
                 delete _pendingCommitments[pendingForCleanup];
@@ -178,14 +201,12 @@ contract ChannelLogic is LogicModuleBase {
                 // Fallback: use the commitment stored on the Channel record itself.
                 delete _pendingCommitments[channel.ownershipCommitment];
             }
-            emit ChannelStatusChanged(_channelId, ClprTypes.ChannelStatus.CLOSING);
             return;
         }
         // pending-only path
         bytes32 pending = _channelIdToCommitment[_channelId];
         if (pending == bytes32(0) || !_pendingCommitments[pending]) revert ClprTypes.ClprChannelNotFound();
 
-        // Delete the pending commitment and clean up the reverse index.
         delete _pendingCommitments[pending];
         delete _channelIdToCommitment[_channelId];
     }

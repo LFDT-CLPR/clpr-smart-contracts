@@ -276,6 +276,10 @@ contract SeiCometBftVerifierExtHarness is SeiCometBftVerifier {
 contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
     address internal constant SERVICE_ADDR = 0x5e7c1Ce1acCE5E7C1Ce1ACCe5e7c1CE1ACce5e7C;
     string internal constant CHAIN_ID = "sei-chain-1";
+    /// @dev A ClprBundleContent holding only an empty metadata field (field 1, length 0) and no
+    ///      payloads: these fixtures prove every Channel slot as zero, so the sender has no queued
+    ///      message a payload could stand for.
+    bytes internal constant EMPTY_BUNDLE_CONTENT = hex"0a00";
 
     bytes32 internal constant VAL0_PK = keccak256("sei-validator-0");
     bytes32 internal constant VAL1_PK = keccak256("sei-validator-1");
@@ -1303,18 +1307,15 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         harness.verifyBundle(proofBytes, anchor, _ctx(serviceAddr));
     }
 
-    /// @dev A channel's nextMessageId starts at 1 and only increments (per the CLPR spec), so a
-    ///      proven nextMessageId of 0 means no message was ever sent — a 6-entry (message-bearing)
-    ///      proof for such a channel is inherently invalid. Without an explicit guard this would
-    ///      underflow `nextMessageId - 1` into an opaque arithmetic panic instead of the same
-    ///      StorageKeyMismatch used for every other proof-shape violation in this function.
+    /// @dev A proven nextMessageId of 0 leaves no id for the message entry to prove, so a
+    ///      message-bearing 6-entry proof reverts cleanly rather than underflowing.
     function test_verifyBundle_zeroNextMessageId_sixEntries_reverts() public {
         CometBftLib.SeiValidator[] memory validators = _validators;
         bytes20 serviceAddr = bytes20(SERVICE_ADDR);
         bytes memory anchor = abi.encode(CHAIN_ID, validators);
 
         (bytes memory proofBytes,) = _buildBundleProofWithNStorageEntriesAndNextMessageId(validators, serviceAddr, 6, 0);
-        vm.expectRevert(SeiCometBftVerifier.StorageKeyMismatch.selector);
+        vm.expectRevert(ClprEvmBundleVerifier.LastMessageSlotNotFound.selector);
         harness.verifyBundle(proofBytes, anchor, _ctx(serviceAddr));
     }
 
@@ -1487,9 +1488,8 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         bytes memory commitBytes = _buildCommitBytesWithBitsAndCount(header, hex"C0", 2, false);
         bytes memory stateProofBytes =
             _buildStateProofBytes(header, commitBytes, storageEntries, multistoreProof, bytes("evm"));
-        bytes memory proofBytes = abi.encodePacked(
-            PB.encodeBytesField(1, stateProofBytes), PB.encodeBytesField(2, PB.encodeBytesField(2, hex"aabb"))
-        );
+        bytes memory proofBytes =
+            abi.encodePacked(PB.encodeBytesField(1, stateProofBytes), PB.encodeBytesField(2, EMPTY_BUNDLE_CONTENT));
 
         harness.verifyBundle(proofBytes, anchor, _ctx(serviceAddr));
     }
@@ -2252,7 +2252,7 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
 
         bytes memory stateProofBytes =
             _buildStateProofBytes(header, commitBytes, storageEntries, multistoreProof, bytes("evm"));
-        bytes memory bundleContentBytes = PB.encodeBytesField(2, hex"aabb");
+        bytes memory bundleContentBytes = EMPTY_BUNDLE_CONTENT;
         proofBytes =
             abi.encodePacked(PB.encodeBytesField(1, stateProofBytes), PB.encodeBytesField(2, bundleContentBytes));
     }
@@ -2293,7 +2293,7 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
 
         bytes memory stateProofBytes =
             _buildStateProofBytes(header, commitBytes, storageEntries, multistoreProof, bytes("evm"));
-        bytes memory bundleContentBytes = PB.encodeBytesField(2, hex"aabb");
+        bytes memory bundleContentBytes = EMPTY_BUNDLE_CONTENT;
         proofBytes =
             abi.encodePacked(PB.encodeBytesField(1, stateProofBytes), PB.encodeBytesField(2, bundleContentBytes));
     }
@@ -2326,7 +2326,7 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         );
         bytes memory stateProofBytes =
             _buildStateProofBytes(header, commitBytes, storageEntries, multistoreProof, storeKey);
-        bytes memory bundleContentBytes = PB.encodeBytesField(2, hex"aabb");
+        bytes memory bundleContentBytes = EMPTY_BUNDLE_CONTENT;
         return abi.encodePacked(PB.encodeBytesField(1, stateProofBytes), PB.encodeBytesField(2, bundleContentBytes));
     }
 
@@ -2354,7 +2354,7 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         bytes memory commitBytes = _buildCommitBytesWithBitsAndCount(header, hex"C0", 2, false);
         bytes memory stateProofBytes =
             _buildStateProofBytes(header, commitBytes, storageEntries, multistoreProof, bytes("evm"));
-        bytes memory bundleContentBytes = PB.encodeBytesField(2, hex"aabb");
+        bytes memory bundleContentBytes = EMPTY_BUNDLE_CONTENT;
         return abi.encodePacked(
             PB.encodeBytesField(1, stateProofBytes),
             PB.encodeBytesField(2, bundleContentBytes),
@@ -2422,11 +2422,8 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         uint256 n
     ) internal view returns (bytes memory configProofBytes) {
         bytes memory spKey = abi.encodePacked(uint8(0x03), serviceAddr, bytes32(0));
-        bytes32 expectedSlot;
-        assembly {
-            expectedSlot := or(shl(96, serviceAddr), 0x28)
-        }
-        bytes memory spValue = abi.encodePacked(expectedSlot);
+        // short-bytes(20) layout: [addr 20B][zeros 11B][len*2 = 0x28]
+        bytes memory spValue = abi.encodePacked(serviceAddr, bytes11(0), bytes1(0x28));
         (bytes memory storageEntry, bytes32 iavlRoot) = _buildStorageProofEntry(spKey, spValue);
         (bytes memory multistoreProof, bytes32 appHash) = _buildMultistoreProof(iavlRoot, bytes("evm"));
 
@@ -2603,7 +2600,7 @@ contract SeiCometBftVerifierErrorsTest is SeiSyntheticProofs {
         bytes memory commitBytes = _buildCommitBytesWithBitsAndCount(header, hex"C0", 2, false);
         bytes memory stateProofBytes =
             _buildStateProofBytes(header, commitBytes, storageEntries, multistoreProof, storeKey);
-        bytes memory bundleContentBytes = PB.encodeBytesField(2, hex"aabb");
+        bytes memory bundleContentBytes = EMPTY_BUNDLE_CONTENT;
         return abi.encodePacked(PB.encodeBytesField(1, stateProofBytes), PB.encodeBytesField(2, bundleContentBytes));
     }
 }

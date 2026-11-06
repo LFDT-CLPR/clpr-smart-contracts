@@ -1,10 +1,21 @@
 # Safe Multisig Runbook — ClprService Ownership
 
-This runbook covers the Safe multisig that owns `ClprService`. Ownership of the
-head contract is transferred to the Safe during deployment (via the
-`--transfer-ownership-to-account` flag on `cli.ts`), after which all `onlyOwner`
-functions — e.g. `setClprEnabled` — can only be executed by a transaction that
-meets the Safe's signing threshold.
+This runbook covers the Safe multisig that owns `ClprService`. The deploy CLI
+(`script/deploy/cli.ts`) gives the Safe ownership in one of two ways:
+
+- `INITIAL_OWNER=<Safe>` — the Safe is the `Ownable` owner from construction.
+  The deployer is not the owner, so the CLI applies no config and prints the
+  bootstrap calls the Safe must submit (see "Post-deploy bootstrap" in section 3).
+- `--transfer-ownership-to-account` with `OWNER_ACCOUNT=<Safe>` — the deployer
+  owns the contract during the run, and `transferOwnership(OWNER_ACCOUNT)` is
+  the run's last step. With `--auto-enable`, `initialize(...)` and
+  `setClprEnabled(true)` are applied by the deployer before the transfer;
+  without it, the Safe submits them after the transfer. `transferOwnership`
+  must be sent by the current owner, so this path requires `INITIAL_OWNER` to
+  be unset or equal to the deployer.
+
+After that, every `onlyOwner` function — e.g. `setClprEnabled` — can only be
+executed by a transaction that meets the Safe's signing threshold.
 
 > **Fill in every** `<…>` **placeholder below before treating this document as
 > authoritative.** The signer identities, threshold, addresses, and emergency
@@ -93,7 +104,7 @@ the target; for the first owner in the list, `prevOwner` is the sentinel
   the Safe.
 3. Collect `<threshold>` signatures from current signers.
 4. Execute. Verify with `getOwners()` and `getThreshold()` (commands above).
-5. Update the signer table in §1 of this document and commit it.
+5. Update the signer table in section 1 of this document and commit it.
 
 
 
@@ -103,7 +114,7 @@ the target; for the first owner in the list, `prevOwner` is the sentinel
 2. Propose `removeOwner(<prevOwner>, <ownerToRemove>, <newThreshold>)`. Ensure
   the new threshold is still `≥ 1` and `≤` remaining owner count.
 3. Collect signatures and execute.
-4. Verify on-chain, then update §1 and commit.
+4. Verify on-chain, then update section 1 and commit.
 
 
 
@@ -113,7 +124,7 @@ the target; for the first owner in the list, `prevOwner` is the sentinel
 2. Propose `swapOwner(<prevOwner>, <oldOwner>, <newOwner>)` — threshold is
   unchanged, so this is a single atomic rotation.
 3. Collect signatures and execute.
-4. Verify and update §1.
+4. Verify and update section 1.
 
 > **Threshold safety:** never reduce the owner set below the threshold, and
 > never set the threshold to `0`. Either can permanently lock the Safe. After
@@ -127,13 +138,85 @@ the target; for the first owner in the list, `prevOwner` is the sentinel
 
 Owner-gated actions on `ClprService` (e.g. the CLPR kill switch) are executed as
 Safe transactions whose target is `ClprService` and whose calldata is the
-encoded function call. The call reaches `AdminLogic` via delegatecall and runs
-against the head's storage, where the owner check sees the Safe.
+encoded function call. `ClprService`'s `onlyOwner` modifier (OpenZeppelin
+`Ownable`) checks `msg.sender` — the Safe — before the call is delegated to the
+logic module, which then runs against `ClprService`'s storage.
+
+| Function | Module | Notes |
+| --- | --- | --- |
+| `initialize(...)` | `AdminLogic` | One-time bootstrap; see below. |
+| `setClprEnabled(bool)` | `AdminLogic` | Kill switch. Reverts `ClprNotInitialized` before `initialize`. |
+| `updateLedgerConfiguration(...)`, `updateEconomicConfiguration(...)` | `AdminLogic` | Later reconfiguration. |
+| `addEndpoint(...)`, `updateEndpointManifest(...)` | `AdminLogic` | Admit endpoints to the live manifest. |
+| `removeEndpoint(address)` | `AdminLogic` | Not `onlyOwner`: callable by the registrant or the owner. |
+| `closeChannel(bytes32)` | `ChannelLogic` | |
+| `transferOwnership(address)`, `renounceOwnership()` | `Ownable` on `ClprService` | Single-step, not `Ownable2Step`. A transfer to a wrong address, or a renounce, permanently removes every owner-only action, including the kill switch. |
+
+Every logic-module function in this table except `initialize` and
+`setClprEnabled` reverts `ClprDisabled` while the kill switch is off.
 
 If your signers use the Safe web UI or Safe CLI, use those — they handle
 hashing, ordering and submission for you. The procedure below is the
 dependency-free `cast` path, for when the UI is unavailable or a signer is
 working from a terminal.
+
+### Post-deploy bootstrap: `initialize`, then `setClprEnabled(true)`
+
+`ClprService` deploys with `clprEnabled = false`. When the deployer did not
+apply config (see the introduction), the Safe submits two transactions, **in
+this order**:
+
+1. `initialize(serviceAddress, throttles, trustAnchor, trustAnchorId, econConfig)`
+   — applies the ledger and economic configuration atomically while the
+   service is still disabled. It is not gated by the kill switch and reverts
+   `ClprAlreadyInitialized` on a second call.
+2. `setClprEnabled(true)` — only after the config applied in step 1 has been
+   read back and checked (`getLedgerConfiguration()`, `getEconomicConfig()`).
+   It reverts `ClprNotInitialized` if step 1 has not landed.
+
+The deploy CLI applies the same values when the deployer is the owner: the
+throttles and economic defaults in `script/ClprConfig.sol`
+(`defaultThrottles()`, `defaultEconomicConfig()`, mirrored in
+`script/deploy/config.ts`), with `ECON_*` env overrides for the economic
+fields, and `SERVICE_ADDRESS`, `TRUST_ANCHOR`, `TRUST_ANCHOR_ID` from the env
+(empty by default). `trustAnchor` and `trustAnchorId` must both be empty or
+both be set. Encoded with the `script/ClprConfig.sol` defaults:
+
+```bash
+DATA=$(cast calldata \
+  "initialize(bytes,(uint32,uint64,uint64,uint32,uint64,uint32,uint32),bytes,bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32))" \
+  <SERVICE_ADDRESS> \
+  "(100,1024,1000000,1000,1048576,0,0)" \
+  <TRUST_ANCHOR or 0x> <TRUST_ANCHOR_ID or 0x> \
+  "(1000000000000000,10,100000000000000000,0,10000000000000000,2,5,50,500000,0,0)")
+```
+
+The throttle tuple is `(maxMessagesPerBundle, maxMessagePayloadBytes,
+maxGasPerMessage, maxQueueDepth, maxSyncBytes, maxLocalEndpoints,
+maxPeerEndpoints)`; the economic tuple is `(messageExecutionCost,
+endpointMarginPercent, minLockedStake, minEndpointBond, basePenalty,
+penaltyMultiplier, slashBanThreshold, connectorQueueQuotaPct,
+connectorInboundGasStipend, maxChannels, maxConnectors,
+connectorPaymentGasLimit)`, amounts in wei. Run
+each call through the signing procedure below, with this `DATA` in place of its
+step 1 (`DATA=$(cast calldata "setClprEnabled(bool)" true)` for the second
+call), re-reading the Safe nonce for the second one.
+
+`connectorInboundGasStipend` is all the gas a connector's `onInboundMessage`
+notification receives; 0 turns the notification off. No minimum is enforced, so
+size it for the connectors on the channel. A connector's `payForExecution`
+receives `connectorPaymentGasLimit`. Below 50,000 the call reverts with
+`ClprInvalidConfiguration`; at or above it, a connector whose payment needs more
+is slashed on every charge, so check the registered connectors before lowering it.
+
+Raising a budget has a limit too. A callback that gets its full budget
+(`throttles.maxGasPerMessage` for the application, `connectorPaymentGasLimit` for
+`payForExecution`, or `connectorInboundGasStipend` for `onInboundMessage`) needs
+`budget + budget / 63`
+of gas left when it is called, after
+proof verification. If that cannot fit the chain's per-transaction gas cap
+(2^24 on Osaka chains, 15M on Hedera), such bundles revert with
+`InsufficientGasForCall` until the budget is lowered.
 
 ### Signing and executing with `cast`
 
@@ -163,7 +246,7 @@ signature over it — `--no-hash` is required because the value is already a
 
 ```bash
 # 4. Run once per signer, on that signer's own machine. Signers whose key
-#     custody is a hardware wallet (see §1) should use --ledger / --trezor
+#     custody is a hardware wallet (see section 1) should use --ledger / --trezor
 #     instead of --private-key; a raw key should never leave its custody.
 cast wallet sign --no-hash $SAFE_TX_HASH --ledger
 ```
@@ -225,7 +308,7 @@ cast receipt <TX_HASH> --rpc-url $RPC
 
 Confirm `ExecutionSuccess` is present, then confirm the *target's* own event also
 fired (for the kill switch, `ClprEnabledChanged` — see
-`[docs/runbooks/kill-switch.md](runbooks/kill-switch.md)`).
+[`docs/runbooks/kill-switch.md`](runbooks/kill-switch.md)).
 
 ### Common failure codes
 
@@ -255,9 +338,9 @@ fired (for the kill switch, `ClprEnabledChanged` — see
 1. **Immediately** convene the remaining trusted signers out-of-band via the
   emergency contacts above.
 2. If the kill switch is the right mitigation, propose and execute
-  `setClprEnabled(false)` as a Safe transaction (§3) — this requires only the
+  `setClprEnabled(false)` as a Safe transaction (section 3) — this requires only the
    normal threshold and does not depend on removing the compromised key first.
-3. Rotate out the compromised signer with `swapOwner` (§2). Do this with urgency:
+3. Rotate out the compromised signer with `swapOwner` (section 2). Do this with urgency:
   while the compromised key still counts toward the threshold, an attacker
    holding it reduces the effective security margin.
 4. If the number of compromised keys approaches the threshold, treat as a

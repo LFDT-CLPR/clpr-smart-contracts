@@ -14,7 +14,6 @@ import {ClprServiceTestBase} from "@test/helpers/ClprServiceTestBase.sol";
 
 contract MessagingLogicTest is ClprTestBase {
     event MessageQueued(bytes32 indexed channelId, uint64 messageId, ClprTypes.MessageType messageType);
-    event MessageRedacted(bytes32 indexed channelId, uint64 messageId);
 
     function test_maybeEnqueueConfigUpdate_enqueuesControlOnSendMessage() public {
         // Update local ledger configuration so _config.nanosSinceEpoch > channel.lastConfigTimestamp
@@ -192,7 +191,8 @@ contract MessagingLogicTest is ClprTestBase {
             connectorQueueQuotaPct: 10,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
         service.updateEconomicConfiguration(econ);
 
@@ -207,168 +207,6 @@ contract MessagingLogicTest is ClprTestBase {
 
         vm.expectRevert(ClprTypes.ClprQueueQuotaExceeded.selector);
         service.sendMessage(channelId, connectorId, hex"11223344", hex"02");
-    }
-
-    // ── redactMessage ──────────────────────────────────────────────────
-
-    function test_redactMessage_revert_channelNotFound() public {
-        bytes32 unknownId = keccak256("unknown-conn-redact");
-        vm.expectRevert(ClprTypes.ClprChannelNotFound.selector);
-        service.redactMessage(unknownId, 1);
-    }
-
-    function test_redactMessage_revert_invalidMessageId_belowWindow() public {
-        // messageId=0 is always <= ackedMessageId=0; no message queued needed.
-        vm.expectRevert(ClprTypes.ClprInvalidMessageId.selector);
-        service.redactMessage(channelId, 0);
-    }
-
-    function test_redactMessage_replacesPayloadWithRedactedMarkerPreservesHashEmitsEvent() public {
-        service.updateLedgerConfiguration(hex"1234", _defaultThrottles(), "", "");
-        service.updateEconomicConfiguration(_defaultEconomicConfig());
-        bytes32 connId = ConnectorRegistrar.register(
-            service, channelId, keccak256(abi.encodePacked("redact.basic.c")), address(connector), owner, 0.5 ether
-        );
-        (bool ok,) = address(connector).call{value: 0.5 ether}("");
-        require(ok);
-        uint64 msgId = service.sendMessage(channelId, connId, hex"11223344", hex"48454C4C4F");
-        bytes32 hashBefore = service.getMessage(channelId, msgId).runningHashAfterProcessing;
-
-        vm.expectEmit(true, true, false, false, address(service));
-        emit MessageRedacted(channelId, msgId);
-        service.redactMessage(channelId, msgId);
-
-        ClprTypes.MessageValue memory mv = service.getMessage(channelId, msgId);
-        assertEq(
-            uint8(ClprProtobuf.getMessageType(mv.payload)),
-            uint8(ClprTypes.MessageType.REDACTED),
-            "payload must be a REDACTED marker"
-        );
-        assertEq(mv.runningHashAfterProcessing, hashBefore, "running hash must be preserved");
-    }
-
-    // Redacting a DATA message decrements _connectorQueueCounts. Observable via quota:
-    // fill to quota (count=1=quota), redact, then another send succeeds (count back to 0).
-    function test_redactMessage_decrementsQueueCount_freesQuota() public {
-        defaultThrottles.maxQueueDepth = 10;
-        service.updateLedgerConfiguration(hex"1234", defaultThrottles, "", "");
-        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
-        econ.connectorQueueQuotaPct = 10; // quota = floor(10*10/100) = 1
-        service.updateEconomicConfiguration(econ);
-
-        bytes32 connId = ConnectorRegistrar.register(
-            service, channelId, keccak256(abi.encodePacked("redact.quota.c")), address(connector), owner, 0.5 ether
-        );
-        (bool ok,) = address(connector).call{value: 0.5 ether}("");
-        require(ok);
-
-        uint64 msgId = service.sendMessage(channelId, connId, hex"11223344", hex"01"); // count=1=quota
-
-        vm.expectRevert(ClprTypes.ClprQueueQuotaExceeded.selector);
-        service.sendMessage(channelId, connId, hex"11223344", hex"02"); // blocked
-
-        service.redactMessage(channelId, msgId); // count→0
-
-        service.sendMessage(channelId, connId, hex"11223344", hex"03"); // count=0 < quota=1, passes
-    }
-
-    // Redacting a DATA message decrements _connectorInflightCount. Observable via removeConnector:
-    // blocked while inflight > 0, succeeds once the message is redacted.
-    function test_redactMessage_decrementsInflightCount_unblocksRemoveConnector() public {
-        service.updateLedgerConfiguration(hex"1234", _defaultThrottles(), "", "");
-        service.updateEconomicConfiguration(_defaultEconomicConfig());
-        bytes32 connId = ConnectorRegistrar.register(
-            service, channelId, keccak256(abi.encodePacked("redact.inflight.c")), address(connector), owner, 0.5 ether
-        );
-        (bool ok,) = address(connector).call{value: 0.5 ether}("");
-        require(ok);
-
-        uint64 msgId = service.sendMessage(channelId, connId, hex"11223344", hex"01"); // inflight=1
-
-        vm.expectRevert(ClprTypes.ClprConnectorHasInflightMessages.selector);
-        service.removeConnector(channelId, connId, owner); // blocked
-
-        service.redactMessage(channelId, msgId); // inflight→0
-
-        service.removeConnector(channelId, connId, owner); // succeeds
-    }
-
-    // Only DATA messages may be redacted; attempting to redact a CONTROL message must revert.
-    function test_redactMessage_controlMessage_reverts() public {
-        // completeChannel stamps lastConfigTimestamp = block.timestamp * 1e9.
-        // Warp one second before updateLedgerConfiguration so nanosSinceEpoch > lastConfigTimestamp → CONTROL fires.
-        vm.warp(block.timestamp + 1);
-        defaultThrottles.maxQueueDepth = 10;
-        service.updateLedgerConfiguration(hex"1234", defaultThrottles, "", "");
-        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
-        econ.connectorQueueQuotaPct = 10;
-        service.updateEconomicConfiguration(econ);
-
-        bytes32 connId = ConnectorRegistrar.register(
-            service, channelId, keccak256(abi.encodePacked("redact.ctrl.c")), address(connector), owner, 0.5 ether
-        );
-        (bool ok,) = address(connector).call{value: 0.5 ether}("");
-        require(ok);
-
-        // First send: CONTROL injected at nextMessageId, DATA follows.
-        ClprTypes.Channel memory before = service.getChannel(channelId);
-        uint64 controlId = before.nextMessageId;
-        service.sendMessage(channelId, connId, hex"11223344", hex"01");
-
-        // Attempting to redact a CONTROL message must revert.
-        vm.expectRevert(ClprTypes.ClprMessageNotRedactable.selector);
-        service.redactMessage(channelId, controlId);
-    }
-
-    // The redacted payload must be a REDACTED-type message whose embedded hash equals SHA-256(original_payload).
-    function test_redactMessage_storesHashOfOriginalPayload() public {
-        service.updateLedgerConfiguration(hex"1234", _defaultThrottles(), "", "");
-        service.updateEconomicConfiguration(_defaultEconomicConfig());
-        bytes32 connId = ConnectorRegistrar.register(
-            service, channelId, keccak256(abi.encodePacked("redact.hash.c")), address(connector), owner, 0.5 ether
-        );
-        (bool ok,) = address(connector).call{value: 0.5 ether}("");
-        require(ok);
-
-        uint64 msgId = service.sendMessage(channelId, connId, hex"11223344", hex"48454C4C4F");
-        bytes memory originalPayload = service.getMessage(channelId, msgId).payload;
-        bytes32 expectedHash = sha256(originalPayload);
-
-        service.redactMessage(channelId, msgId);
-
-        bytes memory redactedPayload = service.getMessage(channelId, msgId).payload;
-        assertEq(
-            uint8(ClprProtobuf.getMessageType(redactedPayload)),
-            uint8(ClprTypes.MessageType.REDACTED),
-            "redacted slot must carry REDACTED type"
-        );
-        // Decode ClprRedactedMessage { message_hash = 1 } to verify the embedded hash.
-        // Wire: outer field 4 LEN | inner field 1 LEN | 32-byte hash.
-        // Offset 0: field key (1 byte), offset 1: outer len (1 byte),
-        // offset 2: inner field key (1 byte), offset 3: inner len (1 byte), offset 4..35: hash.
-        bytes32 storedHash;
-        assembly {
-            // redactedPayload is a bytes; skip 32-byte length prefix then read from offset 4.
-            storedHash := mload(add(add(redactedPayload, 32), 4))
-        }
-        assertEq(storedHash, expectedHash, "embedded hash must equal SHA-256(original_payload)");
-    }
-
-    // Redacting a message that was already redacted must revert with ClprMessageAlreadyRedacted.
-    function test_redactMessage_revert_alreadyRedacted_detectedViaType() public {
-        service.updateLedgerConfiguration(hex"1234", _defaultThrottles(), "", "");
-        service.updateEconomicConfiguration(_defaultEconomicConfig());
-        bytes32 connId = ConnectorRegistrar.register(
-            service, channelId, keccak256(abi.encodePacked("redact.dup.c")), address(connector), owner, 0.5 ether
-        );
-        (bool ok,) = address(connector).call{value: 0.5 ether}("");
-        require(ok);
-
-        uint64 msgId = service.sendMessage(channelId, connId, hex"11223344", hex"01");
-        service.redactMessage(channelId, msgId); // first redaction: succeeds
-
-        vm.expectRevert(ClprTypes.ClprMessageAlreadyRedacted.selector);
-        service.redactMessage(channelId, msgId); // second redaction: must revert
     }
 
     // Config before _createActiveChannel so channel.lastConfigTimestamp == _config.nanosSinceEpoch;
@@ -512,7 +350,7 @@ contract ClprService_Messaging is ClprServiceTestBase {
     function test_sendMessage_revert_connectorReverts() public {
         _registerTestConnector();
         connector.setAuthorizeReverts(true);
-        vm.expectRevert();
+        vm.expectRevert(bytes("authorize revert"));
         service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
     }
 
@@ -524,7 +362,10 @@ contract ClprService_Messaging is ClprServiceTestBase {
             abi.encodeWithSelector(service.sendMessage.selector, channelId, connectorId, hex"1122334455", hex"02");
         connector.setReentrancy(address(service), reentrantCall);
 
-        vm.expectRevert(); // the inner call reverts via ReentrancyGuard; mock surfaces it
+        // MockClprConnector re-reverts with its own require string, so the guard's
+        // ReentrancyGuardReentrantCall selector is not observable from here. Assert the
+        // wrapper the mock actually produces rather than accepting any revert.
+        vm.expectRevert(bytes("reentrant call failed"));
         service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
     }
 
@@ -656,90 +497,4 @@ contract ClprService_Messaging is ClprServiceTestBase {
     // submitBundle_revert_callerNotRegisteredEndpoint moved to
     // test/logic/bundle-logic/BundleLogic_ErrorHandling.t.sol (tests BundleLogic's endpoint
     // gate, not MessagingLogic).
-}
-
-contract ClprService_Redaction is ClprServiceTestBase {
-    function test_redactMessage() public {
-        _registerTestConnector();
-        uint64 msgId = service.sendMessage(channelId, connectorId, hex"1122334455", hex"48454C4C4F");
-        service.redactMessage(channelId, msgId);
-        ClprTypes.MessageValue memory msg_ = service.getMessage(channelId, msgId);
-        assertEq(uint8(ClprProtobuf.getMessageType(msg_.payload)), uint8(ClprTypes.MessageType.REDACTED));
-    }
-
-    function test_redactMessage_revert_alreadyRedacted() public {
-        _registerTestConnector();
-        uint64 msgId = service.sendMessage(channelId, connectorId, hex"1122334455", hex"48454C4C4F");
-        service.redactMessage(channelId, msgId);
-        vm.expectRevert(ClprTypes.ClprMessageAlreadyRedacted.selector);
-        service.redactMessage(channelId, msgId);
-    }
-
-    function test_redactMessage_revert_notOwner() public {
-        _registerTestConnector();
-        uint64 msgId = service.sendMessage(channelId, connectorId, hex"1122334455", hex"48454C4C4F");
-        vm.prank(address(0x99));
-        vm.expectRevert();
-        service.redactMessage(channelId, msgId);
-    }
-
-    function test_redactMessage_revert_messageIdZero() public {
-        _registerTestConnector();
-        service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
-        vm.expectRevert(ClprTypes.ClprInvalidMessageId.selector);
-        service.redactMessage(channelId, 0);
-    }
-
-    function test_redactMessage_revert_messageIdAtNextMessageIdBoundary() public {
-        _registerTestConnector();
-        vm.expectRevert(ClprTypes.ClprInvalidMessageId.selector);
-        service.redactMessage(channelId, 1);
-    }
-
-    function test_redactMessage_preserves_runningHashAfterProcessing() public {
-        _registerTestConnector();
-        uint64 msgId = service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
-        bytes32 hashBefore = service.getMessage(channelId, msgId).runningHashAfterProcessing;
-        service.redactMessage(channelId, msgId);
-        ClprTypes.MessageValue memory mv = service.getMessage(channelId, msgId);
-        assertEq(uint8(ClprProtobuf.getMessageType(mv.payload)), uint8(ClprTypes.MessageType.REDACTED));
-        assertEq(mv.runningHashAfterProcessing, hashBefore);
-    }
-
-    function test_redactMessage_revert_notRedactable_nonDataMessage() public {
-        // A CONTROL message auto-injected by sendMessage must not be redactable.
-        vm.warp(block.timestamp + 1);
-        service.updateLedgerConfiguration(hex"ABCD", _defaultThrottles(), "", "");
-        service.updateEconomicConfiguration(_defaultEconomicConfig());
-        _registerTestConnector();
-
-        ClprTypes.Channel memory before = service.getChannel(channelId);
-        uint64 controlId = before.nextMessageId;
-        service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
-
-        vm.expectRevert(ClprTypes.ClprMessageNotRedactable.selector);
-        service.redactMessage(channelId, controlId);
-    }
-
-    function test_redactMessage_storesHashOfOriginalPayload() public {
-        _registerTestConnector();
-        uint64 msgId = service.sendMessage(channelId, connectorId, hex"1122334455", hex"48454C4C4F");
-        bytes memory originalPayload = service.getMessage(channelId, msgId).payload;
-        bytes32 expectedHash = sha256(originalPayload);
-
-        service.redactMessage(channelId, msgId);
-
-        bytes memory redactedPayload = service.getMessage(channelId, msgId).payload;
-        assertEq(
-            uint8(ClprProtobuf.getMessageType(redactedPayload)),
-            uint8(ClprTypes.MessageType.REDACTED),
-            "slot must carry REDACTED type"
-        );
-        bytes32 storedHash;
-        assembly {
-            // skip 32-byte length prefix, then 4 bytes of proto framing (outer key, outer len, inner key, inner len).
-            storedHash := mload(add(add(redactedPayload, 32), 4))
-        }
-        assertEq(storedHash, expectedHash, "embedded hash must equal SHA-256(original_payload)");
-    }
 }

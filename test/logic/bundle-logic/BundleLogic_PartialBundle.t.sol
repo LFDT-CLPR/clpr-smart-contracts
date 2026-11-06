@@ -51,29 +51,54 @@ contract BundleLogic_PartialBundle is BundleLogicTestBase {
     }
 
     /// @dev Submit ids [firstId .. firstId+count-1] as one bundle, optionally prefixed by `dupCount`
-    ///      leading-duplicate retransmissions (ids firstId-dupCount .. firstId-1). `sentRunningHash`
-    ///      is always the global chain through the bundle's last message.
+    ///      leading-duplicate retransmissions (ids firstId-dupCount .. firstId-1). The bundle ends at
+    ///      the sender's latest message.
     function _submitSlice(uint64 firstId, uint256 count, uint256 dupCount) internal {
+        // casting to 'uint64' is safe: test bundle sizes stay in single digits.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        _submitSlice(firstId, count, dupCount, firstId + uint64(count));
+    }
+
+    /// @dev As above, against a sender whose queue has advanced to `senderNextId`, so the proven
+    ///      `nextMessageId`/`sentRunningHash` may run ahead of the bundle's last message.
+    function _submitSlice(uint64 firstId, uint256 count, uint256 dupCount, uint64 senderNextId) internal {
+        verifier.setVerifyBundleResult(
+            _sliceMetadata(firstId, count, senderNextId), _slicePayloads(firstId, count, dupCount)
+        );
+        _submitBundle(hex"00FF");
+    }
+
+    function _slicePayloads(uint64 firstId, uint256 count, uint256 dupCount)
+        internal
+        view
+        returns (bytes[] memory payloads)
+    {
         uint256 total = count + dupCount;
         uint256 startId = uint256(firstId) - dupCount; // first id placed in the array
-        bytes[] memory payloads = new bytes[](total);
+        payloads = new bytes[](total);
         for (uint256 k = 0; k < total; k++) {
             payloads[k] = _msg(startId + k);
         }
+    }
 
+    function _sliceMetadata(uint64 firstId, uint256 count, uint64 senderNextId)
+        internal
+        view
+        returns (ClprTypes.QueueMetadata memory)
+    {
         // casting to 'uint64' is safe: test bundle sizes stay in single digits.
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 lastId = firstId + uint64(count) - 1;
-        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: lastId + 1, // bundle-scoped: last message in THIS bundle + 1
-            sentRunningHash: _globalHash(lastId),
+        return ClprTypes.QueueMetadata({
+            nextMessageId: senderNextId,
+            sentRunningHash: _globalHash(senderNextId - 1),
             receivedMessageId: 0, // no outbound ack exercised here
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: lastId,
+            lastMessageRunningHash: _globalHash(lastId)
         });
-        verifier.setVerifyBundleResult(meta, payloads);
-        _submitBundle(hex"00FF");
     }
 
     // ── Tests ─────────────────────────────────────────────────────────
@@ -104,18 +129,90 @@ contract BundleLogic_PartialBundle is BundleLogicTestBase {
         assertEq(afterFirst.nextMessageId, 4, "3 replies queued for 3 DATA messages");
 
         // Bundle 2 carries [1,2,3,4,5,6]; ids 1..3 are leading duplicates, 4..6 are new.
-        // newMessageCount = nextMessageId(7) - expectedFirstId(4) = 3; messageStartIndex = 6 - 3 = 3.
+        // newMessageCount = lastMessageId(6) - receivedMessageId(3) = 3; messageStartIndex = 6 - 3 = 3.
         _submitSlice(4, 3, 3);
         ClprTypes.Channel memory afterSecond = service.getChannel(channelId);
 
         // Hash: seeded from H3, chained over 4..6 only → H6. Had the duplicates been re-hashed, the
-        // computed hash would not equal the verifier's sentRunningHash and Step 5 would have reverted.
+        // computed hash would not equal lastMessageRunningHash and Step 5 would have reverted.
         assertEq(afterSecond.receivedMessageId, 6, "receivedMessageId advances past duplicates");
         assertEq(afterSecond.receivedRunningHash, _globalHash(6), "hash continuous through 6, no double-count");
 
         // Dispatch: duplicates were not re-dispatched, so only 3 new replies were queued (ids 4..6),
         // leaving nextMessageId at 7 rather than 10.
         assertEq(afterSecond.nextMessageId, 7, "duplicates not re-dispatched");
+    }
+
+    /// @notice A sender backlog larger than one bundle drains across several bundles, each proving
+    ///         the sender's latest state (nextMessageId = 10) while carrying only a prefix of it.
+    function test_backlogLargerThanBundle_drainsAcrossBundles() public {
+        _submitSlice(1, 3, 0, 10);
+        _submitSlice(4, 3, 0, 10);
+        _submitSlice(7, 3, 0, 10);
+
+        ClprTypes.Channel memory channel = service.getChannel(channelId);
+        assertEq(channel.receivedMessageId, 9, "whole backlog received");
+        assertEq(channel.receivedRunningHash, _globalHash(9), "continuous chain through the backlog");
+    }
+
+    /// @notice An under-trimmed bundle (leading duplicates) against a sender backlog still delivers
+    ///         only the new ids.
+    function test_backlog_leadingDuplicatesSkipped() public {
+        _submitSlice(1, 3, 0, 10);
+        _submitSlice(4, 3, 2, 10);
+
+        ClprTypes.Channel memory channel = service.getChannel(channelId);
+        assertEq(channel.receivedMessageId, 6);
+        assertEq(channel.receivedRunningHash, _globalHash(6));
+        assertEq(channel.nextMessageId, 7, "duplicates not re-dispatched");
+    }
+
+    /// @notice A message-less bundle rotating the trust anchor is accepted while the sender has a
+    ///         backlog the bundle does not carry.
+    function test_rotationOnlyBundle_withBacklog_accepted() public {
+        ClprTypes.QueueMetadata memory meta = _sliceMetadata(1, 0, 10);
+        meta.lastMessageId = 0;
+        meta.lastMessageRunningHash = bytes32(0);
+        verifier.setVerifyBundleResult(meta, new bytes[](0));
+        verifier.setNewTrustAnchor(hex"A11C");
+        _submitBundle(hex"00FF");
+
+        ClprTypes.Channel memory channel = service.getChannel(channelId);
+        assertEq(channel.receivedMessageId, 0, "no messages delivered");
+        assertEq(channel.trustAnchor, hex"A11C", "anchor rotated");
+    }
+
+    function test_lastMessageIdAtOrPastNext_reverts() public {
+        ClprTypes.QueueMetadata memory meta = _sliceMetadata(1, 3, 3); // last = 3, next = 3
+        verifier.setVerifyBundleResult(meta, _slicePayloads(1, 3, 0));
+        vm.expectRevert(ClprTypes.ClprReplayDetected.selector);
+        _submitBundle(hex"00FF");
+    }
+
+    /// @notice A bundle whose messages would not start at receivedMessageId + 1 is rejected.
+    function test_lastMessageIdLeavesGap_reverts() public {
+        ClprTypes.QueueMetadata memory meta = _sliceMetadata(1, 3, 10);
+        meta.lastMessageId = 4; // 3 payloads ending at 4 would start at 2, skipping 1
+        verifier.setVerifyBundleResult(meta, _slicePayloads(1, 3, 0));
+        vm.expectRevert(ClprTypes.ClprReplayDetected.selector);
+        _submitBundle(hex"00FF");
+    }
+
+    function test_lastMessageIdBelowPayloadCount_reverts() public {
+        ClprTypes.QueueMetadata memory meta = _sliceMetadata(1, 3, 10);
+        meta.lastMessageId = 2;
+        verifier.setVerifyBundleResult(meta, _slicePayloads(1, 3, 0));
+        vm.expectRevert(ClprTypes.ClprReplayDetected.selector);
+        _submitBundle(hex"00FF");
+    }
+
+    /// @notice The payload chain is checked against lastMessageRunningHash, not the sender's latest hash.
+    function test_lastMessageRunningHashMismatch_reverts() public {
+        ClprTypes.QueueMetadata memory meta = _sliceMetadata(1, 3, 10);
+        meta.lastMessageRunningHash = meta.sentRunningHash;
+        verifier.setVerifyBundleResult(meta, _slicePayloads(1, 3, 0));
+        vm.expectRevert(ClprTypes.ClprRunningHashMismatch.selector);
+        _submitBundle(hex"00FF");
     }
 
     receive() external payable override {}

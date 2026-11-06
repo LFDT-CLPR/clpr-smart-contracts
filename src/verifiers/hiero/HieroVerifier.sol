@@ -7,6 +7,7 @@ import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol"
 import {ClprStateProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprStateProof.sol";
 import {ClprMerkleProof} from "@hiero-ledger/clpr/libraries/proof/hiero/ClprMerkleProof.sol";
 import {TSSVerifier} from "@hiero-ledger/clpr/verifiers/hiero/TSSVerifier.sol";
+import {BN254Util} from "@hiero-ledger/clpr/verifiers/hiero/wraps/BN254Util.sol";
 
 /// @title HieroVerifier
 /// @notice `IClprVerifier` for bundles originating on a Hiero ledger.
@@ -32,12 +33,21 @@ contract HieroVerifier is IClprVerifier {
     /// @dev The bundle must prove at least the channel's `StateValue` leaf
     ///      against the signed block root.
     error ClprHieroNoStateItemLeaf();
+    /// @notice The proven `ClprChannel` leaf's `channel_id` does not match the
+    ///         local channel identity in `channelContext`.
+    error ClprHieroChannelMismatch();
 
     /// @notice ConfigProof bytes were malformed (basic shape verification failed).
     error InvalidPayloadShape();
 
     /// @dev Length of a Hiero block hash (SHA-384 root).
     uint256 internal constant BLOCK_HASH_LEN = 48;
+
+    /// @dev Length of a trust anchor `keccak256(hintsVk) ‖ wrapsStep` (32 + 32 bytes).
+    uint256 internal constant VK_ANCHOR_LEN = 64;
+
+    /// @dev Offset of the WRAPS abProof in a TSS block signature: hintVk (1096) ‖ hintSig (1632).
+    uint256 internal constant ABPROOF_OFFSET = 2728;
 
     /// @notice keccak256 of the raw `ledgerId` bytes. Used as the fast-path equality check
     ///         against the `trustAnchor` argument supplied to `verifyBundle`.
@@ -62,8 +72,10 @@ contract HieroVerifier is IClprVerifier {
     }
 
     /// @inheritdoc IClprVerifier
-    /// @dev channelContext is unused: the state proof directly authenticates the specific
-    ///      `ClprChannel` leaf's `service_address` field.
+    /// @dev Reverts with `ClprTypes.ClprBundleStartsAtOrBeforeAcked` if the proven payloads start at or
+    ///      before the proven channel's ackedMessageId. The state proof authenticates the `ClprChannel`
+    ///      leaf's `service_address` directly; `channelContext` is decoded only to bind a carried
+    ///      endpoint manifest to the remote service address.
     function verifyBundle(bytes calldata proofBytes, bytes calldata trustAnchor, bytes calldata channelContext)
         external
         view
@@ -85,37 +97,60 @@ contract HieroVerifier is IClprVerifier {
         bytes memory blockRootHash = ClprMerkleProof.computeChainedRoot(sp.paths, baseIdx);
         if (blockRootHash.length != BLOCK_HASH_LEN) revert ClprHieroBlockHashLength(blockRootHash.length);
 
-        // Step 3: TSS aggregate-signature check. `trustAnchor` is used as a cache hint:
-        // if it equals keccak256(hintsVk) for the current proof, TSSVerifier/WRAPS can
-        // skip recomputing the Poseidon hash of hinTS VK. On success we return the
-        // canonical keccak256(hintsVk) so callers can cache it for subsequent calls.
+        // Step 3: TSS aggregate-signature check. `trustAnchor` is the ledger ID or
+        // keccak256(hintsVk) ‖ WRAPS step; the anchor is reported only when the proof's WRAPS
+        // step is later than the stored one. TSSVerifier skips the Poseidon hash only on a
+        // 32-byte keccak256(hintsVk) hint, so it gets the VK-hash half of a stored anchor.
+        bytes calldata vkHint = trustAnchor.length == VK_ANCHOR_LEN ? trustAnchor[:32] : trustAnchor;
         bool tssValid;
-        (tssValid, newTrustAnchor) = TSS_VERIFIER.verifyTss(ledgerId, sp.signature, blockRootHash, trustAnchor);
+        (tssValid, newTrustAnchor) = TSS_VERIFIER.verifyTss(ledgerId, sp.signature, blockRootHash, vkHint);
         if (!tssValid) revert ClprHieroTssVerificationFailed();
+        newTrustAnchor = _advancedAnchor(trustAnchor, newTrustAnchor, sp.signature);
 
         // Step 4: walk every leaf path, authenticate it against `blockRootHash`, decode the
         // proven `ClprChannel` and `ClprMessageValue` leaves. Reverts inside the lib if
         // any path fails to converge or the channel leaf is absent.
-        (ClprTypes.Channel memory channel, bytes[] memory payloads, bytes memory manifestWire) =
-            ClprStateProof.extractDecodedQueueData(sp.paths, blockRootHash);
+        (
+            ClprTypes.Channel memory channel,
+            bytes[] memory payloads,
+            bytes memory manifestWire,
+            uint64 lastMessageId,
+            bytes32 lastMessageRunningHash
+        ) = ClprStateProof.extractDecodedQueueData(sp.paths, blockRootHash);
+        // The payloads are contiguous and end at lastMessageId, so the first is
+        // lastMessageId - payloads.length + 1, which must lie past the sender's proven
+        // ackedMessageId: this ledger has already acknowledged every message at or below it.
+        if (payloads.length > 0 && uint256(channel.ackedMessageId) + payloads.length > lastMessageId) {
+            revert ClprTypes.ClprBundleStartsAtOrBeforeAcked();
+        }
+
+        // Step 4b: bind the proven Channel to the local channel identity.
+        if (channelContext.length < 32) revert ClprHieroChannelMismatch();
+        bytes32 ctxChannelId;
+        assembly ("memory-safe") {
+            ctxChannelId := calldataload(channelContext.offset)
+        }
+        if (channel.channelId != ctxChannelId) revert ClprHieroChannelMismatch();
 
         // Step 5: synthesize the queue metadata from the proven Channel. `next_message_id`
         // is derived (acked + 1 + bundle size) so the receiver can sanity-check the bundle's
         // monotone-id invariant against the proven Channel state.
         metadata = ClprTypes.QueueMetadata({
-            nextMessageId: channel.ackedMessageId + 1 + uint64(payloads.length),
+            nextMessageId: channel.nextMessageId,
             sentRunningHash: channel.sentRunningHash,
             receivedMessageId: channel.receivedMessageId,
             receivedRunningHash: channel.receivedRunningHash,
             state: channel.status,
-            // Source's manifest version, surfaced from the proven Channel leaf so the receiver can
-            // detect staleness. Zero when the proven Channel carries no manifest version.
-            endpointManifestVersion: channel.endpointManifestVersion
+            // Zero when the proven Channel carries no manifest version.
+            endpointManifestVersion: channel.endpointManifestVersion,
+            lastMessageId: lastMessageId,
+            lastMessageRunningHash: lastMessageRunningHash
         });
         messagePayloads = payloads;
         newTrustAnchorId = "";
 
-        // Endpoint-manifest update.
+        // Endpoint-manifest update. Only here is the full context needed, to bind the manifest
+        // to the peer's service_address.
         if (manifestWire.length > 0) {
             ClprTypes.ChannelContext memory ctx = ClprTypes.decodeChannelContext(channelContext);
             newEndpointManifest = _decodeAndBindManifest(manifestWire, ctx.remoteServiceAddress);
@@ -158,6 +193,27 @@ contract HieroVerifier is IClprVerifier {
         // Verify + bind the endpoint manifest: decoded from its proto proof, service_address bound to
         // the peer's config service_address, keys normalized. Version MUST be >= 1; empty list is OK.
         endpointManifest = _verifyManifestStateProof(endpointManifestProofBytes, cfg.serviceAddress);
+    }
+
+    function _advancedAnchor(bytes calldata trustAnchor, bytes memory vkHash, bytes memory signature)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        bool hasVk = trustAnchor.length == VK_ANCHOR_LEN;
+        if (hasVk && keccak256(trustAnchor[:32]) == keccak256(vkHash)) return "";
+        uint256 step = _wrapsStep(signature);
+        if (hasVk && step <= abi.decode(trustAnchor[32:], (uint256))) return "";
+        return abi.encodePacked(vkHash, step);
+    }
+
+    /// @dev The WRAPS Nova IVC step `i`, the abProof's leading 32-byte little-endian field element.
+    function _wrapsStep(bytes memory signature) internal pure returns (uint256) {
+        bytes32 raw;
+        assembly ("memory-safe") {
+            raw := mload(add(add(signature, 0x20), ABPROOF_OFFSET))
+        }
+        return BN254Util._bswap32(uint256(raw));
     }
 
     /// @dev Verify a config-time endpoint-manifest proof: a full Hiero `StateProof` carrying a

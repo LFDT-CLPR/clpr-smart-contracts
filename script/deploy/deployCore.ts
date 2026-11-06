@@ -128,6 +128,7 @@ export async function deployClprService(
     console.error(`[Deploy]   connectorLogic: ${modules.connectorLogic}`);
     console.error(`[Deploy]   adminLogic: ${modules.adminLogic}`);
     console.error(`[Deploy]   bundleDecodeHelper: ${modules.bundleDecodeHelper}`);
+    console.error(`[Deploy]   feeToken: ${params.feeToken ?? "native value"}`);
     console.error("[Deploy] ========================================");
     return deployArtifact(clients, "ClprService", [
         params.initialOwner,
@@ -138,7 +139,8 @@ export async function deployClprService(
         modules.bundleLogic,
         modules.connectorLogic,
         modules.adminLogic,
-        modules.bundleDecodeHelper
+        modules.bundleDecodeHelper,
+        params.feeToken ?? "0x0000000000000000000000000000000000000000"
     ]);
 }
 
@@ -231,7 +233,7 @@ export interface E2EWithQbftVerifierDeployed extends ClprDeployed {
 export async function deployE2EWithQbftVerifier(
     clients: DeployClients,
     params: DeployParams,
-    opts?: {minCommittedSeals?: number; label?: string}
+    opts?: {label?: string}
 ): Promise<E2EWithQbftVerifierDeployed> {
     const tag = opts?.label ?? String(clients.chain.id);
     console.error(`[Deploy] ========================================`);
@@ -239,10 +241,9 @@ export async function deployE2EWithQbftVerifier(
     console.error(`[Deploy] ========================================`);
     const core = await deployClprAll(clients, params);
     console.error("[Deploy] ========================================");
-    console.error("[Deploy] Deploying QBFTVerifier...");
-    console.error(`[Deploy] minCommittedSeals: ${opts?.minCommittedSeals ?? 1}`);
+    console.error("[Deploy] Deploying QbftHeaderModeVerifier...");
     console.error("[Deploy] ========================================");
-    const qbftVerifier = await deployArtifact(clients, "QBFTVerifier", [opts?.minCommittedSeals ?? 1]);
+    const qbftVerifier = await deployArtifact(clients, "QbftHeaderModeVerifier", []);
     const helpers = await deployE2EHelpers(clients);
     await assertServiceCode(clients, core.clprService, tag);
     console.error(`[Deploy] ✓ E2E+QBFT deployment completed`);
@@ -344,21 +345,16 @@ export interface QbftVerifierDeployed {
     qbftVerifier: `0x${string}`;
 }
 
-export async function deployQbftVerifier(
-    clients: DeployClients,
-    options?: {minCommittedSeals?: number}
-): Promise<QbftVerifierDeployed> {
+export async function deployQbftVerifier(clients: DeployClients): Promise<QbftVerifierDeployed> {
     console.error("[Deploy] =========================================");
     console.error("[Deploy] Deploying QBFT Verifier");
     console.error("[Deploy] =========================================");
 
-    const minCommittedSeals = options?.minCommittedSeals ?? 1;
-    if (minCommittedSeals <= 0) {
-        throw new Error("minCommittedSeals must be > 0");
-    }
-
-    const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QBFTVerifier"), await deployArtifact(clients, "QBFTVerifier", [minCommittedSeals]));
-
+    // TODO: remove the legacy QBFTVerifier (incorrect implementation)
+    //      remove the line below and deploy QbftHeaderModeVerifier with [] instead
+    const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QBFTVerifier"), await deployArtifact(clients, "QBFTVerifier", [1]));
+    // uncomment this:
+    // const qbftVerifier = envAddress("QBFT_VERIFIER") ?? (console.error("[Deploy] Deploying QbftHeaderModeVerifier"), await deployArtifact(clients, "QbftHeaderModeVerifier", []));
     console.error("[Deploy] ✓ QBFT Verifier deployed successfully");
     return {qbftVerifier};
 }
@@ -394,6 +390,21 @@ export function seiVerifierStackToEnv(
         ED25519_VERIFIER: stack.ed25519Verifier,
         SEI_VERIFIER: stack.seiVerifier
     };
+}
+
+export interface TempoVerifierDeployed {
+    tempoVerifier: `0x${string}`;
+}
+
+export async function deployTempoVerifier(clients: DeployClients): Promise<TempoVerifierDeployed> {
+    console.error("[Deploy] =========================================");
+    console.error("[Deploy] Deploying Tempo Verifier");
+    console.error("[Deploy] =========================================");
+
+    const tempoVerifier = envAddress("TEMPO_VERIFIER") ?? (console.error("[Deploy] Deploying TempoVerifier"), await deployArtifact(clients, "TempoVerifier"));
+
+    console.error("[Deploy] ✓ Tempo Verifier deployed successfully");
+    return {tempoVerifier};
 }
 
 // ── Ethereum Mainnet Verifier ──────────────────────────────────────────

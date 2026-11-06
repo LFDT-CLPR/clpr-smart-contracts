@@ -4,11 +4,14 @@ pragma solidity ^0.8.28;
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {IClprConnector} from "@hiero-ledger/clpr/interfaces/IClprConnector.sol";
 import {ECDSA} from "@hiero-ledger/clpr/libraries/crypto/ECDSA.sol";
+import {ExactGasCall} from "@hiero-ledger/clpr/libraries/service/ExactGasCall.sol";
+import {FeeAssetLib} from "@hiero-ledger/clpr/libraries/service/FeeAssetLib.sol";
 
 /// @title ConnectorLib
 /// @notice Stateless library for connector registration, stake management, charging, and slashing.
 /// @dev All functions take explicit storage pointers so they operate on ClprService's storage.
-///      ETH custody is ClprService's responsibility; this library only tracks accounting.
+///      Fee-asset custody is ClprService's: ConnectorLogic receives and refunds stakes, and this
+///      library moves funds only to pay out charges and slash penalties.
 ///      Connectors are scoped per-channel: storage key = keccak256(channelId || connectorId).
 library ConnectorLib {
     // ── Events ────────────────────────────────────────────────────────
@@ -110,7 +113,7 @@ library ConnectorLib {
         emit ConnectorDeregistered(key, recipient, stake);
     }
 
-    /// @notice Top up stake. `amount` is ETH already received by ClprService (msg.value).
+    /// @notice Top up stake. `amount` is fee asset already received by ClprService.
     function topUpStake(
         mapping(bytes32 => ClprTypes.Connector) storage connectors,
         mapping(bytes32 => bool) storage connectorExists,
@@ -127,45 +130,54 @@ library ConnectorLib {
     // ── Charge ────────────────────────────────────────────────────────
 
     /// @notice Pull payment from connector contract for inbound message execution.
-    /// @dev Calls IClprConnector.payForExecution; the connector sends ETH to address(this)
-    ///      (ClprService, since this is an internal library). Forwards to `recipient`; falls back
-    ///      to `fallbackRecipient` (owner) if the transfer fails. If both reject, credits
+    /// @dev Calls IClprConnector.payForExecution with `gasLimit` gas, less the CALL's own cost, reverting with
+    ///      `ExactGasCall.InsufficientGasForCall` if that cannot be forwarded; every other failure
+    ///      returns false. The connector sends `amount` of the fee asset to address(this) (ClprService,
+    ///      since this is an internal library). Forwards to `recipient`; falls back to
+    ///      `fallbackRecipient` (owner) if the transfer fails. If both reject, credits
     ///      `pendingWithdrawals[recipient]` so the recipient can pull later.
+    ///      The balance-delta payment check relies on every stake and bond deposit being `nonReentrant`:
+    ///      a deposit re-entered from `payForExecution` would count both as the payment and as the deposit.
     function charge(
         mapping(bytes32 => ClprTypes.Connector) storage connectors,
         mapping(bytes32 => bool) storage connectorExists,
         mapping(address => uint256) storage pendingWithdrawals,
+        ClprTypes.FeeAsset memory feeAsset,
         address fallbackRecipient,
         bytes32 channelId,
         bytes32 connectorId,
         uint256 amount,
-        address recipient
+        address recipient,
+        uint256 gasLimit
     ) internal returns (bool success) {
         bytes32 key = _connectorKey(channelId, connectorId);
         if (!connectorExists[key]) return false;
         address connectorContract = connectors[key].connectorContract;
 
-        if (connectorContract.balance < amount) return false;
+        if (FeeAssetLib.balanceOf(feeAsset, connectorContract) < amount) return false;
 
-        uint256 before = address(this).balance;
-        try IClprConnector(connectorContract).payForExecution(amount) {
-            if (address(this).balance != before + amount) return false;
-        } catch {
-            return false;
-        }
+        uint256 before = FeeAssetLib.balanceOf(feeAsset, address(this));
+        // The balance delta, not the return data, decides whether the connector paid.
+        // slither-disable-next-line unused-return
+        (bool paid,,) = ExactGasCall.callWithExactGas(
+            connectorContract, gasLimit, abi.encodeCall(IClprConnector.payForExecution, (amount)), false
+        );
+        if (!paid || FeeAssetLib.balanceOf(feeAsset, address(this)) != before + amount) return false;
 
-        _transferWithFallback(pendingWithdrawals, recipient, fallbackRecipient, amount);
+        _transferWithFallback(pendingWithdrawals, feeAsset, recipient, fallbackRecipient, amount);
         emit ConnectorCharged(key, amount, recipient);
         return true;
     }
 
     // ── Slash ─────────────────────────────────────────────────────────
 
-    /// @notice Slash connector stake using geometric penalty escalation.
+    /// @notice Slash connector stake using geometric penalty escalation; the penalty is paid to
+    ///         `recipient` in the fee asset.
     function slash(
         mapping(bytes32 => ClprTypes.Connector) storage connectors,
         mapping(bytes32 => bool) storage connectorExists,
         mapping(address => uint256) storage pendingWithdrawals,
+        ClprTypes.FeeAsset memory feeAsset,
         address fallbackRecipient,
         bytes32 channelId,
         bytes32 connectorId,
@@ -205,7 +217,7 @@ library ConnectorLib {
         emit ConnectorSlashed(key, penaltyAmount, finalSlashCount, banned);
 
         if (penaltyAmount > 0) {
-            _transferWithFallback(pendingWithdrawals, recipient, fallbackRecipient, penaltyAmount);
+            _transferWithFallback(pendingWithdrawals, feeAsset, recipient, fallbackRecipient, penaltyAmount);
         }
     }
 
@@ -276,20 +288,17 @@ library ConnectorLib {
         return result;
     }
 
-    // ── Internal: ETH transfer ────────────────────────────────────────
+    // ── Internal: fee-asset transfer ──────────────────────────────────
 
-    /// @dev Attempt ETH transfer to `recipient`; if it fails try `fallbackTo`; if both
-    ///      fail, credit `pendingWithdrawals[recipient]` for pull-payment withdrawal.
     function _transferWithFallback(
         mapping(address => uint256) storage pendingWithdrawals,
+        ClprTypes.FeeAsset memory feeAsset,
         address recipient,
         address fallbackTo,
         uint256 amount
     ) private {
-        (bool ok,) = recipient.call{value: amount}("");
-        if (ok) return;
-        (ok,) = fallbackTo.call{value: amount}("");
-        if (ok) return;
+        if (FeeAssetLib.trySend(feeAsset, recipient, amount)) return;
+        if (FeeAssetLib.trySend(feeAsset, fallbackTo, amount)) return;
         pendingWithdrawals[recipient] += amount;
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ClprService} from "@hiero-ledger/clpr/ClprService.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ClprTestBase} from "@test/helpers/ClprTestBase.sol";
 import {ClprServiceTestBase} from "@test/helpers/ClprServiceTestBase.sol";
@@ -149,7 +150,7 @@ contract EndpointManagerTest is ClprTestBase {
 
     function test_addEndpoint_onlyOwner() public {
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         service.addEndpoint(alice, _ep(hex"01"));
     }
 
@@ -240,7 +241,8 @@ contract EndpointManagerTest is ClprTestBase {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
         service.initialize(hex"1234", defaultThrottles, "", "", econ);
         service.setClprEnabled(true);
@@ -269,7 +271,7 @@ contract ClprService_Configuration is ClprServiceTestBase {
     function test_updateLedgerConfiguration_revert_notOwner() public {
         ClprTypes.Throttles memory throttles = _defaultThrottles();
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.updateLedgerConfiguration(hex"1234", throttles, "", "");
     }
 
@@ -303,6 +305,47 @@ contract ClprService_Configuration is ClprServiceTestBase {
         ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
         econ.connectorQueueQuotaPct = 99;
         service.updateEconomicConfiguration(econ);
+    }
+
+    /// The stipend only funds the inbound notification, so any value is the operator's call; 0 turns
+    /// the notification off.
+    function test_updateEconomicConfiguration_acceptsAZeroStipend() public {
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorInboundGasStipend = 0;
+        service.updateEconomicConfiguration(econ);
+        assertEq(service.getEconomicConfig().connectorInboundGasStipend, 0);
+    }
+
+    /// A payment budget too small for `payForExecution` would fail every charge and slash every
+    /// funded connector.
+    function testFuzz_updateEconomicConfiguration_revert_paymentGasLimitBelowMinimum(uint256 seed) public {
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorPaymentGasLimit = uint64(bound(seed, 0, ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT - 1));
+        vm.expectRevert(ClprTypes.ClprInvalidConfiguration.selector);
+        service.updateEconomicConfiguration(econ);
+    }
+
+    function test_updateEconomicConfiguration_succeeds_paymentGasLimitAtMinimum() public {
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorPaymentGasLimit = uint64(ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT);
+        service.updateEconomicConfiguration(econ);
+        assertEq(service.getEconomicConfig().connectorPaymentGasLimit, ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT);
+    }
+
+    function test_initialize_revert_paymentGasLimitBelowMinimum() public {
+        ClprService freshService = _deployClprService(1, "eip155:1337");
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorPaymentGasLimit = uint64(ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT - 1);
+        vm.expectRevert(ClprTypes.ClprInvalidConfiguration.selector);
+        freshService.initialize(hex"1234", defaultThrottles, "", "", econ);
+    }
+
+    function test_initialize_acceptsAZeroStipend() public {
+        ClprService freshService = _deployClprService(1, "eip155:1337");
+        ClprTypes.EconomicConfig memory econ = _defaultEconomicConfig();
+        econ.connectorInboundGasStipend = 0;
+        freshService.initialize(hex"1234", defaultThrottles, "", "", econ);
+        assertEq(freshService.getEconomicConfig().connectorInboundGasStipend, 0);
     }
 
     // ── Endpoint validation at manifest intake (was: seed endpoints) ───
@@ -374,7 +417,7 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
         service.registerEndpoint{value: 0}(
             ClprTypes.Endpoint({ipAddress: "1.2.3.4", port: 1, tlsCertificate: "", accountId: hex"01"})
         );
-        uint64 mid = service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
+        service.sendMessage(channelId, connectorId, hex"1122334455", hex"01");
 
         // Now disable.
         service.setClprEnabled(false);
@@ -403,10 +446,6 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
         vm.expectRevert(ClprTypes.ClprDisabled.selector);
         service.submitBundle(channelId, hex"00");
 
-        // redactMessage
-        vm.expectRevert(ClprTypes.ClprDisabled.selector);
-        service.redactMessage(channelId, mid);
-
         // registerConnector
         vm.expectRevert(ClprTypes.ClprDisabled.selector);
         service.registerConnector(bytes32(0));
@@ -417,7 +456,7 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
 
         // topUpConnectorStake
         vm.expectRevert(ClprTypes.ClprDisabled.selector);
-        service.topUpConnectorStake{value: 0}(channelId, connectorId);
+        service.topUpConnectorStake(channelId, connectorId, 0);
 
         // registerEndpoint
         ClprTypes.Endpoint memory ep =
@@ -457,7 +496,7 @@ contract AdminLogic_KillSwitch is ClprServiceTestBase {
 
     function test_killSwitch_onlyOwner() public {
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.setClprEnabled(false);
     }
 }

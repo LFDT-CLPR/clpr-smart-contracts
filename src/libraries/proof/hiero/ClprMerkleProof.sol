@@ -32,6 +32,8 @@ library ClprMerkleProof {
     error MerkleProofChainOutOfRange(uint256 index);
     /// @notice A non-leaf spine path unexpectedly carries leaf content.
     error MerkleProofChainHasContent(uint256 pathIndex);
+    /// @notice A `MerklePath` populates more than one `content`
+    error MerkleProofAmbiguousContent();
     /// @notice The requested `startIndex` is out of range for the given `paths` array.
     error MerkleProofStartIndexOutOfRange(uint256 startIndex);
 
@@ -70,13 +72,20 @@ library ClprMerkleProof {
     /// @dev Returns the merkle base hash implied by a path's content variants.
     ///      Empty bytes if none of the four content fields are populated.
     function _baseHashOf(ClprStateProof.MerklePath memory p) private pure returns (bytes memory) {
+        uint256 variants;
+        if (p.explicitHash.length != 0) variants++;
+        if (p.stateItemLeaf.length != 0) variants++;
+        if (p.blockItemLeaf.length != 0) variants++;
+        if (p.timestampLeaf.length != 0) variants++;
+        if (variants > 1) revert MerkleProofAmbiguousContent();
+        if (variants == 0) return "";
+
         if (p.explicitHash.length != 0) return p.explicitHash;
 
         bytes memory leaf;
         if (p.stateItemLeaf.length != 0) leaf = p.stateItemLeaf;
         else if (p.blockItemLeaf.length != 0) leaf = p.blockItemLeaf;
-        else if (p.timestampLeaf.length != 0) leaf = p.timestampLeaf;
-        else return "";
+        else leaf = p.timestampLeaf;
 
         return Sha384.hash(abi.encodePacked(bytes1(0x00), leaf));
     }

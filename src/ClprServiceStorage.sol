@@ -109,6 +109,9 @@ abstract contract ClprServiceStorage is ReentrancyGuardTransient {
     ClprTypes.LedgerConfiguration internal _config;
     // slither-disable-next-line uninitialized-state
     ClprTypes.EconomicConfig internal economicConfig;
+    /// @dev Set only by the ClprService constructor.
+    // slither-disable-next-line uninitialized-state
+    ClprTypes.FeeAsset internal _feeAsset;
 
     function _checkEnabled() internal view {
         if (!_clprEnabled) revert ClprTypes.ClprDisabled();
@@ -118,14 +121,12 @@ abstract contract ClprServiceStorage is ReentrancyGuardTransient {
         if (!_isInitialized) revert ClprTypes.ClprNotInitialized();
     }
 
-    /// @dev Read owner from ClprService's Ownable storage (sequential slot 38).
-    /// When called via DELEGATECALL from ClprService, reads ClprService's owner.
-    /// @dev This slot is the sequential position of OpenZeppelin `Ownable._owner`,
-    ///      immediately after this contract's storage (last var `economicConfig`).
-    ///      It shifts whenever a storage layout above it changes; `ClprStorageLayoutGuard`
+    /// @dev Reads OpenZeppelin `Ownable._owner` from its sequential slot, immediately after this
+    ///      contract's storage, so a DELEGATECALL from ClprService sees ClprService's owner.
+    ///      The slot shifts whenever a storage layout above it changes; `ClprStorageLayoutGuard`
     ///      pins it against `storage-layout.json`'s `_owner` slot to catch silent drift.
     function _getOwner() internal view returns (address owner_) {
-        bytes32 slot = bytes32(uint256(38));
+        bytes32 slot = bytes32(uint256(39));
         assembly ("memory-safe") {
             owner_ := sload(slot)
         }
@@ -142,7 +143,6 @@ abstract contract ClprServiceStorage is ReentrancyGuardTransient {
     );
     event LedgerConfigurationUpdated(uint96 nanosSinceEpoch);
     event EconomicConfigurationUpdated();
-    event MessageRedacted(bytes32 indexed channelId, uint64 messageId);
     /// @dev Emitted when a message payload cannot be decoded during bundle dispatch.
     ///      The channel transitions to PAUSED; remaining messages in the bundle are skipped.
     event BundleParseFailed(bytes32 indexed channelId, uint64 receivedMessageId);

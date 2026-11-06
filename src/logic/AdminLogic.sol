@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {ClprTypes} from "../libraries/ClprTypes.sol";
 import {ClprConfigHash} from "../libraries/codec/ClprConfigHash.sol";
 import {ManifestLib} from "../libraries/service/ManifestLib.sol";
+import {FeeAssetLib} from "../libraries/service/FeeAssetLib.sol";
 import {LogicModuleBase} from "./base/LogicModuleBase.sol";
 
 /// @title AdminLogic
@@ -67,27 +68,27 @@ contract AdminLogic is LogicModuleBase {
         return _endpointManifest.entries[account];
     }
 
-    /// @notice Pending ETH withdrawal balance for `account` (pull-payment pattern).
-    /// @param account The account to query.
+    /// @notice Pending fee-asset withdrawal balance for `account` (pull-payment pattern).
     function pendingWithdrawals(address account) external view returns (uint256) {
         return _pendingWithdrawals[account];
+    }
+
+    /// @notice The ERC-20 stakes, bonds and charges are paid in; `address(0)` means native value.
+    function getFeeToken() external view returns (address) {
+        return _feeAsset.token;
     }
 
     // ── Kill switch ────────────────────────────────────────────────────────
 
     /// @notice Enable or disable all mutating operations on the service.
-    /// @dev Owner-only (via). Emits {ClprEnabledChanged}. When disabled, every mutating
+    /// @dev Owner-only (via onlyService). Emits {ClprEnabledChanged}. When disabled, every mutating
     ///      op (registerChannel, completeChannel, closeChannel,
-    ///      registerConnector, removeConnector, topUpConnectorStake,
+    ///      registerConnector, completeConnector, removeConnector, topUpConnectorStake,
     ///      registerEndpoint, addEndpoint, removeEndpoint, updateEndpointManifest,
-    ///      sendMessage, submitBundle, redactMessage,
+    ///      sendMessage, submitBundle,
     ///      updateLedgerConfiguration, updateEconomicConfiguration)
     ///      reverts with ClprDisabled(). Read-only views are not affected.
-    ///      Reverts with ClprNotInitialized() unless initialize() has already been
-    ///      called (calling with enabled = false pre-initialize would be a no-op
-    ///      anyway, since _clprEnabled starts false and initialize() is the only
-    ///      path to true).
-    /// @param enabled True to enable all mutating ops, false to disable them.
+    ///      Reverts with ClprNotInitialized() unless initialize() has already been called.
     function setClprEnabled(bool enabled) external onlyService whenInitialized {
         _clprEnabled = enabled;
         emit ClprEnabledChanged(enabled);
@@ -101,11 +102,11 @@ contract AdminLogic is LogicModuleBase {
     ///      setClprEnabled(true) will succeed. Reverts with ClprAlreadyInitialized()
     ///      if called more than once. Does not itself enable the service; call
     ///      setClprEnabled(true) separately once the applied config has been verified.
+    ///      Validates `throttles` as {updateLedgerConfiguration} and `econConfig` as
+    ///      {updateEconomicConfiguration} do.
     /// @param serviceAddress ABI-encoded on-chain address of this CLPR service.
-    /// @param throttles Initial throttle parameters.
     /// @param trustAnchor Raw trust anchor bytes (e.g. a BLS public key). Empty to clear.
     /// @param trustAnchorId Identifier for the trust anchor. Must pair with trustAnchor.
-    /// @param econConfig Initial economic configuration.
     function initialize(
         bytes calldata serviceAddress,
         ClprTypes.Throttles calldata throttles,
@@ -124,12 +125,14 @@ contract AdminLogic is LogicModuleBase {
     /// @notice Update the local ledger configuration.
     /// @dev Owner-only. Replaces serviceAddress, throttles, trustAnchor, and trustAnchorId
     ///      atomically. `nanosSinceEpoch` is set to block.timestamp converted to nanoseconds;
-    ///      peers use it to detect config staleness. `trustAnchor` and `trustAnchorId` must
-    ///      both be empty or both be non-empty. Emits {LedgerConfigurationUpdated}.
+    ///      peers use it to detect config staleness. Reverts with {ClprInvalidConfiguration} unless
+    ///      `trustAnchor` and `trustAnchorId` are both empty or both non-empty, and every throttle
+    ///      except `maxLocalEndpoints` and `maxPeerEndpoints` is non-zero. Emits {LedgerConfigurationUpdated}.
+    ///      Each application callback gets at most `throttles.maxGasPerMessage` gas. If
+    ///      `maxGasPerMessage + maxGasPerMessage / 63` exceeds what the chain's per-transaction gas cap
+    ///      leaves after proof verification, a callback that gets the full amount reverts its bundle.
     /// @param serviceAddress ABI-encoded on-chain address of this CLPR service.
-    /// @param throttles New throttle parameters to apply.
     /// @param trustAnchor Raw trust anchor bytes (e.g. a BLS public key). Empty to clear.
-    /// @param trustAnchorId Identifier for the trust anchor. Must pair with trustAnchor.
     function updateLedgerConfiguration(
         bytes calldata serviceAddress,
         ClprTypes.Throttles calldata throttles,
@@ -140,9 +143,9 @@ contract AdminLogic is LogicModuleBase {
     }
 
     /// @notice Replace the economic configuration.
-    /// @dev Owner-only (via onlyService). `connectorQueueQuotaPct` must be strictly less than 100.
-    ///      Emits {EconomicConfigurationUpdated}.
-    /// @param config New economic configuration to apply.
+    /// @dev Owner-only (via onlyService). Reverts with {ClprInvalidConfiguration} unless
+    ///      `connectorQueueQuotaPct` is below 100 and `connectorPaymentGasLimit` is at least
+    ///      `ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT`. Emits {EconomicConfigurationUpdated}.
     function updateEconomicConfiguration(ClprTypes.EconomicConfig calldata config) external onlyService whenEnabled {
         _setEconomicConfiguration(config);
     }
@@ -177,20 +180,33 @@ contract AdminLogic is LogicModuleBase {
 
     function _setEconomicConfiguration(ClprTypes.EconomicConfig calldata config) private {
         if (config.connectorQueueQuotaPct >= 100) revert ClprTypes.ClprInvalidConfiguration();
+        if (config.connectorPaymentGasLimit < ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT) {
+            revert ClprTypes.ClprInvalidConfiguration();
+        }
         economicConfig = config;
         emit EconomicConfigurationUpdated();
     }
 
     // ── Endpoint management ────────────────────────────────────────────────
 
-    /// @notice Self-register the caller as a PENDING endpoint, posting a bond (= msg.value).
-    /// @dev Two-step admission (spec §6.5): the caller does not appear in the live manifest until the
+    /// @notice Self-register the caller as a PENDING endpoint, posting a bond.
+    /// @dev Two-step admission: the caller does not appear in the live manifest until the
     ///      owner admits it via {addEndpoint}/{updateEndpointManifest}. The bond is held in escrow,
     ///      refunded in full on removal/cancellation, and never slashed. Permissionless — any caller;
-    ///      registration does not gate submitBundle. Requires msg.value >= minEndpointBond.
+    ///      registration does not gate submitBundle. The bond is `msg.value` in native mode (at least
+    ///      `minEndpointBond`); in token mode exactly `minEndpointBond` is pulled with `transferFrom`
+    ///      and `msg.value` must be 0.
     /// @param endpoint The endpoint discovery data to advertise once admitted.
-    function registerEndpoint(ClprTypes.Endpoint calldata endpoint) external payable onlyService whenEnabled {
-        ManifestLib.registerEndpoint(_endpointManifest, endpoint, msg.value, economicConfig.minEndpointBond, msg.sender);
+    function registerEndpoint(ClprTypes.Endpoint calldata endpoint)
+        external
+        payable
+        nonReentrant
+        onlyService
+        whenEnabled
+    {
+        uint256 minBond = economicConfig.minEndpointBond;
+        uint256 bond = FeeAssetLib.pullAtLeast(_feeAsset, minBond);
+        ManifestLib.registerEndpoint(_endpointManifest, endpoint, bond, minBond, msg.sender);
     }
 
     /// @notice Admit a registrant to the live endpoint manifest. Owner-only (enforced at ClprService).
@@ -239,14 +255,25 @@ contract AdminLogic is LogicModuleBase {
 
     // ── Pull-payment ───────────────────────────────────────────────────────
 
-    /// @notice Withdraw the caller's pending ETH balance (pull-payment).
-    /// @dev Follows checks-effects-interactions: balance is zeroed before the
-    ///      transfer. Reverts if the balance is zero.
+    /// @notice Withdraw the caller's pending fee-asset balance (pull-payment).
+    /// @dev Reverts with ClprNothingToCollect on a zero balance and ClprTransferFailed when the
+    ///      transfer fails.
     function collectPending() external nonReentrant {
+        _collectPending(msg.sender);
+    }
+
+    /// @notice Withdraw the caller's pending fee-asset balance to `recipient`.
+    /// @dev Lets an account the fee asset will not pay, such as one a fee token blocks, redirect its credit.
+    ///      Reverts with ClprZeroRecipient for `address(0)`, otherwise like {collectPending}.
+    function collectPendingTo(address recipient) external nonReentrant {
+        if (recipient == address(0)) revert ClprTypes.ClprZeroRecipient();
+        _collectPending(recipient);
+    }
+
+    function _collectPending(address recipient) private {
         uint256 amount = _pendingWithdrawals[msg.sender];
         if (amount == 0) revert ClprTypes.ClprNothingToCollect();
         _pendingWithdrawals[msg.sender] = 0;
-        (bool ok,) = msg.sender.call{value: amount}("");
-        if (!ok) revert ClprTypes.ClprTransferFailed();
+        FeeAssetLib.send(_feeAsset, recipient, amount);
     }
 }

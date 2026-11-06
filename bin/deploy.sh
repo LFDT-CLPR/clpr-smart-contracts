@@ -8,7 +8,8 @@
 #   bin/deploy.sh <mode> [--rpc <alias>]  # non-interactive
 #
 # Modes: all | modules | service | config | e2e-with-hiero-verifier |
-#        hiero-verifier | qbft-verifier | sei-verifier | eth-mainnet-verifier
+#        hiero-verifier | qbft-verifier | sei-verifier | eth-mainnet-verifier |
+#        tempo-verifier
 #
 # Required env vars per mode:
 #   all      → PRIVATE_KEY  (INITIAL_OWNER optional; defaults to deployer)
@@ -22,6 +23,7 @@
 #   qbft-verifier    → PRIVATE_KEY, CLPR_SERVICE
 #   sei-verifier     → PRIVATE_KEY, CLPR_SERVICE
 #   eth-mainnet-verifier → PRIVATE_KEY, CLPR_SERVICE
+#   tempo-verifier   → PRIVATE_KEY, CLPR_SERVICE
 #
 # Besu backend (--rpc besu): the two-node compose stack is auto-managed.
 #   - If besu-a-1 / besu-b-1 are not running, `npm run e2e:up` is invoked.
@@ -143,6 +145,7 @@ prompt_mode() {
                      "qbft-verifier (deploy QBFT verifier against existing ClprService)" \
                      "sei-verifier (deploy Sei/CometBFT verifier against existing ClprService)" \
                      "eth-mainnet-verifier (deploy Ethereum mainnet verifier against existing ClprService)" \
+                     "tempo-verifier (deploy Tempo verifier against existing ClprService)" \
                      "quit"; do
         case "$REPLY" in
             1) MODE="all"; return ;;
@@ -154,7 +157,8 @@ prompt_mode() {
             7) MODE="qbft-verifier"; return ;;
             8) MODE="sei-verifier"; return ;;
             9) MODE="eth-mainnet-verifier"; return ;;
-            10|q|Q) info "aborted"; exit 0 ;;
+            10) MODE="tempo-verifier"; return ;;
+            11|q|Q) info "aborted"; exit 0 ;;
             *) err "invalid choice" ;;
         esac
     done
@@ -163,15 +167,15 @@ prompt_mode() {
 if [ -z "$MODE" ]; then
     if [ ! -t 0 ]; then
         err "no mode given and stdin is not a tty — refusing to run silently."
-        err "pass a mode: all | modules | service | config | e2e-with-hiero-verifier | hiero-verifier | qbft-verifier | sei-verifier | eth-mainnet-verifier"
+        err "pass a mode: all | modules | service | config | e2e-with-hiero-verifier | hiero-verifier | qbft-verifier | sei-verifier | eth-mainnet-verifier | tempo-verifier"
         exit 2
     fi
     prompt_mode
 fi
 
 case "$MODE" in
-    all|modules|service|config|e2e-with-hiero-verifier|hiero-verifier|qbft-verifier|sei-verifier|eth-mainnet-verifier) ;;
-    *) err "unknown mode: $MODE"; err "valid: all | modules | service | config | e2e-with-hiero-verifier | hiero-verifier | qbft-verifier | sei-verifier | eth-mainnet-verifier"; exit 2 ;;
+    all|modules|service|config|e2e-with-hiero-verifier|hiero-verifier|qbft-verifier|sei-verifier|eth-mainnet-verifier|tempo-verifier) ;;
+    *) err "unknown mode: $MODE"; err "valid: all | modules | service | config | e2e-with-hiero-verifier | hiero-verifier | qbft-verifier | sei-verifier | eth-mainnet-verifier | tempo-verifier"; exit 2 ;;
 esac
 
 # ── Env validation per mode ───────────────────────────────────────────

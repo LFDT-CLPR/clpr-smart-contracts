@@ -37,7 +37,9 @@ contract IntegrationMockTest is IntegrationTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash2
         });
         verifier.setVerifyBundleResult(meta, inboundMsgs);
 
@@ -45,7 +47,15 @@ contract IntegrationMockTest is IntegrationTestBase {
         service.submitBundle(channelId, hex"DEADBEEF");
 
         _verifyPostBundle(1, 3, hex"48454C4C4F", 2, 2, 1, ClprTypes.ChannelStatus.ACTIVE);
-        _closeChannel();
+
+        // Our only outbound DATA message (id 1) is already acked, so admin-close
+        // advances straight through CLOSING to DRAINED in the same call.
+        service.closeChannel(channelId);
+        assertEq(
+            uint8(service.getChannel(channelId).status),
+            uint8(ClprTypes.ChannelStatus.DRAINED),
+            "Channel should be DRAINED"
+        );
     }
 
     function _getDataPayload() internal view returns (bytes memory) {

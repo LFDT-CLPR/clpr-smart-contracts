@@ -15,30 +15,58 @@ log_benchmarks:
     match_path: test/verifiers/hiero/GasUsage.t.sol
     metrics:
       # console.log label -> max allowed gas
-      "Protobuf decode": 177231
-      "Merkle path 1": 1407156
-      "Merkle path 2": 1194688
-      "hinTS BLS12-381": 902642
+      # Hiero decode/Merkle metrics raised by the #451 channel-binding fix: the ClprChannel
+      # leaf's channel_id (proto field 1) is now decoded and bound, and a MerklePath's content
+      # oneof is enforced; both the decode and the two Merkle walks in the breakdown test carry
+      # that cost, and the shared-memory growth ripples into the later gasleft() deltas.
+      "Protobuf decode": 177547
+      "Merkle path 1": 1407829
+      "Merkle path 2": 1195361
+      "hinTS BLS12-381": 901946
       "WRAPS Groth16+KZG": 2456774
-      "TOTAL": 6138491
+      "TOTAL": 6139457
 
   - name: Ethereum mainnet verifier (BLS / SSZ hot paths)
     match_path: test/verifiers/evm/ethereum/GasUsage.t.sol
     metrics:
-      "hashToG2": 113934
-      "BLS aggregateVerifyComplement 342 (170 nonP)": 1348432
-      "BLS aggregateVerifyComplement 512 (0 nonP)": 218662
-      "SSZ syncCommitteeRootFromUncompressed 512": 1187812
+      "hashToG2": 64341
+      "BLS aggregateVerifyComplement 342 (170 nonP)": 1294898
+      "BLS aggregateVerifyComplement 512 (0 nonP)": 169004
+      "SSZ syncCommitteeRootFromUncompressed 512": 1128868
+
+  - name: Ethereum mainnet verifier (verifyBundle / submitBundle by message count)
+    match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
+    metrics:
+      "verifyBundle, ACK-only (N=0)": 464003
+      "verifyBundle, N = 1": 488450
+      "verifyBundle, N = 2": 494227
+      "verifyBundle, N = 5": 505004
+      "verifyBundle, N = 10": 525279
+      "submitBundle TOTAL, ACK-only (N=0)": 589057
+      "submitBundle TOTAL, N = 1": 773830
+      "submitBundle TOTAL, N = 2": 856136
+      "submitBundle TOTAL, N = 5": 1096627
+      "submitBundle TOTAL, N = 10": 1502899
+
+  - name: Tempo verifier (BLS hot paths and full calls)
+    match_path: test/verifiers/tempo/TempoGasReport.t.sol
+    metrics:
+      "hashToG1": 26559
+      "verifyMinSig (hashToG1 + pairing)": 131765
+      "certified header, mainnet tip": 191961
+      "verifyBundle steady state": 228405
+      "verifyBundle, 1 rotation": 416344
+      "verifyBundle, 2 rotations": 602740
+      "verifyConfig": 219523
 
 # End-to-end function gas from `forge test --gas-report`, keyed by contract +
 # function + column (contract-aware: ClprService.submitBundle is distinct from
 # BundleLogic.submitBundle). column ∈ {min, avg, median, max, calls}.
 #
-# We track the `min` column for submitBundle and each verifier's verifyBundle.
-# Each is exercised by a success-only test that calls the function EXACTLY once on
-# the happy path, so min == the real success-path cost. (The full HieroVerifier /
-# QBFTVerifier suites also call verifyBundle on cheap early-revert paths, which is
-# why those metrics point at the dedicated VerifyBundleGas.t.sol files instead.)
+# Single-scenario metrics track the `min` column: a success-only test calls the
+# function EXACTLY once on the happy path, so min == the real success-path cost.
+# (The full HieroVerifier / QBFTVerifier suites also call verifyBundle on cheap
+# early-revert paths, which is why those metrics point at dedicated gas files.)
 gas_report_benchmarks:
   # TODO: test skipped until the real state-proof fixture regeneration work is done.
   #  - name: ClprService.submitBundle (Hiero, real state proof)
@@ -47,15 +75,99 @@ gas_report_benchmarks:
   #    function: submitBundle
   #    column: min
   #    baseline: 6439188
+  # Raised by the #451 channel-binding fix: verifyBundle now decodes the ClprChannel leaf's
+  # channel_id and binds it to channelContext (ClprHieroChannelMismatch).
   - name: HieroVerifier.verifyBundle (success-only path)
     match_path: test/verifiers/hiero/GasUsage.t.sol
     contract: HieroVerifier
     function: verifyBundle
     column: min
-    baseline: 6108407
-  - name: QBFTVerifier.verifyBundle (success-only path)
-    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
-    contract: QBFTVerifier
+    baseline: 6115999
+  # Same proof under the stored keccak256(hintsVk) || step anchor: the Poseidon hash is skipped.
+  - name: HieroVerifier.verifyBundle (steady state, Poseidon skipped)
+    match_path: test/verifiers/hiero/SteadyStateGasUsage.t.sol
+    contract: HieroVerifier
     function: verifyBundle
     column: min
-    baseline: 294393
+    baseline: 4475799
+  - name: QbftHeaderModeVerifier.verifyBundle (success-only path)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyBundle
+    column: min
+    baseline: 122348
+  - name: QbftHeaderModeVerifier.verifyBundle (rotation 10 to 11)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyBundle
+    column: median
+    baseline: 364211
+  - name: QbftHeaderModeVerifier.verifyBundle (rotation 51 to 52)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyBundle
+    column: max
+    baseline: 1232368
+  - name: QbftHeaderModeVerifier.verifyConfig (success-only path)
+    match_path: test/verifiers/evm/qbft/GasUsage.t.sol
+    contract: QbftHeaderModeVerifier
+    function: verifyConfig
+    column: min
+    baseline: 107457
+  # QBFT Contract mode, calling verifier directly
+  - name: QbftContractModeVerifier.verifyBundle (steady state)
+    match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
+    contract: QbftContractModeVerifier
+    function: verifyBundle
+    column: min
+    baseline: 194111
+  - name: QbftContractModeVerifier.verifyBundle (rotation 10 to 11)
+    match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
+    contract: QbftContractModeVerifier
+    function: verifyBundle
+    column: median
+    baseline: 596889
+  - name: QbftContractModeVerifier.verifyBundle (rotation 51 to 52)
+    match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
+    contract: QbftContractModeVerifier
+    function: verifyBundle
+    column: max
+    baseline: 2428340
+  - name: QbftContractModeVerifier.verifyConfig (success-only path)
+    match_path: test/verifiers/evm/qbft/ContractModeGasUsage.t.sol
+    contract: QbftContractModeVerifier
+    function: verifyConfig
+    column: min
+    baseline: 165919
+  # Ethereum mainnet
+  - name: EthMainnetVerifier.verifyBundle (cheapest bundle)
+    match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
+    contract: EthMainnetVerifier
+    function: verifyBundle
+    column: min
+    baseline: 413178
+  - name: EthMainnetVerifier.verifyBundle (rotation)
+    match_path: test/verifiers/evm/ethereum/EthGasReport.t.sol
+    contract: EthMainnetVerifier
+    function: verifyBundle
+    column: max
+    baseline: 4423069
+  # Tempo, calling verifier directly
+  - name: TempoVerifier.verifyBundle (steady state)
+    match_path: test/verifiers/tempo/TempoGasUsage.t.sol
+    contract: TempoVerifier
+    function: verifyBundle
+    column: min
+    baseline: 228405
+  - name: TempoVerifier.verifyBundle (1 rotation)
+    match_path: test/verifiers/tempo/TempoGasUsage.t.sol
+    contract: TempoVerifier
+    function: verifyBundle
+    column: max
+    baseline: 416344
+  - name: TempoVerifier.verifyConfig (success-only path)
+    match_path: test/verifiers/tempo/TempoGasUsage.t.sol
+    contract: TempoVerifier
+    function: verifyConfig
+    column: min
+    baseline: 216143

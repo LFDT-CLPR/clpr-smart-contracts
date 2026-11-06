@@ -13,6 +13,8 @@ export default defineConfig({
         maxWorkers: 1,
         sequence: {concurrent: false},
         reporters: process.env.CI ? ["default", "junit"] : ["default"],
-        outputFile: process.env.CI ? "junit.xml" : undefined
+        outputFile: process.env.CI
+            ? process.env.CLPR_E2E_FEE_TOKEN === "1" ? "junit-token.xml" : "junit.xml"
+            : undefined
     }
 });

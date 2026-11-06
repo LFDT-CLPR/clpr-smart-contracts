@@ -381,10 +381,8 @@ contract SeiCometBftVerifierTest is SeiSyntheticProofs {
             PB.encodeBytesField(4, _buildThrottlesBytes(throttles))
         );
 
-        bytes32 expectedSlotValue;
-        assembly {
-            expectedSlotValue := or(shl(96, serviceAddr20), 0x28)
-        }
+        // short-bytes(20) layout of SERVICE_ADDR: [addr 20B][zeros 11B][len*2 = 0x28]
+        bytes32 expectedSlotValue = 0x5e7c1ce1acce5e7c1ce1acce5e7c1ce1acce5e7c000000000000000000000028;
 
         bytes memory spKey = abi.encodePacked(uint8(0x03), serviceAddr20, bytes32(0));
         (bytes memory storageProofEntry, bytes32 iavlRoot) =

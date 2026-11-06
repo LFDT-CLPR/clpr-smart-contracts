@@ -11,7 +11,6 @@
  *   service                  Deploy ClprService (modules must exist in env)
  *   config                   Apply initial config to an existing ClprService
  *   e2e-with-qbft-verifier   Deploy full E2E stack with QBFTVerifier
- *                              [--min-committed-seals <n>]  (default: 1)
  *   e2e-with-hiero-verifier  Deploy full E2E stack with HieroVerifier
  *
  * Output:
@@ -63,6 +62,7 @@ import {
     deployQbftVerifier,
     deploySeiVerifierStack,
     deployEthMainnetVerifier,
+    deployTempoVerifier,
     hieroVerifierStackToEnv,
     seiVerifierStackToEnv,
     loadLedgerIdBytes
@@ -82,7 +82,8 @@ type Mode =
     | "hiero-verifier"
     | "qbft-verifier"
     | "sei-verifier"
-    | "eth-mainnet-verifier";
+    | "eth-mainnet-verifier"
+    | "tempo-verifier";
 
 const VALID_MODES: Mode[] = [
     "all",
@@ -94,7 +95,8 @@ const VALID_MODES: Mode[] = [
     "hiero-verifier",
     "qbft-verifier",
     "sei-verifier",
-    "eth-mainnet-verifier"
+    "eth-mainnet-verifier",
+    "tempo-verifier"
 ];
 
 /** Output formats. Only "json" today; enum-shaped so more can be added later. */
@@ -103,7 +105,7 @@ const VALID_OUTPUT_FORMATS: OutputFormat[] = ["json"];
 const DEFAULT_OUTPUT_FILE = "clpr-deployed-addresses.json";
 
 function usage(): string {
-    return `usage: tsx script/deploy/cli.ts <${VALID_MODES.join("|")}> --rpc-url <url|anvil|besu|hiero> [--env-file <path>] [--ledger-id <0x...>] [--min-committed-seals <n>] [--auto-enable] [--transfer-ownership-to-account] [--output <json>] [--output-to-file [path]]`;
+    return `usage: tsx script/deploy/cli.ts <${VALID_MODES.join("|")}> --rpc-url <url|anvil|besu|hiero> [--env-file <path>] [--ledger-id <0x...>] [--auto-enable] [--transfer-ownership-to-account] [--output <json>] [--output-to-file [path]]`;
 }
 
 function validateOutputFormat(fmt: string): OutputFormat {
@@ -119,7 +121,6 @@ function parseArgs(argv: string[]): {
     mode: Mode;
     rpcUrl: string;
     envFile: string;
-    minCommittedSeals: number;
     autoEnable: boolean;
     ledgerId?: string;
     transferToAddress: boolean;
@@ -133,7 +134,6 @@ function parseArgs(argv: string[]): {
     let rpcUrl = "";
     let envFile = path.join(REPO_ROOT, ".env");
     let transferToAddress = false;
-    let minCommittedSeals = 1;
     let autoEnable = false;
     let ledgerId: string | undefined;
     let outputFormat: OutputFormat = "json";
@@ -149,10 +149,6 @@ function parseArgs(argv: string[]): {
             envFile = argv[++i]!;
         } else if (arg?.startsWith("--env-file=")) {
             envFile = arg.slice("--env-file=".length);
-        } else if (arg === "--min-committed-seals" && argv[i + 1]) {
-            minCommittedSeals = parseInt(argv[++i]!, 10);
-        } else if (arg?.startsWith("--min-committed-seals=")) {
-            minCommittedSeals = parseInt(arg.slice("--min-committed-seals=".length), 10);
         } else if (arg === "--ledger-id" && argv[i + 1]) {
             ledgerId = argv[++i]!;
         } else if (arg?.startsWith("--ledger-id=")) {
@@ -178,7 +174,7 @@ function parseArgs(argv: string[]): {
         }
     }
     if (!rpcUrl) throw new Error(`${usage()}\nmissing --rpc-url`);
-    return {mode, rpcUrl, envFile, minCommittedSeals, ledgerId, transferToAddress, autoEnable, outputFormat, outputToFile};
+    return {mode, rpcUrl, envFile, ledgerId, transferToAddress, autoEnable, outputFormat, outputToFile};
 }
 
 function requireOwnerAccount(envFile: string): Address {
@@ -304,7 +300,7 @@ async function main(): Promise<void> {
     // Load .env before parseArgs so RPC aliases (BESU_RPC etc.) are available.
     const envFile = extractEnvFile(process.argv.slice(2));
     loadDotEnv(envFile);
-    const {mode, rpcUrl, minCommittedSeals, ledgerId, autoEnable, transferToAddress, outputFormat, outputToFile} =
+    const {mode, rpcUrl, ledgerId, autoEnable, transferToAddress, outputFormat, outputToFile} =
         parseArgs(process.argv.slice(2));
 
     console.error("");
@@ -349,6 +345,9 @@ async function main(): Promise<void> {
             break;
         case "eth-mainnet-verifier":
             console.error("[Deploy]   Deploy Ethereum mainnet verifier (1 contract) against existing ClprService");
+            break;
+        case "tempo-verifier":
+            console.error("[Deploy]   Deploy Tempo verifier (1 contract) against existing ClprService");
             break;
     }
     console.error("");
@@ -396,6 +395,9 @@ async function main(): Promise<void> {
             );
             break;
         case "eth-mainnet-verifier":
+            requireEnv(["PRIVATE_KEY", "CLPR_SERVICE"], envFile);
+            break;
+        case "tempo-verifier":
             requireEnv(["PRIVATE_KEY", "CLPR_SERVICE"], envFile);
             break;
     }
@@ -446,7 +448,7 @@ async function main(): Promise<void> {
             break;
         }
         case "e2e-with-qbft-verifier": {
-            const result = await deployE2EWithQbftVerifier(clients, params, {minCommittedSeals});
+            const result = await deployE2EWithQbftVerifier(clients, params);
             await applyInitialConfigOrPrintInstructions(clients, result.clprService, params, deployer, autoEnable);
             addresses = {
                 ...clprDeployedToEnv(result),
@@ -456,7 +458,7 @@ async function main(): Promise<void> {
                 BUNDLE_ENCODER_HELPER: result.bundleEncoder
             };
             logDeployed(result);
-            console.error(`  QBFTVerifier → ${result.qbftVerifier} (env: QBFT_VERIFIER, minCommittedSeals=${minCommittedSeals})`);
+            console.error(`  QBFTVerifier → ${result.qbftVerifier} (env: QBFT_VERIFIER)`);
             console.error(`  E2EApplication → ${result.application} (env: E2E_APPLICATION)`);
             console.error(`  MockClprConnector → ${result.connectorContract} (env: MOCK_CLPR_CONNECTOR)`);
             console.error(`  BundleEncoderHelper → ${result.bundleEncoder} (env: BUNDLE_ENCODER_HELPER)`);
@@ -494,10 +496,10 @@ async function main(): Promise<void> {
             break;
         }
         case "qbft-verifier": {
-            const result = await deployQbftVerifier(clients, {minCommittedSeals});
+            const result = await deployQbftVerifier(clients);
             addresses = {QBFT_VERIFIER: result.qbftVerifier};
             console.error("=========================================");
-            console.error(`  QBFTVerifier → ${result.qbftVerifier} (env: QBFT_VERIFIER, minCommittedSeals=${minCommittedSeals})`);
+            console.error(`  QBFTVerifier → ${result.qbftVerifier} (env: QBFT_VERIFIER)`);
             break;
         }
         case "sei-verifier": {
@@ -513,6 +515,13 @@ async function main(): Promise<void> {
             addresses = {ETH_MAINNET_VERIFIER: result.ethMainnetVerifier};
             console.error("=========================================");
             console.error(`  EthMainnetVerifier → ${result.ethMainnetVerifier} (env: ETH_MAINNET_VERIFIER)`);
+            break;
+        }
+        case "tempo-verifier": {
+            const result = await deployTempoVerifier(clients);
+            addresses = {TEMPO_VERIFIER: result.tempoVerifier};
+            console.error("=========================================");
+            console.error(`  TempoVerifier → ${result.tempoVerifier} (env: TEMPO_VERIFIER)`);
             break;
         }
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.28;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {ClprService} from "@hiero-ledger/clpr/ClprService.sol";
@@ -114,7 +115,7 @@ contract ClprService_Channel is ClprServiceTestBase {
 
     function test_closeChannel_revert_notOwner() public {
         vm.prank(address(0x99));
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0x99)));
         service.closeChannel(channelId);
     }
 
@@ -174,8 +175,9 @@ contract ClprService_Channel is ClprServiceTestBase {
 
         // Both the channel and the new pending commitment should be cleaned up
         assertFalse(service.pendingCommitments(commit2), "commit2 should be deleted");
+        // No Data Messages were ever sent, so CLOSING advances immediately to DRAINED.
         ClprTypes.Channel memory channel = service.getChannel(channelId);
-        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.CLOSING));
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.DRAINED));
     }
 
     /// @dev peerThrottles is populated at completeChannel from the verifier's verifyConfig return value.
@@ -309,34 +311,19 @@ contract ClprService_Channel is ClprServiceTestBase {
         bytes memory sig = abi.encodePacked(r, s, v);
 
         service.completeChannel(channelId, pubKey, sig, bytes32(0), address(verifier), hex"0001", "");
-        service.closeChannel(channelId); // transitions to CLOSING
+        service.closeChannel(channelId); // ACTIVE -> DRAINED (no Data Messages were ever sent)
+        service.closeChannel(channelId); // DRAINED -> CLOSED (vacuously fully acked)
 
         vm.expectRevert(ClprTypes.ClprInvalidChannelStatus.selector);
-        service.closeChannel(channelId);
+        service.closeChannel(channelId); // CLOSED: neither ACTIVE/PAUSED nor DRAINED
     }
 
-    // Per spec §3.4 and §5.3: closeChannel on a DRAINED channel is the admin
-    // recovery path when the close-notification bundle cannot be delivered. It must
-    // transition directly to CLOSED (not CLOSING).
+    // Admin recovery path: closeChannel on a DRAINED channel transitions directly to
+    // CLOSED once every outbound message has been acknowledged.
     function test_closeChannel_fromDrained_transitionsToClosed() public {
-        // Drive to CLOSING via admin.
+        // No Data Messages were ever sent, so the first admin close advances straight
+        // through CLOSING to DRAINED in the same call.
         service.closeChannel(channelId);
-        assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.CLOSING));
-
-        // Drive CLOSING → DRAINED: submit a bundle where peer is ACTIVE (no DATA messages
-        // outstanding, so lastDataMessageId == 0 and the ack check passes immediately).
-        bytes[] memory msgs = new bytes[](0);
-        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: 1,
-            sentRunningHash: bytes32(0),
-            receivedMessageId: 0,
-            receivedRunningHash: bytes32(0),
-            state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
-        });
-        verifier.setVerifyBundleResult(meta, msgs);
-        verifier.setNewTrustAnchor(hex"01");
-        service.submitBundle(channelId, hex"00FF");
         assertEq(uint8(service.getChannel(channelId).status), uint8(ClprTypes.ChannelStatus.DRAINED));
 
         // Admin recovery: closeChannel from DRAINED → CLOSED directly.
@@ -429,15 +416,16 @@ contract ClprService_Channel is ClprServiceTestBase {
             connectorInboundGasStipend: 500_000,
             // forge-lint: disable-next-line(unsafe-typecast)
             maxChannels: uint32(maxConn),
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
     }
 
-    // ── Edge case: closeChannel with CLOSING status ─────────────────────
+    // ── Edge case: closeChannel status transitions ───────────────────────
 
-    /// @notice Test that closeChannel transitions ACTIVE → CLOSING successfully.
-    /// @dev This covers the channel status transition branch in closeChannel.
-    function test_closeChannel_transitionsActiveToCLOSING() public {
+    /// @notice closeChannel on an ACTIVE channel with no Data Messages outstanding
+    ///         advances straight to DRAINED in the same call.
+    function test_closeChannel_transitionsActiveDirectlyToDrained_whenQueueEmpty() public {
         // Verify initial state is ACTIVE
         ClprTypes.Channel memory beforeClose = service.getChannel(channelId);
         assertEq(uint8(beforeClose.status), uint8(ClprTypes.ChannelStatus.ACTIVE));
@@ -445,9 +433,24 @@ contract ClprService_Channel is ClprServiceTestBase {
         // Close the channel
         service.closeChannel(channelId);
 
-        // Verify state transitioned to CLOSING
+        // Verify state advanced past CLOSING to DRAINED
         ClprTypes.Channel memory afterClose = service.getChannel(channelId);
-        assertEq(uint8(afterClose.status), uint8(ClprTypes.ChannelStatus.CLOSING));
+        assertEq(uint8(afterClose.status), uint8(ClprTypes.ChannelStatus.DRAINED));
+    }
+
+    /// @notice closeChannel on an ACTIVE channel stays at CLOSING while an unacked
+    ///         Data Message remains in the outbound queue.
+    function test_closeChannel_stopsAtClosing_whenDataMessageOutstanding() public {
+        _registerTestConnector();
+        service.sendMessage(channelId, connectorId, hex"11223344", hex"01");
+
+        service.closeChannel(channelId);
+
+        assertEq(
+            uint8(service.getChannel(channelId).status),
+            uint8(ClprTypes.ChannelStatus.CLOSING),
+            "must stay at CLOSING while an unacked Data Message remains outstanding"
+        );
     }
 
     // ── Peer endpoint roster (relocated from test/logic/PeerEndpointRoster.t.sol) ──────

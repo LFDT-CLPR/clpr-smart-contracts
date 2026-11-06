@@ -5,10 +5,12 @@ import {ClprTypes, ChannelStatusChanged, MessageQueued} from "@hiero-ledger/clpr
 import {ClprProtobuf} from "@hiero-ledger/clpr/libraries/codec/ClprProtobuf.sol";
 import {ClprProtobufHelpers} from "@hiero-ledger/clpr/libraries/codec/ClprProtobufHelpers.sol";
 import {ConnectorLib} from "@hiero-ledger/clpr/libraries/service/ConnectorLib.sol";
+import {FeeAssetLib} from "@hiero-ledger/clpr/libraries/service/FeeAssetLib.sol";
 import {BundleDecodeHelper} from "@hiero-ledger/clpr/libraries/codec/BundleDecodeHelper.sol";
 import {IClprVerifier} from "@hiero-ledger/clpr/interfaces/IClprVerifier.sol";
 import {IClprApplication} from "@hiero-ledger/clpr/interfaces/IClprApplication.sol";
 import {IClprConnector} from "@hiero-ledger/clpr/interfaces/IClprConnector.sol";
+import {ExactGasCall} from "@hiero-ledger/clpr/libraries/service/ExactGasCall.sol";
 
 /// @title BundleLib
 /// @notice Implements the 12-step bundle submission algorithm for the CLPR protocol.
@@ -31,6 +33,7 @@ library BundleLib {
         address fallbackRecipient;
         ClprTypes.LedgerConfiguration config;
         ClprTypes.EconomicConfig econ;
+        ClprTypes.FeeAsset feeAsset;
     }
 
     // ── Bundle processing context: cross-step state (see STACK STRATEGY) ──
@@ -52,6 +55,11 @@ library BundleLib {
         /// @dev Address of the BundleDecodeHelper contract for try/catch protobuf decode.
         address decodeHelperAddr;
         uint256 bannedCount;
+        ClprTypes.FeeAsset feeAsset;
+        /// @dev `FeeAssetLib.scale(feeAsset)`: an 18-decimal gas cost × `gasCostMultiplier` / `gasCostDivisor`
+        ///      is in fee-asset units; one of the two is 1.
+        uint256 gasCostMultiplier;
+        uint256 gasCostDivisor;
     }
 
     // ── Events ────────────────────────────────────────────────────────
@@ -73,44 +81,34 @@ library BundleLib {
     /// @dev Thrown when a bundle doesn't make any progress.
     error NoProgress();
 
-    /// @dev Checks if the bundle meets progress criteria to prevent no-op bundles (DoS protection).
-    ///      Reference: CLPR Specification §2.1.2 Bundle Progress Criteria
-    ///      A bundle makes progress if AT LEAST ONE of the following holds:
-    ///      1. New messages (messages with ID > channel.receivedMessageId)
-    ///      2. Trust anchor advancement
-    ///      3. Acknowledgement progress
-    ///      4. Channel state transition
-    ///      5. Endpoint manifest advancement (proven manifest version > stored version)
-    /// @param channel Current channel state
-    /// @param metadata Verified metadata from the bundle
-    /// @param newTrustAnchor New trust anchor (if any) from the bundle
+    /// @dev True when a verifier-reported trust anchor differs from the one the Channel holds. An
+    ///      empty report means "unchanged", and a verifier may also re-report the current anchor;
+    ///      only a different value is a rotation.
+    function _trustAnchorAdvances(bytes memory current, bytes memory reported) internal pure returns (bool) {
+        return reported.length > 0 && keccak256(reported) != keccak256(current);
+    }
+
+    /// @dev DoS guard: a bundle must make progress, or this reverts with NoProgress.
+    /// @param newTrustAnchor The trust anchor the verifier reported. Progress only when it differs
+    ///        from the Channel's stored anchor (see `_trustAnchorAdvances`).
     /// @param manifestAdvances True when the verifier returned a manifest with a version strictly
-    ///        greater than the Channel's stored endpointManifestVersion (Criterion 5)
-    /// Reverts with NoProgress if none of the progress conditions hold
+    ///        greater than the Channel's stored endpointManifestVersion.
     function _checkBundleProgress(
         ClprTypes.Channel memory channel,
         ClprTypes.QueueMetadata memory metadata,
+        uint256 messageCount,
         bytes memory newTrustAnchor,
         bool manifestAdvances
     ) internal pure {
-        // Condition 1: New messages (messages with ID > channel.receivedMessageId).
-        // A bundle makes message progress iff nextMessageId > receivedMessageId + 1.
-        // Leading duplicate messages don't count as progress.
-        if (uint256(metadata.nextMessageId) > uint256(channel.receivedMessageId) + 1) return;
+        // Leading duplicates don't count: only a last message past receivedMessageId is new.
+        if (messageCount > 0 && metadata.lastMessageId > channel.receivedMessageId) return;
 
-        // Condition 2: Trust anchor advancement
-        if (newTrustAnchor.length > 0) return;
-
-        // A manifest-only bundle is valid progress as well.
+        if (_trustAnchorAdvances(channel.trustAnchor, newTrustAnchor)) return;
         if (manifestAdvances) return;
-
-        // Condition 3: Acknowledgement progress
         if (metadata.receivedMessageId > channel.ackedMessageId) return;
 
-        // Condition 4: the bundle drives a channel state transition.
-        //     Routed through the shared `_stepStatus` so this pre-check can never drift from
-        //     what `_applyStateMachine` actually does. The check runs before Step 6 commits
-        //     the new ack, so it looks ahead using max(channel.ackedMessageId, metadata.receivedMessageId).
+        // Looks ahead to the post-ack status: this runs before Step 6 commits the new ack, and
+        // routes through `_stepStatus` so it agrees with what `_applyStateMachine` does after it.
         uint64 effectiveAcked = channel.ackedMessageId;
         if (metadata.receivedMessageId > effectiveAcked) effectiveAcked = metadata.receivedMessageId;
 
@@ -118,14 +116,14 @@ library BundleLib {
             _stepStatus(
                     channel.status,
                     metadata.state,
-                    _allDataAcked(channel, effectiveAcked),
-                    _allOutboundAcked(channel, effectiveAcked)
+                    _allDataAcked(channel.lastDataMessageId, effectiveAcked, channel.nextExpectedReplyId),
+                    _allOutboundAcked(channel.nextMessageId, effectiveAcked),
+                    _allInboundReceived(channel, metadata)
                 ) != channel.status
         ) {
             return;
         }
 
-        // Reject if NONE of the four conditions hold
         revert NoProgress();
     }
 
@@ -233,7 +231,11 @@ library BundleLib {
                 IClprVerifier(channel.verifier).verifyBundle(proofBytes, channel.trustAnchor, channel.channelContext);
 
             _checkBundleProgress(
-                channel, metadata, newTrustAnchor, newEndpointManifest.version > channel.endpointManifestVersion
+                channel,
+                metadata,
+                messagePayloads.length,
+                newTrustAnchor,
+                newEndpointManifest.version > channel.endpointManifestVersion
             );
 
             if (messagePayloads.length > params.config.throttles.maxMessagesPerBundle) {
@@ -253,8 +255,10 @@ library BundleLib {
                 _peerEndpointManifests[params.channelId] = newEndpointManifest;
                 channel.endpointManifestVersion = newEndpointManifest.version;
             }
-            // ── Step 1c: trust-anchor update.
-            if (newTrustAnchor.length > 0) {
+            // ── Step 1c: trust-anchor update, only on an actual rotation — the same test
+            // _checkBundleProgress applies, so a re-reported current anchor is neither progress nor
+            // a write.
+            if (_trustAnchorAdvances(channel.trustAnchor, newTrustAnchor)) {
                 channel.trustAnchor = newTrustAnchor;
                 channel.trustAnchorId = newTrustAnchorId;
             }
@@ -268,25 +272,29 @@ library BundleLib {
         ctx.fallbackRecipient = params.fallbackRecipient;
         ctx.decodeHelperAddr = params.decodeHelperAddr;
         ctx.config = params.config;
+        ctx.feeAsset = params.feeAsset;
+        (ctx.gasCostMultiplier, ctx.gasCostDivisor) = FeeAssetLib.scale(params.feeAsset);
 
         // ── Step 4: Replay defense ───────────────────────────────────
+        // The payloads are the contiguous run ending at lastMessageId. It may be a prefix of the
+        // sender's queue (lastMessageId < nextMessageId - 1) and may repeat already-received
+        // messages at its front, but must not skip past expectedFirstId.
         ctx.expectedFirstId = channel.receivedMessageId + 1;
-        {
-            int256 newMessageCount = int256(uint256(metadata.nextMessageId)) - int256(uint256(ctx.expectedFirstId));
-
-            // < 0: nextMessageId is behind our receivedMessageId — the sender is replaying old state.
-            // > length: metadata claims more new messages than the payload array can hold
-            // forge-lint: disable-next-line(unsafe-typecast)
-            if (newMessageCount < 0 || uint256(newMessageCount) > messagePayloads.length) {
+        if (metadata.nextMessageId < ctx.expectedFirstId) revert ClprTypes.ClprReplayDetected();
+        if (messagePayloads.length > 0) {
+            uint256 lastId = metadata.lastMessageId;
+            if (
+                lastId >= metadata.nextMessageId || lastId < messagePayloads.length
+                    || lastId < channel.receivedMessageId || lastId - channel.receivedMessageId > messagePayloads.length
+            ) {
                 revert ClprTypes.ClprReplayDetected();
             }
-
-            // newMessageCount is in [0, messagePayloads.length], which is bounded by maxMessagesPerBundle (uint16).
+            // Bounded by messagePayloads.length, which is bounded by maxMessagesPerBundle (uint32).
             // forge-lint: disable-next-line(unsafe-typecast)
-            ctx.expectedCount = uint64(uint256(newMessageCount));
+            ctx.expectedCount = uint64(lastId - channel.receivedMessageId);
             // Payloads[0 .. messageStartIndex-1] are leading duplicates; payloads[messageStartIndex .. length-1] are new.
             // forge-lint: disable-next-line(unsafe-typecast)
-            ctx.messageStartIndex = uint64(messagePayloads.length - uint256(newMessageCount));
+            ctx.messageStartIndex = uint64(messagePayloads.length - ctx.expectedCount);
         }
 
         // ── Step 5: Running hash verification ─────────────────────────
@@ -300,7 +308,10 @@ library BundleLib {
             bytes32 payloadHash = sha256(messagePayloads[i]);
             ctx.computedHash = sha256(abi.encodePacked(ctx.computedHash, payloadHash));
         }
-        if (ctx.computedHash != metadata.sentRunningHash) {
+        // A message-less bundle can only be checked when the sender has nothing we haven't received.
+        if (messagePayloads.length > 0) {
+            if (ctx.computedHash != metadata.lastMessageRunningHash) revert ClprTypes.ClprRunningHashMismatch();
+        } else if (metadata.nextMessageId == ctx.expectedFirstId && ctx.computedHash != metadata.sentRunningHash) {
             revert ClprTypes.ClprRunningHashMismatch();
         }
 
@@ -315,18 +326,24 @@ library BundleLib {
         }
 
         // ── Step 7: Response ordering pre-scan ───────────────────────
-        (bool violation, uint64 nextExpected) = _checkResponseOrdering(ctx, channel, messagePayloads, _messageQueues);
-        if (violation) {
-            // A CLOSING channel receiving out-of-order responses is unrecoverable — revert.
+        (OrderingOutcome outcome, uint64 nextExpected) =
+            _checkResponseOrdering(ctx, channel, metadata, messagePayloads, _messageQueues);
+        if (outcome != OrderingOutcome.Ok) {
             if (channel.status == ClprTypes.ChannelStatus.CLOSING) {
-                revert ClprTypes.ClprBundleVerificationFailed();
-            }
-            // Out-of-order responses on ACTIVE → transition to PAUSED
-            if (channel.status == ClprTypes.ChannelStatus.ACTIVE) {
+                // A CLOSING channel receiving out-of-order responses is unrecoverable — revert.
+                if (outcome == OrderingOutcome.StructuralViolation) revert ClprTypes.ClprBundleVerificationFailed();
+                // AwaitingReply on a CLOSING channel: dispatch is skipped. AwaitingReply only fires
+                // when nextExpectedReplyId <= lastDataMessageId, which forces dataAcked false too -
+                // so this call can't actually transition anything here; it's a safe no-op.
+                _applyStateMachine(ctx.channelId, channel, metadata, ctx.newAckedMessageId);
+            } else if (channel.status == ClprTypes.ChannelStatus.ACTIVE) {
+                // Out-of-order responses on ACTIVE → transition to PAUSED
                 channel.status = ClprTypes.ChannelStatus.PAUSED;
                 emit ChannelStatusChanged(ctx.channelId, ClprTypes.ChannelStatus.PAUSED);
             }
-            // If channel.status == ClprTypes.ChannelStatus.PAUSED do nothing
+            // Commit the verified ack even though dispatch is skipped
+            _deleteAckedNonDataMessages(ctx.channelId, ctx.oldAckedMessageId, ctx.newAckedMessageId, _messageQueues);
+            channel.ackedMessageId = ctx.newAckedMessageId;
             _channels[ctx.channelId] = channel;
             return (ctx, channel, metadata, messagePayloads, true);
         }
@@ -355,7 +372,9 @@ library BundleLib {
 
         // ── Step 9a: Lazy config propagation ────────────────────────
         // Both nanosSinceEpoch and lastConfigTimestamp are stored as uint96 nanoseconds.
-        if (ctx.config.nanosSinceEpoch > channel.lastConfigTimestamp) {
+        if (
+            channel.status == ClprTypes.ChannelStatus.ACTIVE && ctx.config.nanosSinceEpoch > channel.lastConfigTimestamp
+        ) {
             channel.lastConfigTimestamp = ctx.config.nanosSinceEpoch;
             bytes memory controlPayload = ClprProtobuf.encodeControlMessage(ctx.config);
             _enqueueMessage(ctx.channelId, channel, controlPayload, _messageQueues, ClprTypes.MessageType.CONTROL);
@@ -394,46 +413,64 @@ library BundleLib {
 
     // ── Internal: State machine ───────────────────────────────────────────
 
-    /// @dev True when all outbound DATA Messages have been acked. `lastDataMessageId == 0`
-    ///      means no DATA Message was ever sent (vacuously acked). Gates CLOSING -> DRAINED
-    ///      (§4.2 Step 5b sub-check 1): Response Messages may still be in flight and drain
+    /// @dev True when all outbound DATA Messages have been acknowledged AND answered.
+    ///      `lastDataMessageId == 0` means no DATA Message was ever sent.
+    ///      Requires the peer's ack to cover every DATA Message AND `nextExpectedReplyId` to
+    ///      have advanced past it: a DATA Message that is acked but not yet answered must not
+    ///      drain. Response Messages this side generates may still be in flight and drain
     ///      through DRAINED, so they are deliberately NOT considered here.
-    function _allDataAcked(ClprTypes.Channel memory channel, uint64 acked) private pure returns (bool) {
-        return channel.lastDataMessageId == 0 || acked >= channel.lastDataMessageId;
+    function _allDataAcked(uint64 lastDataMessageId, uint64 acked, uint64 nextExpectedReplyId)
+        internal
+        pure
+        returns (bool)
+    {
+        return lastDataMessageId == 0 || (acked >= lastDataMessageId && nextExpectedReplyId > lastDataMessageId);
     }
 
     /// @dev True when every outbound message (DATA and Response) has been acked.
     ///      `nextMessageId == 1` means nothing was ever sent (vacuously acked). Gates
-    ///      DRAINED -> CLOSED (§4.2 Step 5b sub-check 2), which requires the final in-flight
-    ///      Response Messages to be acknowledged before the channel may close.
-    function _allOutboundAcked(ClprTypes.Channel memory channel, uint64 acked) private pure returns (bool) {
-        return channel.nextMessageId == 1 || acked >= channel.nextMessageId - 1;
+    ///      DRAINED -> CLOSED, which requires the final in-flight Response Messages to be
+    ///      acknowledged before the channel may close.
+    function _allOutboundAcked(uint64 nextMessageId, uint64 acked) internal pure returns (bool) {
+        return nextMessageId == 1 || acked >= nextMessageId - 1;
     }
 
-    /// @dev One §4.2 state-machine transition; returns `current` unchanged if no rule fires.
+    /// @dev True when every message in the peer's proven queue has been received. A bundle may
+    ///      carry only a prefix of that queue, so DRAINED -> CLOSED must wait for the rest.
+    function _allInboundReceived(ClprTypes.Channel memory channel, ClprTypes.QueueMetadata memory metadata)
+        private
+        pure
+        returns (bool)
+    {
+        return uint256(channel.receivedMessageId) + 1 >= metadata.nextMessageId;
+    }
+
+    /// @dev One state-machine transition; returns `current` unchanged if no rule fires.
     ///      SINGLE source of truth for the transition rules: `_applyStateMachine` applies and
     ///      emits each hop, while `_checkBundleProgress` only asks whether a transition would
     ///      fire. Routing both through here keeps them from drifting apart. `dataAcked` gates
-    ///      CLOSING -> DRAINED (DATA only); `allAcked` gates DRAINED -> CLOSED (DATA + Response).
-    function _stepStatus(ClprTypes.ChannelStatus current, ClprTypes.ChannelStatus peer, bool dataAcked, bool allAcked)
-        private
-        pure
-        returns (ClprTypes.ChannelStatus)
-    {
+    ///      CLOSING -> DRAINED (DATA only); `allAcked` and `inboundReceived` gate DRAINED -> CLOSED.
+    function _stepStatus(
+        ClprTypes.ChannelStatus current,
+        ClprTypes.ChannelStatus peer,
+        bool dataAcked,
+        bool allAcked,
+        bool inboundReceived
+    ) private pure returns (ClprTypes.ChannelStatus) {
         bool peerClosing = peer == ClprTypes.ChannelStatus.CLOSING || peer == ClprTypes.ChannelStatus.DRAINED
             || peer == ClprTypes.ChannelStatus.CLOSED;
         bool peerDone = peer == ClprTypes.ChannelStatus.DRAINED || peer == ClprTypes.ChannelStatus.CLOSED;
 
-        // ACTIVE || PAUSED -> CLOSING (§4.2 Step 5a)
+        // ACTIVE || PAUSED -> CLOSING
         if ((current == ClprTypes.ChannelStatus.ACTIVE || current == ClprTypes.ChannelStatus.PAUSED) && peerClosing) {
             return ClprTypes.ChannelStatus.CLOSING;
         }
-        // CLOSING -> DRAINED (§4.2 Step 5b sub-check 1): all DATA acked; responses may drain later.
+        // CLOSING -> DRAINED: all DATA acked; responses may drain later.
         if (current == ClprTypes.ChannelStatus.CLOSING && dataAcked) {
             return ClprTypes.ChannelStatus.DRAINED;
         }
-        // DRAINED -> CLOSED (§4.2 Step 5b sub-check 2): peer done AND all messages (incl. responses) acked.
-        if (current == ClprTypes.ChannelStatus.DRAINED && peerDone && allAcked) {
+        // DRAINED -> CLOSED: peer done, all our messages (incl. responses) acked, all of theirs received.
+        if (current == ClprTypes.ChannelStatus.DRAINED && peerDone && allAcked && inboundReceived) {
             return ClprTypes.ChannelStatus.CLOSED;
         }
         return current;
@@ -445,19 +482,31 @@ library BundleLib {
         ClprTypes.QueueMetadata memory metadata,
         uint64 newAckedMessageId
     ) internal {
-        bool dataAcked = _allDataAcked(channel, newAckedMessageId);
-        bool allAcked = _allOutboundAcked(channel, newAckedMessageId);
+        bool dataAcked = _allDataAcked(channel.lastDataMessageId, newAckedMessageId, channel.nextExpectedReplyId);
+        bool allAcked = _allOutboundAcked(channel.nextMessageId, newAckedMessageId);
+        bool inboundReceived = _allInboundReceived(channel, metadata);
         // Walk to the settled status, emitting each hop. Transitions are monotonic
         // (ACTIVE -> CLOSING -> DRAINED -> CLOSED), so this terminates in <= 3 steps.
-        ClprTypes.ChannelStatus next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked);
+        ClprTypes.ChannelStatus next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked, inboundReceived);
         while (next != channel.status) {
             channel.status = next;
             emit ChannelStatusChanged(channelId, next);
-            next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked);
+            next = _stepStatus(channel.status, metadata.state, dataAcked, allAcked, inboundReceived);
         }
     }
 
     // ── Internal: Response ordering check ─────────────────────────────────
+
+    /// @dev Outcome of the Step 7 response-ordering pre-scan.
+    enum OrderingOutcome {
+        Ok,
+        /// A REPLY in this bundle is backward/duplicate, targets an unsent message, or skips
+        /// an earlier live DATA - the proof itself is malformed.
+        StructuralViolation,
+        /// The bundle reaches the end of the peer's queue, yet the ack covers a live DATA
+        /// message with no REPLY for it.
+        AwaitingReply
+    }
 
     /// @dev Check if the payload is a message of type DATA
     function _isMessageValueOfTypeData(
@@ -475,22 +524,36 @@ library BundleLib {
     ///
     ///      The check walks every inbound REPLY in order and verifies that its messageId
     ///      matches the current `nextExpectedReplyId`. After a match, `nextExpectedReplyId`
-    ///      is advanced past any non-DATA or redacted (zero-payload) outbound ids to the
+    ///      is advanced past any non-DATA or pruned (zero-payload) outbound ids to the
     ///      next live outbound DATA.
     ///
-    /// @return violation true if any ordering rule was broken.
-    /// @return nextExpectedReplyId
+    ///      The walk starts at `ctx.messageStartIndex`, skipping the leading already-received
+    ///      duplicate prefix exactly as the running-hash (Step 5) and dispatch (Step 10) loops
+    ///      do. A peer legitimately re-sends messages until its ack round-trips, and a read-only
+    ///      proof format (the Hiero block-stream StateProof) cannot be trimmed endpoint-side, so
+    ///      those duplicates reach this pre-scan by design. Re-scanning them would compare an
+    ///      already-consumed REPLY against an already-advanced `nextExpectedReplyId` and report
+    ///      a spurious backward-reply violation, pausing the channel and dropping the genuinely
+    ///      new messages that follow it in the same bundle.
+    ///
+    ///      AwaitingReply is reported only when the bundle reaches the end of the peer's queue.
+    ///      A prefix bundle returns Ok even if its ack covers live DATA that has no REPLY yet.
+    ///
+    /// @return outcome Ok, or the reason Step 7 must skip dispatch (see OrderingOutcome).
+    /// @return nextExpectedReplyId Reply cursor to commit to the channel; 0 unless the outcome is Ok.
     function _checkResponseOrdering(
         BundleContext memory ctx,
         ClprTypes.Channel memory channel,
+        ClprTypes.QueueMetadata memory metadata,
         bytes[] memory messagePayloads,
         mapping(bytes32 => mapping(uint64 => ClprTypes.MessageValue)) storage _messageQueues
-    ) internal view returns (bool violation, uint64) {
+    ) internal view returns (OrderingOutcome, uint64) {
         uint64 nextExpectedReplyId = channel.nextExpectedReplyId;
         uint64 nextMessageId = channel.nextMessageId;
         bytes32 channelId = ctx.channelId;
 
-        for (uint256 j = 0; j < messagePayloads.length; j++) {
+        // Start past the already-received duplicate prefix; see the note above.
+        for (uint256 j = ctx.messageStartIndex; j < messagePayloads.length; j++) {
             // Unknown/empty types can't be REPLYs and are irrelevant to response ordering; skip
             // them here so a malformed message degrades to a per-message skip in _dispatchMessages
             // rather than reverting the entire bundle during this pre-scan.
@@ -499,52 +562,51 @@ library BundleLib {
 
             uint64 replyMessageId = ClprProtobuf.decodeReplyMessage(messagePayloads[j]).messageId;
 
-            // A REPLY for an un-acked outbound message is a violation.
-            if (replyMessageId >= nextMessageId) return (true, 0);
+            // A REPLY for an unsent outbound message is a violation.
+            if (replyMessageId >= nextMessageId) return (OrderingOutcome.StructuralViolation, 0);
 
-            // Duplicate reply — skip silently.
-            if (nextExpectedReplyId > replyMessageId) continue;
+            // Backward/duplicate reply - violation.
+            if (nextExpectedReplyId > replyMessageId) return (OrderingOutcome.StructuralViolation, 0);
 
-            // Advance past skipped live DATA messages.
+            // Every id between the cursor and this REPLY's must be non-DATA or pruned: a live
+            // DATA there means this REPLY arrived out of order.
             while (nextExpectedReplyId < replyMessageId) {
-                // If nextExpected points to a slot that still has a live DATA (non-redacted),
-                // that DATA is being skipped — ordering violation.
                 if (
                     nextExpectedReplyId < nextMessageId
                         && _isMessageValueOfTypeData(channelId, nextExpectedReplyId, _messageQueues)
                 ) {
-                    return (true, 0);
-                    // CONTROL/REPLY/redacted-DATA slots are skipped silently.
+                    return (OrderingOutcome.StructuralViolation, 0);
                 }
                 nextExpectedReplyId++;
             }
 
             // nextExpectedReplyId == replyId guaranteed here
-            // Advance past this id regardless of whether it was a live or redacted DATA.
             nextExpectedReplyId++;
-            // Skip forward past non-DATA or redacted slots to preload next expected.
             while (nextExpectedReplyId < nextMessageId) {
                 if (_isMessageValueOfTypeData(channelId, nextExpectedReplyId, _messageQueues)) break;
-                // Redacted or non-DATA slot; skip.
                 nextExpectedReplyId++;
             }
         }
 
+        // The peer enqueues each REPLY in the transaction that receives its DATA, so an acked DATA
+        // without a REPLY is conclusive only once the bundle reaches the end of the peer's queue;
+        // short of that, the missing REPLYs are among the messages the peer has yet to relay.
+        uint64 tail = messagePayloads.length > 0 ? metadata.lastMessageId : channel.receivedMessageId;
+
+        if (uint256(tail) + 1 < metadata.nextMessageId) return (OrderingOutcome.Ok, nextExpectedReplyId);
+
         // After processing all inbound REPLYs, verify that every newly-acked outbound DATA
         // (ids in range [old nextExpectedReplyId ... newAckedMessageId]) has received its REPLY.
-        // If nextExpectedReplyId <= newAckedMessageId, scan forward for any live DATA that should
-        // have had a REPLY but didn't get one in this bundle.
         uint64 scanId = nextExpectedReplyId;
         while (scanId <= ctx.newAckedMessageId) {
             if (scanId < nextMessageId && _isMessageValueOfTypeData(channelId, scanId, _messageQueues)) {
-                // A live DATA message was acked but no REPLY arrived — violation.
-                return (true, 0);
+                // A live DATA message was acked but no REPLY arrived — awaiting reply, not malformed.
+                return (OrderingOutcome.AwaitingReply, 0);
             }
-            // Non-DATA slots (CONTROL/REPLY) are always skipped.
             scanId++;
         }
 
-        return (false, nextExpectedReplyId);
+        return (OrderingOutcome.Ok, nextExpectedReplyId);
     }
 
     // ── Internal: Delete acked non-data messages ──────────────────────────
@@ -601,12 +663,10 @@ library BundleLib {
                         _pendingWithdrawals
                     );
                 } catch (bytes memory reason) {
-                    // An unknown field inside the DATA message is a protocol violation (version
-                    // resulting in rejection of the entire bundle.
-                    // Every OTHER decode failure (missing/garbled fields) stays a
-                    // per-message APPLICATION_ERROR reply, so the source application can react
-                    // (e.g. redact the malformed message) and the rest of the bundle processes.
-                    // Previous error is carried, its leading 4-byte selector is forwarded.
+                    // An unknown field inside the DATA message is a protocol violation, re-thrown
+                    // unchanged to reject the entire bundle. Every other decode failure
+                    // (missing/garbled fields) stays a per-message APPLICATION_ERROR reply, so the
+                    // source application can react and the rest of the bundle processes.
                     // forge-lint: disable-next-line(unsafe-typecast)
                     if (reason.length >= 4 && bytes4(reason) == ClprTypes.ClprUnknownWireField.selector) {
                         _revertWith(reason);
@@ -627,21 +687,14 @@ library BundleLib {
                     _connectorQueueCounts,
                     _pendingWithdrawals
                 );
-            } else if (msgType == ClprTypes.MessageType.REDACTED) {
-                // Destination receives a ClprRedactedMessage - generate a REDACTED reply
-                _enqueueReplyAndEmit(ctx, channel, receivedMsgId, ClprTypes.ReplyStatus.REDACTED, "", _messageQueues);
             } else {
                 // ClprTypes.MessageType.CONTROL
                 try helper.decodeControl(payload) returns (ClprTypes.DecodedControl memory decoded) {
                     _processControlMessageDecoded(ctx, decoded, channel);
                 } catch (bytes memory reason) {
-                    // An unknown ClprControlMessage oneof variant is a protocol violation, not a
-                    // malformed-payload hiccup: the spec requires rejecting the entire bundle
-                    // rather than degrading to a per-message skip, so re-throw and let it
-                    // propagate out of submitBundle instead of swallowing it below.
-                    // A custom error's identity is fully carried by its leading 4-byte selector,
-                    // so truncating `reason` to compare against `.selector` is the intended way
-                    // to identify which error was thrown
+                    // A protocol violation rejects the entire bundle rather than degrading to a
+                    // per-message skip: re-throw an unknown oneof variant, an unknown wire field,
+                    // or a CONTROL message that does not parse (truncated input, varint overflow).
                     if (reason.length >= 4) {
                         // forge-lint: disable-next-line(unsafe-typecast)
                         bytes4 selector = bytes4(reason);
@@ -649,7 +702,6 @@ library BundleLib {
                             revert ClprTypes.ClprBundleVerificationFailedOneOfVariant();
                         }
                         if (selector == ClprTypes.ClprUnknownWireField.selector) _revertWith(reason);
-                        // A CONTROL message that does not parse is a protocol violation and rejects the whole bundle.
                         if (
                             selector == ClprProtobufHelpers.TruncatedInput.selector
                                 || selector == ClprProtobufHelpers.VarintOverflow.selector
@@ -703,8 +755,8 @@ library BundleLib {
         }
     }
 
-    /// @dev Process a DATA message using a pre-decoded struct.
-    ///      Charges actual gas used (× gasPrice × margin factor) rather than a fixed cost; all paid to the submitter.
+    /// @dev Charges the connector for the gas used (`_executionCharge`), paid to the submitter. When
+    ///      `_chargesExecution` is false, execution is free: no balance check, charge or slash.
     function _processDataMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.Channel memory channel,
@@ -717,7 +769,6 @@ library BundleLib {
         mapping(bytes32 => bool) storage _connectorExists,
         mapping(address => uint256) storage _pendingWithdrawals
     ) internal {
-        // Look up connector
         if (!ConnectorLib.has(_connectorExists, ctx.channelId, data.connectorId)) {
             _enqueueReplyAndEmit(
                 ctx, channel, receivedMsgId, ClprTypes.ReplyStatus.CONNECTOR_NOT_FOUND, "", _messageQueues
@@ -727,16 +778,12 @@ library BundleLib {
 
         // Bound the gas forwarded to the application by what the connector can actually pay for,
         // so the endpoint never performs work it cannot recover the cost of.
-        //
 
         address connectorContract =
             ConnectorLib.getContract(_connectors, _connectorExists, ctx.channelId, data.connectorId);
         uint256 gasLimit = ctx.throttles.maxGasPerMessage;
-        // tx.gasprice == 0 (some test/L2 environments) means execution is free — nothing to
-        // charge, so no affordability bound applies and the division is skipped.
-        if (tx.gasprice > 0) {
-            uint256 affordableGas =
-                connectorContract.balance * 100 / ((100 + uint256(ctx.econ.endpointMarginPercent)) * tx.gasprice);
+        if (_chargesExecution(ctx)) {
+            uint256 affordableGas = _affordableGas(ctx, connectorContract);
             if (affordableGas == 0) {
                 _slashConnector(ctx, data.connectorId, _connectors, _connectorExists, _pendingWithdrawals);
                 _enqueueReplyAndEmit(
@@ -747,53 +794,52 @@ library BundleLib {
             if (affordableGas < gasLimit) gasLimit = affordableGas;
         }
 
-        // Dispatch to application
         address targetApp = _bytesToAddress(data.targetApplication);
-        ClprTypes.ReplyStatus replyStatus = ClprTypes.ReplyStatus.APPLICATION_ERROR;
-        bytes memory responseData;
-        uint256 gasUsed;
-
-        if (targetApp.code.length != 0) {
-            uint256 gasBefore = gasleft();
-            try IClprApplication(targetApp).onClprMessage{gas: gasLimit}(
-                ctx.channelId, data.sender, data.messageData
-            ) returns (
-                bytes memory response
-            ) {
-                replyStatus = ClprTypes.ReplyStatus.SUCCESS;
-                responseData = response;
-            } catch (bytes memory reason) {
-                // Forward the raw revert reason to the peer so it can decode the error.
-                responseData = reason;
-            }
-            gasUsed = gasBefore - gasleft();
+        if (targetApp.code.length == 0) {
+            _notifyConnectorInbound(ctx, connectorContract, receivedMsgId, data);
+            _enqueueReplyAndEmit(
+                ctx, channel, receivedMsgId, ClprTypes.ReplyStatus.APPLICATION_ERROR, "", _messageQueues
+            );
+            return;
         }
 
-        // Charge actual gas used + margin; all goes to submitter.
-        uint256 actualCharge = gasUsed * tx.gasprice;
-        uint256 totalCharge = actualCharge + actualCharge * ctx.econ.endpointMarginPercent / 100;
+        // Read before the calldata is encoded: the connector is charged for encoding the call through
+        // decoding its return.
+        uint256 gasBefore = gasleft();
+        // A failed call is never well-formed, so `success` adds nothing here.
+        // slither-disable-next-line unused-return
+        (, bool wellFormed, bytes memory responseData) = ExactGasCall.callWithExactGas(
+            targetApp,
+            gasLimit,
+            abi.encodeCall(IClprApplication.onClprMessage, (ctx.channelId, data.sender, data.messageData)),
+            true
+        );
+        uint256 gasUsed = gasBefore - gasleft();
+        ClprTypes.ReplyStatus replyStatus =
+            wellFormed ? ClprTypes.ReplyStatus.SUCCESS : ClprTypes.ReplyStatus.APPLICATION_ERROR;
 
+        uint256 totalCharge = _executionCharge(ctx, gasUsed);
         if (totalCharge > 0) {
             bool charged = ConnectorLib.charge(
                 _connectors,
                 _connectorExists,
                 _pendingWithdrawals,
+                ctx.feeAsset,
                 ctx.fallbackRecipient,
                 ctx.channelId,
                 data.connectorId,
                 totalCharge,
-                ctx.bundleSubmitter
+                ctx.bundleSubmitter,
+                ctx.econ.connectorPaymentGasLimit
             );
             if (!charged) {
                 _slashConnector(ctx, data.connectorId, _connectors, _connectorExists, _pendingWithdrawals);
             }
         }
 
-        // Best-effort inbound notification to the connector contract. A revert here
-        // does not block message processing — the connector has already been charged.
+        // Best-effort: a connector revert does not block message processing.
         _notifyConnectorInbound(ctx, connectorContract, receivedMsgId, data);
 
-        // Enqueue reply
         _enqueueReplyAndEmit(ctx, channel, receivedMsgId, replyStatus, responseData, _messageQueues);
     }
 
@@ -803,18 +849,24 @@ library BundleLib {
         uint64 receivedMsgId,
         ClprTypes.DecodedDataMessage memory data
     ) internal {
-        if (connectorContract.code.length == 0) return;
-        try IClprConnector(connectorContract).onInboundMessage{gas: ctx.econ.connectorInboundGasStipend}(
-            ctx.channelId, receivedMsgId, data.sender, data.targetApplication, data.messageData
-        ) {}
-        catch {
-            emit ConnectorInboundCallbackFailed(ctx.channelId, receivedMsgId);
-        }
+        // A call with no gas would fail and emit ConnectorInboundCallbackFailed for every message.
+        if (connectorContract.code.length == 0 || ctx.econ.connectorInboundGasStipend == 0) return;
+        // onInboundMessage returns nothing, so only `success` is kept.
+        // slither-disable-next-line unused-return
+        (bool success,,) = ExactGasCall.callWithExactGas(
+            connectorContract,
+            ctx.econ.connectorInboundGasStipend,
+            abi.encodeCall(
+                IClprConnector.onInboundMessage,
+                (ctx.channelId, receivedMsgId, data.sender, data.targetApplication, data.messageData)
+            ),
+            false
+        );
+        if (!success) emit ConnectorInboundCallbackFailed(ctx.channelId, receivedMsgId);
     }
 
-    /// @dev Process a REPLY message using a pre-decoded struct.
-    ///      Uses connectorIdForReply to decrement inflight and slash even when the
-    ///      original DATA payload has been redacted (zeroed).
+    /// @dev Charges the source connector for the gas the sender's onClprResponse callback used
+    ///      (`_executionCharge`, zero when execution is free), paid to the submitter.
     function _processReplyMessageDecoded(
         BundleContext memory ctx,
         ClprTypes.DecodedReply memory reply,
@@ -825,46 +877,28 @@ library BundleLib {
         mapping(bytes32 => mapping(bytes32 => uint32)) storage _connectorQueueCounts,
         mapping(address => uint256) storage _pendingWithdrawals
     ) internal {
-        // Fetch original outbound message
-        ClprTypes.MessageValue memory message = _messageQueues[ctx.channelId][reply.messageId];
+        bytes32 channelId = ctx.channelId;
+        ClprTypes.MessageValue memory message = _messageQueues[channelId][reply.messageId];
+        delete _messageQueues[channelId][reply.messageId];
 
-        // Delete original immediately (before callback). Note: channel state updates are batched
-        // in memory and persisted after all dispatches complete via _channels assignment.
-        delete _messageQueues[ctx.channelId][reply.messageId];
-
-        // connectorIdForReply holds the connectorId for every DATA original (redacted or not)
-        // and is bytes32(0) for CONTROL/REPLY messages
-        bytes32 connectorIdBytes = message.connectorIdForReply;
-        if (connectorIdBytes == bytes32(0)) {
-            emit ReplyDelivered(ctx.channelId, reply.messageId, reply.status);
+        // connectorIdForReply holds the connectorId for every DATA original and is bytes32(0) for CONTROL/REPLY
+        bytes32 connectorId = message.connectorIdForReply;
+        if (connectorId == bytes32(0)) {
+            emit ReplyDelivered(channelId, reply.messageId, reply.status);
             return;
         }
 
-        // senderBytes stays empty for redacted DATA (payload is a ClprRedactedMessage marker); only recoverable from a live payload.
-        bytes memory senderBytes;
-        (, ClprTypes.MessageType msgType) = ClprProtobuf.tryGetMessageType(message.payload);
-        if (msgType == ClprTypes.MessageType.DATA) {
-            // Live (non-redacted) DATA: recover sender for the callback and decrement counters.
-            // Counters were already decremented at redactMessage time for redacted slots.
-            senderBytes = ClprProtobuf.decodeDataMessage(message.payload).sender;
-            bytes32 inflightKey = keccak256(abi.encodePacked(ctx.channelId, connectorIdBytes));
-            bytes32 quotaKey = keccak256(abi.encodePacked(connectorIdBytes));
-            if (_connectorInflightCount[inflightKey] > 0) _connectorInflightCount[inflightKey]--;
-            if (_connectorQueueCounts[ctx.channelId][quotaKey] > 0) {
-                _connectorQueueCounts[ctx.channelId][quotaKey]--;
-            }
-        }
+        bytes memory senderBytes = ClprProtobuf.decodeDataMessage(message.payload).sender;
+        _connectorInflightCount[keccak256(abi.encodePacked(channelId, connectorId))]--;
+        _connectorQueueCounts[channelId][connectorId]--;
 
-        // Source-side slashing (fires even for redacted DATA)
         if (
             reply.status == ClprTypes.ReplyStatus.CONNECTOR_NOT_FOUND
                 || reply.status == ClprTypes.ReplyStatus.CONNECTOR_UNDERFUNDED
         ) {
-            _slashConnector(ctx, connectorIdBytes, _connectors, _connectorExists, _pendingWithdrawals);
+            _slashConnector(ctx, connectorId, _connectors, _connectorExists, _pendingWithdrawals);
         }
 
-        // Best-effort callback to sender application (only if sender is a 20-byte address).
-        //
         // REENTRANCY INVARIANT: this hands control to untrusted application code while
         // channel state is mid-update. The storage maps touched above (message slot,
         // inflight/quota counters) are already written, but `channel` is an in-memory copy —
@@ -876,17 +910,70 @@ library BundleLib {
         //      observe inconsistent state (read-only reentrancy). This is only safe because no
         //      CLPR view is consumed by another contract as an authoritative oracle. If that
         //      ever changes, such a view must revert under the reentrancy guard.
+        uint256 gasUsed;
         if (senderBytes.length == 20 && _bytesToAddress(senderBytes).code.length > 0) {
-            try IClprApplication(_bytesToAddress(senderBytes)).onClprResponse{gas: ctx.throttles.maxGasPerMessage}(
-                ctx.channelId, reply.messageId, uint8(reply.status), reply.messageReplyData
-            ) {}
-                catch {}
+            uint256 gasBefore = gasleft();
+            // Best-effort: a failed onClprResponse does not undo the delivered reply.
+            // slither-disable-next-line unused-return
+            ExactGasCall.callWithExactGas(
+                _bytesToAddress(senderBytes),
+                ctx.throttles.maxGasPerMessage,
+                abi.encodeCall(
+                    IClprApplication.onClprResponse,
+                    (channelId, reply.messageId, uint8(reply.status), reply.messageReplyData)
+                ),
+                false
+            );
+            gasUsed = gasBefore - gasleft();
         }
 
-        emit ReplyDelivered(ctx.channelId, reply.messageId, reply.status);
+        // A failed charge is not slashed: source-side slashing is keyed only on the reply status,
+        // and slashing here would penalise a CONNECTOR_NOT_FOUND/UNDERFUNDED reply twice. The
+        // submitter absorbs the unpaid cost, including when the slash above banned the connector.
+        uint256 totalCharge = _executionCharge(ctx, gasUsed);
+        if (totalCharge > 0) {
+            ConnectorLib.charge(
+                _connectors,
+                _connectorExists,
+                _pendingWithdrawals,
+                ctx.feeAsset,
+                ctx.fallbackRecipient,
+                channelId,
+                connectorId,
+                totalCharge,
+                ctx.bundleSubmitter,
+                ctx.econ.connectorPaymentGasLimit
+            );
+        }
+
+        emit ReplyDelivered(channelId, reply.messageId, reply.status);
     }
 
     // ── Internal: Helpers ──────────────────────────────────────────────────
+
+    /// @dev Charge in fee-asset units, zero when execution is free.
+    function _executionCharge(BundleContext memory ctx, uint256 gasUsed) internal view returns (uint256) {
+        if (!_chargesExecution(ctx)) return 0;
+        uint256 actualCharge = gasUsed * tx.gasprice;
+        return (actualCharge + actualCharge * ctx.econ.endpointMarginPercent / 100) * ctx.gasCostMultiplier
+            / ctx.gasCostDivisor;
+    }
+
+    /// @dev Gas the connector's fee-asset balance pays for at `tx.gasprice` plus margin. Anyone can send the
+    ///      connector tokens, so the balance is capped where the product would overflow and revert the
+    ///      bundle; a capped balance still pays for far more than `maxGasPerMessage`.
+    function _affordableGas(BundleContext memory ctx, address connectorContract) private view returns (uint256) {
+        uint256 balance = FeeAssetLib.balanceOf(ctx.feeAsset, connectorContract);
+        uint256 maxBalance = type(uint256).max / (ctx.gasCostDivisor * 100);
+        if (balance > maxBalance) balance = maxBalance;
+        return balance * ctx.gasCostDivisor * 100
+            / ((100 + uint256(ctx.econ.endpointMarginPercent)) * tx.gasprice * ctx.gasCostMultiplier);
+    }
+
+    /// @dev `tx.gasprice` is zero in some test/L2 environments; the DATA affordability bound divides by it.
+    function _chargesExecution(BundleContext memory ctx) private view returns (bool) {
+        return ctx.econ.messageExecutionCost > 0 && tx.gasprice > 0;
+    }
 
     function _enqueueMessage(
         bytes32 channelId,
@@ -934,6 +1021,7 @@ library BundleLib {
             _connectors,
             _connectorExists,
             _pendingWithdrawals,
+            ctx.feeAsset,
             ctx.fallbackRecipient,
             ctx.channelId,
             connectorId,

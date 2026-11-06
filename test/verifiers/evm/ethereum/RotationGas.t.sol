@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {console} from "forge-std/Test.sol";
 import {ClprBls12381} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBls12381.sol";
 import {ClprBeaconSsz} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprBeaconSsz.sol";
+import {ClprCommitteeMerkle} from "@hiero-ledger/clpr/libraries/proof/beacon/ClprCommitteeMerkle.sol";
 import {EthMainnetVerifier} from "@hiero-ledger/clpr/verifiers/evm/ethereum/EthMainnetVerifier.sol";
 import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 import {EthCommitteeFixtures} from "@test/verifiers/evm/ethereum/EthCommitteeFixtures.sol";
@@ -13,13 +14,23 @@ import {EthCommitteeFixtures} from "@test/verifiers/evm/ethereum/EthCommitteeFix
 contract AnchorEncodeHarness is EthMainnetVerifier {
     constructor() {}
 
+    /// @dev Measures the full window encode: two committee Merkle roots plus the flat pack. Both
+    ///      committees use the same key material here — this measures cost, not correctness.
     function measureEncode(bytes[] memory pubkeys, bytes memory aggregate)
         external
         view
         returns (uint256 used, uint256 len)
     {
         uint256 g = gasleft();
-        bytes memory a = _encodeTrustAnchor(pubkeys, aggregate, bytes32(0), hex"04000000", bytes32(0), bytes32(0));
+        bytes memory a = _encodeTrustAnchor(
+            AnchorScalars({
+                gvr: bytes32(0), forkVersion: hex"04000000", channelId: bytes32(0), codeHash: bytes32(0), period: 0
+            }),
+            aggregate,
+            ClprCommitteeMerkle.root(pubkeys),
+            aggregate,
+            ClprCommitteeMerkle.root(pubkeys)
+        );
         used = g - gasleft();
         len = a.length;
     }

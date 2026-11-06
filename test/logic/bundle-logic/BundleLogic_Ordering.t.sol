@@ -48,7 +48,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // acking our outbound message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -57,6 +59,45 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         // Channel should be PAUSED
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED));
+    }
+
+    // ── Ack commit on the PAUSE path
+
+    /// @dev the ack that triggers the response-ordering PAUSE must
+    ///      still be committed to chan.ackedMessageId, even though dispatch is skipped. Otherwise
+    ///      chan.ackedMessageId never advances, so an identical resubmission of the same ack-only
+    ///      bundle keeps looking like fresh "ack progress" to _checkBundleProgress and re-pauses
+    ///      indefinitely instead of being rejected as a no-op.
+    function test_pause_commitsAck_soRepeatedNoOpBundleIsRejectedAsNoProgress() public {
+        _registerTestConnector();
+
+        // Send an outbound DATA message so there's something to ack.
+        service.sendMessage(channelId, connectorId, hex"0011223344", hex"01020304");
+
+        // Bundle acks our message without providing its REPLY -> PAUSE.
+        bytes[] memory emptyMsgs = new bytes[](0);
+        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
+            nextMessageId: 1,
+            sentRunningHash: bytes32(0),
+            receivedMessageId: 1, // acking our outbound message 1
+            receivedRunningHash: bytes32(0),
+            state: ClprTypes.ChannelStatus.ACTIVE,
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
+        });
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        _submitBundle(hex"00FF");
+
+        ClprTypes.Channel memory chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.PAUSED));
+        assertEq(chan.ackedMessageId, 1, "ack that triggered the pause must still be committed");
+
+        // Resubmitting the exact same ack-only bundle no longer looks like fresh ack progress,
+        // so it must be rejected as a no-op instead of re-triggering the same pause again.
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        vm.expectRevert(BundleLib.NoProgress.selector);
+        _submitBundle(hex"00FF");
     }
 
     // ── Test 7: Auto-resume after PAUSE
@@ -75,7 +116,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta1, emptyMsgs);
         _submitBundle(hex"00FF");
@@ -96,7 +139,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // same ack level
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta2, msgs);
         _submitBundle(hex"00FF02");
@@ -126,7 +171,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // ack message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"00FF");
@@ -156,7 +203,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1, // ack message 1
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -185,7 +234,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // acking our DATA #1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, emptyMsgs);
             _submitBundle(hex"00FF");
@@ -194,8 +245,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED), "should be PAUSED");
 
         // Bundle 2: peer provides REPLY for message 1 (ordering satisfied) + peer state = CLOSING.
-        //           Peer still has NOT acked our message 2, so ackedMessageId remains at 0
-        //           and CLOSING won't immediately drain.
+        //           Bundle 1's ack of message 1 is already committed (see #416 fix), so ack
+        //           progress can't go backward; keep it at 1 so message 2 stays unacked and
+        //           CLOSING won't immediately drain.
         {
             bytes memory replyPayload = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"");
             bytes[] memory msgs = new bytes[](1);
@@ -205,10 +257,12 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
                 nextMessageId: 2,
                 sentRunningHash: hash,
-                receivedMessageId: 0, // NOT acking our messages yet
+                receivedMessageId: 1, // no further ack progress; message 2 still unacked
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.CLOSING, // peer is closing
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF02");
@@ -240,7 +294,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 2, // acking both our messages
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, emptyMsgs);
             _submitBundle(hex"00FF");
@@ -273,7 +329,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, empty);
             _submitBundle(hex"B101");
@@ -307,7 +365,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 3,
+                lastMessageRunningHash: hash124
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"B102");
@@ -333,7 +393,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 3,
+                lastMessageRunningHash: hash124
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"B103");
@@ -362,7 +424,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 4,
+                lastMessageRunningHash: hash1234
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"B104");
@@ -393,7 +457,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 0,
+                lastMessageRunningHash: bytes32(0)
             });
             verifier.setVerifyBundleResult(meta, empty);
             _submitBundle(hex"C101");
@@ -417,7 +483,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
 
@@ -459,7 +527,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 2,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -467,73 +537,55 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         _submitBundle(hex"00FF");
     }
 
-    function test_redactMessage_decrementsInflight() public {
+    // ── CLOSING + AwaitingReply → state machine must still transition
+
+    /// @dev A CLOSING channel receives an ack-only bundle: the ack satisfies dataAcked (so
+    ///      CLOSING -> DRAINED should fire), but the acked DATA has no REPLY yet, so
+    ///      _checkResponseOrdering reports AwaitingReply rather than Ok. The early-return path
+    ///      must still apply the state machine transition, not just commit the ack — otherwise
+    ///      the channel is stuck CLOSING forever and the identical bundle can be resubmitted
+    ///      indefinitely with no progress and no revert.
+    /// @dev A DATA Message that is acked but not yet answered (AwaitingReply) must NOT drain
+    ///      CLOSING -> DRAINED. Draining anyway would let the channel reach DRAINED with a
+    ///      REPLY still outstanding that, since no DATA Message ever exists past
+    ///      lastDataMessageId, could never subsequently arrive — leaving the channel stuck.
+    function test_closingPlusAwaitingReply_staysClosingUntilAnswered() public {
         _registerTestConnector();
 
-        // Send a DATA message
-        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"01020304");
+        // Send one outbound DATA message so there is something to ack.
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"AABB");
 
-        // Redact it
-        service.redactMessage(channelId, 1);
+        // Close the channel locally.
+        service.closeChannel(channelId);
+        ClprTypes.Channel memory chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.CLOSING));
 
-        // Now removeConnector should succeed (inflight = 0 after redaction fix)
-        // First we need to ack the message so removeConnector's inflight check passes.
-        // The ack is what processBundle does, but we can also test removeConnector directly.
-        // After redaction, inflight should be 0, so removeConnector should not revert
-        // with ClprConnectorHasInflightMessages.
-
-        // Submit a bundle that acks the redacted message (receivedMessageId=1) with no reply.
-        // Since payload is redacted (empty), ordering check doesn't flag it as a live DATA.
+        // Peer acks our DATA #1 but hasn't sent its REPLY yet -> AwaitingReply.
         bytes[] memory emptyMsgs = new bytes[](0);
         ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
             nextMessageId: 1,
             sentRunningHash: bytes32(0),
-            receivedMessageId: 1,
+            receivedMessageId: 1, // acking our DATA #1
             receivedRunningHash: bytes32(0),
-            state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            state: ClprTypes.ChannelStatus.CLOSING, // peer is also closing
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         verifier.setVerifyBundleResult(meta, emptyMsgs);
         _submitBundle(hex"00FF");
 
-        // After redaction + ack (no reply needed since payload was empty), try removeConnector
-        service.removeConnector(channelId, connectorId, owner);
-        // Should not revert — inflight was decremented by redactMessage
-    }
+        // dataAcked is false (acked but not answered), so CLOSING -> DRAINED must not fire,
+        // even though dispatch was skipped and the ack itself is still committed.
+        chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.CLOSING), "must stay CLOSING until answered");
+        assertEq(chan.ackedMessageId, 1, "ack must still be committed");
 
-    function test_redactMessage_replyStillSlashesSourceConnector() public {
-        _registerTestConnector();
-
-        // Send a DATA message
-        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"01020304");
-
-        // Redact it
-        service.redactMessage(channelId, 1);
-
-        // Get connector state before
-        ClprTypes.Connector memory connBefore = service.getConnector(channelId, connectorId);
-        uint256 stakeBefore = connBefore.lockedStake;
-
-        // Submit inbound CONNECTOR_NOT_FOUND reply for the redacted message
-        bytes memory replyPayload = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.CONNECTOR_NOT_FOUND, hex"");
-        bytes[] memory msgs = new bytes[](1);
-        msgs[0] = replyPayload;
-        bytes32 hash = sha256(abi.encodePacked(bytes32(0), sha256(replyPayload)));
-
-        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
-            nextMessageId: 2,
-            sentRunningHash: hash,
-            receivedMessageId: 1,
-            receivedRunningHash: bytes32(0),
-            state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
-        });
-        verifier.setVerifyBundleResult(meta, msgs);
+        // Resubmitting the identical no-op bundle must now be rejected as no progress,
+        // instead of silently re-evaluating the same non-transition forever.
+        verifier.setVerifyBundleResult(meta, emptyMsgs);
+        vm.expectRevert(BundleLib.NoProgress.selector);
         _submitBundle(hex"00FF");
-
-        // Connector is slashed by the REPLY even though the original DATA was redacted
-        ClprTypes.Connector memory connAfter = service.getConnector(channelId, connectorId);
-        assertTrue(connAfter.lockedStake < stakeBefore, "connector should be slashed");
     }
 
     function test_scanForwardSkipsReplySlot_coversLine452() public {
@@ -555,7 +607,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 0, // peer hasn't acked our DATA yet
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00A1");
@@ -576,7 +630,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // peer acks our DATA at slot 1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00A2");
@@ -605,7 +661,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 0,
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00B1");
@@ -630,7 +688,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 2, // peer acks our slots 1 (REPLY) and 2 (DATA)
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00B2");
@@ -643,7 +703,7 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         assertEq(slot2.payload.length, 0, "slot 2 DATA deleted after reply");
     }
 
-    function test_duplicateReply_crossBundle_isIgnored() public {
+    function test_duplicateReply_crossBundle_pausesChannel() public {
         _registerTestConnector();
 
         // Send outbound DATA message 1 (nextMessageId becomes 2)
@@ -661,7 +721,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // peer acked our DATA #1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF");
@@ -671,7 +733,7 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
         ClprTypes.Channel memory channel = service.getChannel(channelId);
         assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "still ACTIVE after bundle 1");
 
-        // duplicate reply → silently skipped → channel stays ACTIVE
+        // duplicate reply → ordering violation → channel PAUSED
         bytes memory replyPayload2 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"0304");
         {
             bytes[] memory msgs = new bytes[](1);
@@ -685,15 +747,17 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
                 receivedMessageId: 1, // peer still acked only message 1
                 receivedRunningHash: bytes32(0),
                 state: ClprTypes.ChannelStatus.ACTIVE,
-                endpointManifestVersion: 0
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
             });
             verifier.setVerifyBundleResult(meta, msgs);
             _submitBundle(hex"00FF02");
         }
 
-        // Duplicate reply is silently skipped; channel remains ACTIVE
+        // Duplicate reply is an ordering violation; channel is PAUSED
         channel = service.getChannel(channelId);
-        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.ACTIVE), "ACTIVE after duplicate reply");
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.PAUSED), "PAUSED after duplicate reply");
     }
 
     function test_checkResponseOrdering_replyForFutureMessage_causesViolation() public {
@@ -711,7 +775,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"EE");
@@ -735,7 +801,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: 1,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         _submitBundle(hex"DD");
@@ -875,7 +943,9 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: outboundMsgId,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         submitter.submitBundle(IClprService(address(service)), channelId, hex"00");
@@ -902,11 +972,160 @@ contract BundleLogic_Ordering is BundleLogicTestBase {
             receivedMessageId: outboundIds[n - 1],
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            // forge-lint: disable-next-line(unsafe-typecast)
+            lastMessageId: uint64(n),
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         service.submitBundle(channelId, hex"00");
     }
 
     receive() external payable override {}
+
+    // ── Regression: an overlapping bundle must not pause the channel
+    //
+    // Reproduces the testnet settlement wedge. A peer builds each bundle from
+    // `ackedMessageId + 1`, so a REPLY that was already delivered — but whose ack has not yet
+    // round-tripped — reappears at the front of the next bundle, ahead of a genuinely new
+    // inbound DATA. A read-only proof format (the Hiero block-stream StateProof) cannot be
+    // trimmed endpoint-side, so the duplicate prefix reaches the response-ordering pre-scan by
+    // design and must be skipped there, exactly as the running-hash and dispatch loops skip it.
+    // Re-scanning it compares an already-consumed REPLY against an already-advanced
+    // `nextExpectedReplyId`, reports a spurious backward-reply violation, pauses the channel and
+    // drops the new DATA in the same bundle.
+    function test_overlappingBundle_replayedReply_doesNotPauseOrDropNewData() public {
+        _registerTestConnector();
+
+        // Outbound DATA #1, sent as `app` so the peer's REPLY routes back to `app`.
+        vm.prank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"01020304");
+
+        // Bundle 1: the peer's REPLY for our DATA #1, acking it.
+        bytes memory replyPayload = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"0102");
+        bytes[] memory msgs1 = new bytes[](1);
+        msgs1[0] = replyPayload;
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(replyPayload)));
+        verifier.setVerifyBundleResult(
+            ClprTypes.QueueMetadata({
+                nextMessageId: 2,
+                sentRunningHash: hash1,
+                receivedMessageId: 1,
+                receivedRunningHash: bytes32(0),
+                state: ClprTypes.ChannelStatus.ACTIVE,
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash1
+            }),
+            msgs1
+        );
+        _submitBundle(hex"00FF01");
+
+        ClprTypes.Channel memory chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.ACTIVE));
+        assertEq(chan.receivedMessageId, 1);
+        assertEq(app.getResponseCallCount(), 1);
+
+        // Bundle 2: the same REPLY again (our ack has not reached the peer yet) followed by a new
+        // inbound DATA #2 — the Prepare that still has to be delivered.
+        bytes memory dataPayload =
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F");
+        bytes[] memory msgs2 = new bytes[](2);
+        msgs2[0] = replyPayload; // already-received duplicate prefix
+        msgs2[1] = dataPayload;
+        // The running hash continues from the channel's receivedRunningHash over the new suffix only.
+        bytes32 hash2 = sha256(abi.encodePacked(hash1, sha256(dataPayload)));
+        verifier.setVerifyBundleResult(
+            ClprTypes.QueueMetadata({
+                nextMessageId: 3,
+                sentRunningHash: hash2,
+                receivedMessageId: 1, // ack level unchanged
+                receivedRunningHash: bytes32(0),
+                state: ClprTypes.ChannelStatus.ACTIVE,
+                endpointManifestVersion: 0,
+                lastMessageId: 2,
+                lastMessageRunningHash: hash2
+            }),
+            msgs2
+        );
+        _submitBundle(hex"00FF02");
+
+        // The channel stays ACTIVE and the new DATA is delivered.
+        chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.ACTIVE));
+        assertEq(chan.receivedMessageId, 2);
+        assertEq(app.getMessageCallCount(), 1);
+        // The duplicate REPLY is not re-delivered to the application.
+        assertEq(app.getResponseCallCount(), 1);
+    }
+
+    function test_overlappingBundle_outOfOrderReplyAfterDuplicatePrefix_stillPauses() public {
+        _registerTestConnector();
+
+        // Outbound DATA #1, #2, #3, sent as `app` so REPLYs route back to `app`. nextMessageId = 4.
+        vm.startPrank(address(app));
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"01");
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"02");
+        service.sendMessage(channelId, connectorId, abi.encodePacked(address(app)), hex"03");
+        vm.stopPrank();
+
+        // Bundle 1: the peer's REPLY for DATA #1, acking it. nextExpectedReplyId advances to 2.
+        bytes memory reply1 = ClprProtobuf.encodeReplyMessage(1, ClprTypes.ReplyStatus.SUCCESS, hex"01");
+        bytes[] memory msgs1 = new bytes[](1);
+        msgs1[0] = reply1;
+        bytes32 hash1 = sha256(abi.encodePacked(bytes32(0), sha256(reply1)));
+        verifier.setVerifyBundleResult(
+            ClprTypes.QueueMetadata({
+                nextMessageId: 2,
+                sentRunningHash: hash1,
+                receivedMessageId: 1,
+                receivedRunningHash: bytes32(0),
+                state: ClprTypes.ChannelStatus.ACTIVE,
+                endpointManifestVersion: 0,
+                lastMessageId: 1,
+                lastMessageRunningHash: hash1
+            }),
+            msgs1
+        );
+        _submitBundle(hex"00FF01");
+
+        ClprTypes.Channel memory chan = service.getChannel(channelId);
+        assertEq(uint8(chan.status), uint8(ClprTypes.ChannelStatus.ACTIVE));
+        assertEq(chan.receivedMessageId, 1);
+        assertEq(app.getResponseCallCount(), 1);
+
+        // Bundle 2: the stale REPLY #1 again (duplicate prefix)
+        bytes memory reply3 = ClprProtobuf.encodeReplyMessage(3, ClprTypes.ReplyStatus.SUCCESS, hex"03");
+        bytes memory dataPayload =
+            ClprProtobuf.encodeDataMessage(connectorId, abi.encodePacked(address(app)), hex"AA01BB02", hex"48454C4C4F");
+        bytes[] memory msgs2 = new bytes[](3);
+        msgs2[0] = reply1; // already-received duplicate prefix
+        msgs2[1] = reply3; // out of order: DATA #2 still awaits its REPLY
+        msgs2[2] = dataPayload;
+
+        bytes32 hash2 = sha256(abi.encodePacked(hash1, sha256(reply3)));
+        hash2 = sha256(abi.encodePacked(hash2, sha256(dataPayload)));
+        verifier.setVerifyBundleResult(
+            ClprTypes.QueueMetadata({
+                nextMessageId: 4,
+                sentRunningHash: hash2,
+                receivedMessageId: 1,
+                receivedRunningHash: bytes32(0),
+                state: ClprTypes.ChannelStatus.ACTIVE,
+                endpointManifestVersion: 0,
+                lastMessageId: 3,
+                lastMessageRunningHash: hash2
+            }),
+            msgs2
+        );
+        _submitBundle(hex"00FF02");
+
+        chan = service.getChannel(channelId);
+        assertEq(
+            uint8(chan.status), uint8(ClprTypes.ChannelStatus.PAUSED), "out-of-order reply after prefix must pause"
+        );
+        assertEq(chan.receivedMessageId, 1, "aborted bundle must not advance the received id");
+        assertEq(app.getMessageCallCount(), 0, "the new DATA must not be dispatched");
+        assertEq(app.getResponseCallCount(), 1, "neither the stale nor the bad REPLY is delivered");
+    }
 }

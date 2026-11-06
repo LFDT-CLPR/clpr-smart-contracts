@@ -1,0 +1,297 @@
+# SPDX-License-Identifier: Apache-2.0
+name: "600: [FLOW] PR Checks"
+
+on:
+  # No `branches:` filter on pull_request — it filters on the PR's BASE branch,
+  # which silently skips these checks for stacked PRs (a PR whose base is another
+  # feature branch). Run on every PR regardless of base; `push` stays main-only.
+  pull_request:
+  push:
+    branches: [main]
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  MIN_LINES: 92
+  MIN_STATEMENTS: 91
+  MIN_BRANCHES: 83
+  MIN_FUNCS: 100
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Run Forge build source
+        run: forge build src --deny warnings
+
+      - name: Run Forge build tests
+        run: FOUNDRY_PROFILE=test forge build --deny warnings
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: forge-build
+          path: out/
+          retention-days: 1
+
+  lint:
+    name: Lint
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: forge-build
+          path: out/
+
+      - name: Check ClprService storage layout snapshot
+        run: |
+          set -euo pipefail
+          forge inspect ClprService storage-layout --json > storage-layout.generated.json
+          if ! diff -u storage-layout.json storage-layout.generated.json; then
+            echo ""
+            echo "Storage layout differs from committed storage-layout.json."
+            echo "If this change is intentional, run locally:"
+            echo "  forge build && forge inspect ClprService storage-layout --json > storage-layout.json"
+            echo "Review the diff, commit storage-layout.json, and push."
+            echo "Otherwise revert storage-affecting changes (inheritance order, state variables, parent contracts)."
+            exit 1
+          fi
+
+      - name: Run Forge fmt
+        run: forge fmt --check src test script
+
+  test:
+    name: Test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: forge-build
+          path: out/
+
+      - name: FOUNDRY_PROFILE=test Run Forge tests
+        run: forge test -vvv
+
+  coverage:
+    name: Coverage
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: forge-build
+          path: out/
+
+      - name: Run Forge coverage
+        run: |
+          set -euo pipefail
+          # Sha384 is a pure inline-assembly (Yul) implementation that `forge coverage`
+          # cannot instrument; it is verified by the FIPS-180-4 test vectors in
+          # test/libraries/Sha384.t.sol, not by line coverage. Excluded from the gate.
+          #
+          # test_report_blsBreakdown / test_report_mptDepthSensitivity (EthGasReport.t.sol)
+          # are gas-benchmark reporting tests. --ir-minimum inflates the already gas-heavy MPT-building loops past Foundry's fixed 2^30
+          # per-call gas ceiling (OutOfGas), even though they pass under the normal optimized build.
+          # TODO: remove the legacy QBFTVerifier (incorrect implementation)
+          #      remove QBFTVerifier from exclude list below
+          forge coverage --ir-minimum --no-match-coverage "(test|script|Sha384|QBFTVerifier)" --no-match-test "test_report_blsBreakdown|test_report_mptDepthSensitivity|test_report_contractMode_|test_report_headerMode_" --report summary --report lcov > coverage.txt
+          cat coverage.txt >> $GITHUB_STEP_SUMMARY
+
+          read LINES STATEMENTS BRANCHES FUNCS < <(awk -F'|' '
+            $2 ~ /Total|All files/ {
+              for (i = 3; i <= 6; i++) {
+                match($i, /[0-9]+\.[0-9]+/)
+                printf "%s ", substr($i, RSTART, RLENGTH)
+              }
+              printf "\n"
+              exit
+            }
+          ' coverage.txt)
+
+          if [[ -z "$LINES" ]]; then
+            echo "ERROR: could not parse coverage percentages from coverage.txt"
+            cat coverage.txt
+            exit 1
+          fi
+
+          echo "Coverage - Lines: $LINES%, Statements: $STATEMENTS%, Branches: $BRANCHES%, Funcs: $FUNCS%"
+
+          FAILED=0
+          # Check each metric against its specific threshold
+          declare -A MIN_THRESHOLD=(
+            [Lines]=$MIN_LINES
+            [Statements]=$MIN_STATEMENTS
+            [Branches]=$MIN_BRANCHES
+            [Funcs]=$MIN_FUNCS
+          )
+
+          for entry in "Lines:$LINES" "Statements:$STATEMENTS" "Branches:$BRANCHES" "Funcs:$FUNCS"; do
+            name="${entry%%:*}"
+            val="${entry##*:}"
+            min="${MIN_THRESHOLD[$name]}"
+            if awk -v cov="$val" -v min="$min" 'BEGIN { exit (cov < min) }'; then
+              echo "$name coverage ($val%) is at or above $min%."
+            else
+              echo "$name coverage ($val%) is below $min% threshold."
+              FAILED=1
+            fi
+          done
+
+          [ "$FAILED" -eq 0 ] || exit 1
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: lcov.info
+
+  deploy-smoke:
+    name: Deploy Smoke
+    runs-on: ubuntu-latest
+    needs: [lint, test, coverage]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.7.1
+
+      - name: Build contracts
+        run: forge build
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Start anvil
+        run: |
+          anvil --silent &
+          for i in {1..30}; do
+            if cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
+              echo "anvil is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "anvil failed to start"
+          exit 1
+
+      - name: Generate random deployer key and fund on anvil
+        run: |
+          set -euo pipefail
+          WALLET=$(cast wallet new --json)
+          PK=$(echo "$WALLET" | jq -r '.[0].private_key')
+          ADDR=$(echo "$WALLET" | jq -r '.[0].address')
+          echo "::add-mask::$PK"
+          echo "PRIVATE_KEY=$PK" >> "$GITHUB_ENV"
+          echo "INITIAL_OWNER=$ADDR" >> "$GITHUB_ENV"
+          echo "Random deployer/owner: $ADDR"
+          cast rpc anvil_setBalance "$ADDR" 0x21e19e0c9bab2400000 \
+            --rpc-url http://127.0.0.1:8545 >/dev/null
+
+      - name: Run deploy CLI against anvil
+        run: |
+          set -euo pipefail
+          # CLI prints deployed addresses as JSON on stdout (progress logs go to stderr).
+          # Parse with jq instead of eval-ing shell `export` lines.
+          DEPLOY_JSON=$(npx tsx script/deploy/cli.ts all --rpc-url http://127.0.0.1:8545 --auto-enable)
+          CLPR_SERVICE=$(echo "$DEPLOY_JSON" | jq -r '.CLPR_SERVICE')
+          echo "ClprService deployed at $CLPR_SERVICE"
+          OWNER=$(cast call "$CLPR_SERVICE" 'owner()(address)' --rpc-url http://127.0.0.1:8545)
+          echo "Owner reports: $OWNER"
+          EXPECTED_OWNER=$(echo "$INITIAL_OWNER" | tr '[:upper:]' '[:lower:]')
+          test "$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" = "$EXPECTED_OWNER"
+          MEC=$(cast call "$CLPR_SERVICE" \
+            'getEconomicConfig()(uint256,uint256,uint256,uint256,uint256,uint256,uint32,uint32,uint64,uint32,uint32)' \
+            --rpc-url http://127.0.0.1:8545 | head -1)
+          echo "messageExecutionCost: $MEC"
+          test "$MEC" = "1000000000000000 [1e15]" || test "$MEC" = "1000000000000000"

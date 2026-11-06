@@ -56,7 +56,9 @@ contract BundleLib_PartialBundleTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: nextMsgId - 1,
+            lastMessageRunningHash: sentHash
         });
         verifier.setVerifyBundleResult(meta, bundlePayloads);
         service.submitBundle(channelId, hex"00FF");
@@ -206,7 +208,9 @@ contract BundleLib_PartialBundleTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 8,
+            lastMessageRunningHash: globalHash
         });
         verifier.setVerifyBundleResult(badMeta, bundlePayloads);
 
@@ -248,7 +252,9 @@ contract BundleLib_PartialBundleTest is BundleLibTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 6,
+            lastMessageRunningHash: wrongHash
         });
         verifier.setVerifyBundleResult(badMeta, bundlePayloads);
 

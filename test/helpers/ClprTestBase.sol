@@ -54,7 +54,8 @@ abstract contract ClprTestBase is Test {
         connectorQueueQuotaPct: 50,
         connectorInboundGasStipend: 500_000,
         maxChannels: 0,
-        maxConnectors: 0
+        maxConnectors: 0,
+        connectorPaymentGasLimit: 200_000
     });
 
     function setUp() public virtual {
@@ -74,6 +75,8 @@ abstract contract ClprTestBase is Test {
         verifier.setPeerThrottles(defaultThrottles);
 
         connector = MockClprConnector(payable(deployCode("MockClprConnector.sol:MockClprConnector")));
+
+        _beforeInitialize();
 
         // clprEnabled defaults to false; initialize() applies the first
         // config while still disabled, then setClprEnabled(true) is required to
@@ -101,7 +104,8 @@ abstract contract ClprTestBase is Test {
             m.bundleLogic,
             m.connectorLogic,
             m.adminLogic,
-            m.bundleDecodeHelper
+            m.bundleDecodeHelper,
+            _feeTokenForDeploy()
         );
         return ClprService(payable(deployCode("ClprService.sol:ClprService", args)));
     }
@@ -142,6 +146,14 @@ abstract contract ClprTestBase is Test {
 
         ClprTypes.EconomicConfig memory econ = defaultEcon;
         service.updateEconomicConfiguration(econ);
+    }
+
+    /// @dev Hook for pre-initialize() setup on the freshly-deployed `service`.
+    function _beforeInitialize() internal virtual {}
+
+    /// @dev Fee token passed to the ClprService constructor; `address(0)` (the default) is native value.
+    function _feeTokenForDeploy() internal virtual returns (address) {
+        return address(0);
     }
 
     /// @dev Bootstraps a freshly-deployed `service`: applies the default ledger +
@@ -213,7 +225,8 @@ abstract contract ClprTestBase is Test {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
     }
 
@@ -261,7 +274,9 @@ abstract contract ClprTestBase is Test {
             receivedMessageId: outboundMsgId,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         service.submitBundle(channelId, hex"00");

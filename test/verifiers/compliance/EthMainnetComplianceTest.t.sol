@@ -20,9 +20,8 @@ import {RLP} from "@openzeppelin/contracts/utils/RLP.sol";
 ///      so the aggregate is 512·G1 and a valid signature is 512·H(signingRoot).
 contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeFixtures, QbftSyntheticProofs {
     address internal constant SERVICE_ADDR = 0x5e7c1Ce1acCE5E7C1Ce1ACCe5e7c1CE1ACce5e7C;
-    bytes32 internal constant SERVICE_CODE_HASH = bytes32(uint256(0xC0DE));
-    bytes4 internal constant FORK_VERSION = 0x04000000;
-    bytes32 internal constant GVR = bytes32(uint256(0x9999));
+    uint64 internal constant BUNDLE_PERIOD = 5;
+    uint64 internal constant BUNDLE_SLOT = BUNDLE_PERIOD * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 1000;
     bytes32 internal constant SYNTHETIC_CHANNEL_ID = bytes32(uint256(0xC0FFEE));
 
     uint256 private constant EXECUTION_BRANCH_DEPTH = 9;
@@ -42,15 +41,16 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         lc.serviceAddress = abi.encodePacked(SERVICE_ADDR);
 
         bytes[] memory pubkeys = _uncompressedKeys(SYNC_COMMITTEE_SIZE);
-        uint256 slot = 8192 * 5 + 17; // sync-committee period 5
+        uint64 slot = BUNDLE_PERIOD * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 17;
 
-        bytes[] memory cfg = new bytes[](6);
-        cfg[0] = RLP.encode(slot);
+        bytes[] memory cfg = new bytes[](7);
+        cfg[0] = RLP.encode(uint256(slot));
         cfg[1] = _encodeCommittee(pubkeys, genUncompressed);
-        cfg[2] = RLP.encode(abi.encodePacked(GVR));
-        cfg[3] = RLP.encode(abi.encodePacked(FORK_VERSION));
-        cfg[4] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
-        cfg[5] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
+        cfg[2] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 2), _committeeAggregate(2));
+        cfg[3] = RLP.encode(abi.encodePacked(GVR));
+        cfg[4] = RLP.encode(abi.encodePacked(FORK_VERSION));
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
 
         return ConfigVector({
             configProof: RLP.encode(cfg),
@@ -111,24 +111,38 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
     function _wrongChainConfigVector() internal pure override returns (bytes memory configProof, bytes32 channelId) {
         bytes[] memory compressedKeys = _compressedKeys(SYNC_COMMITTEE_SIZE); // 48 bytes each
         ClprTypes.LedgerConfiguration memory lc;
-        bytes[] memory cfg = new bytes[](6);
+        bytes[] memory cfg = new bytes[](7);
         cfg[0] = RLP.encode(uint256(100));
         cfg[1] = _encodeCommittee(compressedKeys, G1_GEN_COMPRESSED); // aggregate also 48 bytes
-        cfg[2] = RLP.encode(abi.encodePacked(GVR));
-        cfg[3] = RLP.encode(abi.encodePacked(FORK_VERSION));
-        cfg[4] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
-        cfg[5] = RLP.encode(abi.encodePacked(bytes32(0)));
+        cfg[2] = _encodeCommittee(compressedKeys, G1_GEN_COMPRESSED);
+        cfg[3] = RLP.encode(abi.encodePacked(GVR));
+        cfg[4] = RLP.encode(abi.encodePacked(FORK_VERSION));
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(abi.encodePacked(bytes32(0)));
         return (RLP.encode(cfg), SYNTHETIC_CHANNEL_ID);
     }
 
     function _partialSlotCoverageVector() internal view override returns (bytes memory, bytes32) {
-        // 4-field RLP instead of the required 6 → InvalidConfigPayload.
+        // 4-field RLP instead of the required 7 → InvalidConfigPayload.
         bytes[] memory cfg = new bytes[](4);
         cfg[0] = RLP.encode(uint256(100));
         cfg[1] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE), genUncompressed);
         cfg[2] = RLP.encode(abi.encodePacked(GVR));
         cfg[3] = RLP.encode(abi.encodePacked(FORK_VERSION));
         return (RLP.encode(cfg), SYNTHETIC_CHANNEL_ID);
+    }
+
+    function _fiveSlotBundleVector(uint64 nextMessageId, bytes32 sentRunningHash, bytes memory bundleContent)
+        internal
+        view
+        override
+        returns (bytes memory, bytes memory, bytes memory)
+    {
+        return (
+            _buildBundleWithSentHash(nextMessageId, sentRunningHash, bundleContent),
+            _buildTrustAnchor(SYNTHETIC_CHANNEL_ID),
+            _validChannelContext()
+        );
     }
 
     function _runningHashVector() internal view override returns (RunningHashVector memory) {
@@ -140,7 +154,7 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         bytes memory bundleContent = ClprProtobuf.encodeBundleContent(dummyMeta, payloads);
 
         return RunningHashVector({
-            proofBytes: _buildBundleWithSentHash(expectedSentRunningHash, bundleContent),
+            proofBytes: _buildBundleWithSentHash(ONE_MESSAGE_NEXT_MESSAGE_ID, expectedSentRunningHash, bundleContent),
             trustAnchor: _buildTrustAnchor(SYNTHETIC_CHANNEL_ID),
             channelContext: _validChannelContext(),
             previousRunningHash: bytes32(0)
@@ -185,18 +199,18 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
 
     // ── Private: trust anchor ─────────────────────────────────────────────────
 
-    /// @dev 260-byte flat-packed trust anchor matching EthMainnetVerifier's layout constants.
+    /// @dev 428-byte flat-packed WINDOW trust anchor matching EthMainnetVerifier's layout constants.
     function _buildTrustAnchor(bytes32 channelId) private view returns (bytes memory) {
-        bytes[] memory pubkeys = _uncompressedKeys(SYNC_COMMITTEE_SIZE);
-        bytes memory aggregate = _committeeAggregate();
-        bytes32 committeeRoot = ClprCommitteeMerkle.root(pubkeys);
         return abi.encodePacked(
-            GVR, // [0..32)   genesis validators root
-            FORK_VERSION, // [32..36)  fork version (4 bytes)
-            channelId, // [36..68)  channel id
-            aggregate, // [68..196) committee aggregate pubkey (128 bytes)
-            committeeRoot, // [196..228) keccak Merkle root over 512 uncompressed keys
-            SERVICE_CODE_HASH // [228..260) expected code hash
+            GVR, // [0..32)    genesis validators root
+            FORK_VERSION, // [32..36)   fork version (4 bytes)
+            channelId, // [36..68)   channel id
+            SERVICE_CODE_HASH, // [68..100)  expected code hash
+            BUNDLE_PERIOD, // [100..108) window start period (big-endian uint64)
+            _committeeAggregate(1), // [108..236) current aggregate
+            ClprCommitteeMerkle.root(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 1)), // [236..268) current root
+            _committeeAggregate(2), // [268..396) next aggregate
+            ClprCommitteeMerkle.root(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 2)) // [396..428) next root
         );
     }
 
@@ -219,13 +233,14 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         lc.chainId = "eip155:1";
         lc.serviceAddress = abi.encodePacked(SERVICE_ADDR);
 
-        bytes[] memory cfg = new bytes[](6);
-        cfg[0] = RLP.encode(uint256(8192 * 5 + 17)); // sync-committee period 5
+        bytes[] memory cfg = new bytes[](7);
+        cfg[0] = RLP.encode(uint256(BUNDLE_PERIOD * SLOTS_PER_SYNC_COMMITTEE_PERIOD + 17));
         cfg[1] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE), _committeeAggregate());
-        cfg[2] = RLP.encode(abi.encodePacked(GVR));
-        cfg[3] = RLP.encode(abi.encodePacked(FORK_VERSION));
-        cfg[4] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
-        cfg[5] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
+        cfg[2] = _encodeCommittee(_uncompressedKeys(SYNC_COMMITTEE_SIZE, 2), _committeeAggregate(2));
+        cfg[3] = RLP.encode(abi.encodePacked(GVR));
+        cfg[4] = RLP.encode(abi.encodePacked(FORK_VERSION));
+        cfg[5] = RLP.encode(ClprProtobuf.encodeControlMessage(lc));
+        cfg[6] = RLP.encode(abi.encodePacked(SERVICE_CODE_HASH));
 
         configProof = RLP.encode(cfg);
         channelId = SYNTHETIC_CHANNEL_ID;
@@ -248,7 +263,7 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         // generator committee so the BLS supermajority check passes against the config committee.
         bytes32[] memory execBranch = _execBranch();
         bytes32 bodyRoot = _foldSsz(executionStateRoot, execBranch, ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY);
-        bytes32 beaconBlockRoot = ClprBeaconSsz.beaconBlockHeaderRoot(1000, 0, bytes32(0), bytes32(0), bodyRoot);
+        bytes32 beaconBlockRoot = ClprBeaconSsz.beaconBlockHeaderRoot(BUNDLE_SLOT, 0, bytes32(0), bytes32(0), bodyRoot);
         bytes32 domain = ClprBeaconSsz.computeSyncCommitteeDomain(FORK_VERSION, GVR);
         bytes32 signingRoot = ClprBeaconSsz.computeSigningRoot(beaconBlockRoot, domain);
 
@@ -257,7 +272,7 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         agg[1] = RLP.encode(_aggSig(signingRoot, SYNC_COMMITTEE_SIZE));
 
         bytes[] memory headerItems = new bytes[](5);
-        headerItems[0] = RLP.encode(uint256(1000)); // slot
+        headerItems[0] = RLP.encode(uint256(BUNDLE_SLOT)); // slot, inside BUNDLE_PERIOD
         headerItems[1] = RLP.encode(uint256(0)); // proposerIndex
         headerItems[2] = RLP.encode(bytes32(0)); // parentRoot
         headerItems[3] = RLP.encode(bytes32(0)); // stateRoot (beacon layer, unused here)
@@ -289,28 +304,17 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
     }
 
     /// @dev Bundle where storage slot+4 (sentRunningHash) is proven to `sentHash`.
-    function _buildBundleWithSentHash(bytes32 sentHash, bytes memory bundleContent)
+    function _buildBundleWithSentHash(uint64 nextMessageId, bytes32 sentHash, bytes memory bundleContent)
         private
         view
         returns (bytes memory)
     {
         bytes32 cBase = keccak256(abi.encode(SYNTHETIC_CHANNEL_ID, uint256(15)));
-        bytes32 sentHashSlot = bytes32(uint256(cBase) + 4);
-        (bytes32 storageRoot, bytes memory proofNodes) =
-            _buildSyntheticMPTProof(keccak256(abi.encodePacked(sentHashSlot)), RLP.encode(uint256(sentHash)));
-
-        uint8[5] memory offsets = [1, 2, 4, 5, 16];
-        bytes[] memory entries = new bytes[](5);
-        for (uint256 i = 0; i < 5; i++) {
-            bytes32 slotKey = bytes32(uint256(cBase) + offsets[i]);
-            bytes[] memory entry = new bytes[](2);
-            entry[0] = RLP.encode(abi.encodePacked(slotKey));
-            entry[1] = proofNodes;
-            entries[i] = RLP.encode(entry);
-        }
+        (bytes32 storageRoot, bytes memory entries) =
+            _buildChannelStorageEntriesWithSentHash(cBase, nextMessageId, sentHash);
         (bytes32 executionStateRoot, bytes memory accountProofRlp) =
             _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
-        return _buildBundleProof(executionStateRoot, accountProofRlp, RLP.encode(entries), RLP.encode(bundleContent));
+        return _buildBundleProof(executionStateRoot, accountProofRlp, entries, RLP.encode(bundleContent));
     }
 
     /// @dev Bundle with `n` storage entries — triggers InvalidStorageProofShape for n < 5.
@@ -352,9 +356,9 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         return _buildBundleProof(executionStateRoot, accountProofRlp, RLP.encode(entries), RLP.encode(new bytes(0)));
     }
 
-    // ── Private: core 10-item proof assembler ────────────────────────────────
+    // ── Private: core 11-item proof assembler ────────────────────────────────
 
-    /// @dev Assembles a complete 10-item EthMainnetVerifier bundle proof that passes every check
+    /// @dev Assembles a complete 11-item EthMainnetVerifier bundle proof that passes every check
     ///      up to and including BLS aggregate verification. The SSZ execution branch and BLS
     ///      signing chain are derived consistently from `executionStateRoot`, so the resulting proof
     ///      reaches step 6 (MPT account check) or step 7 (storage check) before failing — useful
@@ -365,12 +369,26 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         bytes memory storageProofRlp,
         bytes memory bundleContentItem
     ) private view returns (bytes memory) {
+        return _buildBundleProof(executionStateRoot, accountProofRlp, storageProofRlp, bundleContentItem, _execBranch());
+    }
+
+    /// @dev As {_buildBundleProof}, but the branch placed on the wire may differ from the one the
+    ///      committee signed over. Passing anything other than `_execBranch()` yields a proof that
+    ///      satisfies the BLS check and then fails the execution-branch check — the only way to
+    ///      reach `ExecutionBranchInvalid`, which sits behind BLS verification.
+    function _buildBundleProof(
+        bytes32 executionStateRoot,
+        bytes memory accountProofRlp,
+        bytes memory storageProofRlp,
+        bytes memory bundleContentItem,
+        bytes32[] memory wireBranch
+    ) private view returns (bytes memory) {
         // SSZ: fold executionStateRoot → bodyRoot via gindex 802 (9-step branch).
         bytes32[] memory execBranch = _execBranch();
         bytes32 bodyRoot = _foldSsz(executionStateRoot, execBranch, ClprBeaconSsz.GINDEX_EXECUTION_STATE_ROOT_IN_BODY);
 
         // BLS: sign the beacon block header over signingRoot with the full generator committee.
-        bytes32 beaconBlockRoot = ClprBeaconSsz.beaconBlockHeaderRoot(1000, 0, bytes32(0), bytes32(0), bodyRoot);
+        bytes32 beaconBlockRoot = ClprBeaconSsz.beaconBlockHeaderRoot(BUNDLE_SLOT, 0, bytes32(0), bytes32(0), bodyRoot);
         bytes32 domain = ClprBeaconSsz.computeSyncCommitteeDomain(FORK_VERSION, GVR);
         bytes32 signingRoot = ClprBeaconSsz.computeSigningRoot(beaconBlockRoot, domain);
         bytes memory sig = _aggSig(signingRoot, SYNC_COMMITTEE_SIZE); // 512·H(signingRoot)
@@ -381,24 +399,55 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         agg[1] = RLP.encode(sig);
 
         bytes[] memory headerItems = new bytes[](5);
-        headerItems[0] = RLP.encode(uint256(1000)); // slot
+        headerItems[0] = RLP.encode(uint256(BUNDLE_SLOT)); // slot, inside BUNDLE_PERIOD
         headerItems[1] = RLP.encode(uint256(0)); // proposerIndex
         headerItems[2] = RLP.encode(bytes32(0)); // parentRoot
         headerItems[3] = RLP.encode(bytes32(0)); // stateRoot (beacon layer, unused here)
         headerItems[4] = RLP.encode(bodyRoot);
 
-        bytes[] memory top = new bytes[](10);
+        bytes[] memory top = new bytes[](11);
         top[0] = RLP.encode(headerItems);
-        top[1] = RLP.encode(agg);
-        top[2] = RLP.encode(executionStateRoot);
-        top[3] = _encodeBranch(execBranch);
-        top[4] = RLP.encode(new bytes(0)); // nextCommittee: absent (RLP empty string 0x80)
-        top[5] = RLP.encode(new bytes[](0)); // nextCommitteeBranch: absent (RLP empty list 0xc0)
-        top[6] = accountProofRlp;
-        top[7] = storageProofRlp;
-        top[8] = bundleContentItem;
-        top[9] = RLP.encode(new bytes[](0)); // nonSignerProofs: empty (full participation)
+        // signatureSlot: one slot past the attested header, same period ⇒ selects `current`.
+        top[1] = RLP.encode(uint256(BUNDLE_SLOT) + 1);
+        top[2] = RLP.encode(agg);
+        top[3] = RLP.encode(executionStateRoot);
+        top[4] = _encodeBranch(wireBranch);
+        top[5] = RLP.encode(new bytes(0)); // nextCommittee: absent (RLP empty string 0x80)
+        top[6] = RLP.encode(new bytes[](0)); // nextCommitteeBranch: absent (RLP empty list 0xc0)
+        top[7] = accountProofRlp;
+        top[8] = storageProofRlp;
+        top[9] = bundleContentItem;
+        top[10] = RLP.encode(new bytes[](0)); // nonSignerProofs: empty (full participation)
         return RLP.encode(top);
+    }
+
+    /// @dev `ExecutionBranchInvalid` guards the link between the BLS-signed beacon body and the
+    ///      execution state root the storage proofs are read against. Without it, a validly signed
+    ///      header could be paired with an unrelated execution state — any state the attacker
+    ///      likes. The check sits behind BLS verification, so reaching it needs a proof the
+    ///      committee actually signed: here the signature covers the honest branch while the wire
+    ///      carries a corrupted one.
+    /// @custom:matrix-row V11
+    function test_verifyBundle_corruptExecutionBranch_reverts() public {
+        (bytes32 storageRoot, bytes memory storageProofRlp) = _buildChannelStorageProof(SYNTHETIC_CHANNEL_ID);
+        (bytes32 executionStateRoot, bytes memory accountProofRlp) =
+            _buildSyntheticAccountProof(SERVICE_ADDR, storageRoot, SERVICE_CODE_HASH);
+
+        bytes32[] memory corrupted = _execBranch();
+        corrupted[0] = keccak256("not the signed sibling");
+
+        bytes memory proof = _buildBundleProof(
+            executionStateRoot, accountProofRlp, storageProofRlp, RLP.encode(new bytes(0)), corrupted
+        );
+
+        // Hoist the arguments: `_validBundle()` builds a proof, and the aggregate-signature
+        // helper calls the BLS precompile — an external call that would otherwise consume the
+        // `vm.expectRevert` expectation before `verifyBundle` is even reached.
+        bytes memory anchor = _validBundle().trustAnchor;
+        bytes memory ctx = _validChannelContext();
+
+        vm.expectRevert(EthMainnetVerifier.ExecutionBranchInvalid.selector);
+        verifier.verifyBundle(proof, anchor, ctx);
     }
 
     // ── Private: small helpers ────────────────────────────────────────────────
@@ -408,38 +457,6 @@ contract EthMainnetComplianceTest is ClprEvmStorageComplianceTest, EthCommitteeF
         branch = new bytes32[](EXECUTION_BRANCH_DEPTH);
         for (uint256 i = 0; i < EXECUTION_BRANCH_DEPTH; i++) {
             branch[i] = keccak256(abi.encodePacked("eth-exec-branch", i));
-        }
-    }
-
-    /// @dev Encode an array of bytes32 as an RLP list of 32-byte strings (SSZ branch wire format).
-    function _encodeBranch(bytes32[] memory branch) private pure returns (bytes memory) {
-        bytes[] memory enc = new bytes[](branch.length);
-        for (uint256 i = 0; i < branch.length; i++) {
-            enc[i] = RLP.encode(abi.encodePacked(branch[i]));
-        }
-        return RLP.encode(enc);
-    }
-
-    /// @dev Fold a leaf to its SSZ root using the gindex path (same logic as ClprBeaconSsz.verifyProof).
-    function _foldSsz(bytes32 leaf, bytes32[] memory branch, uint256 gindex) private pure returns (bytes32) {
-        bytes32 computed = leaf;
-        uint256 idx = gindex;
-        for (uint256 i = 0; i < branch.length; i++) {
-            if (idx & 1 == 1) {
-                computed = sha256(abi.encodePacked(branch[i], computed));
-            } else {
-                computed = sha256(abi.encodePacked(computed, branch[i]));
-            }
-            idx >>= 1;
-        }
-        return computed;
-    }
-
-    /// @dev 64-byte Bitvector[512] with all bits set (all 512 committee members participated).
-    function _allOneBits() private pure returns (bytes memory bits) {
-        bits = new bytes(64);
-        for (uint256 i = 0; i < 64; i++) {
-            bits[i] = 0xFF;
         }
     }
 

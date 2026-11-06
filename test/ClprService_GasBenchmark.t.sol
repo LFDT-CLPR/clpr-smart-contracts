@@ -76,7 +76,8 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
             connectorQueueQuotaPct: 50,
             connectorInboundGasStipend: 500_000,
             maxChannels: 0,
-            maxConnectors: 0
+            maxConnectors: 0,
+            connectorPaymentGasLimit: 200_000
         });
         service.initialize(hex"1234", defaultThrottles, "", "", econ);
         service.setClprEnabled(true);
@@ -139,19 +140,6 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
         console.log("getMessage       :", gasGetMessage);
     }
 
-    function test_gas_redactMessage() public {
-        // Send a message first
-        bytes memory messageData = hex"48454C4C4F";
-        uint64 msgId = service.sendMessage(channelId, connectorAddr, abi.encodePacked(address(app)), messageData);
-
-        uint256 g0 = gasleft();
-        service.redactMessage(channelId, msgId);
-        uint256 gasRedactMessage = g0 - gasleft();
-
-        console.log("=== MessagingLogic Gas Benchmark ===");
-        console.log("redactMessage    :", gasRedactMessage);
-    }
-
     // ═══════════════════════════════════════════════════════════════════
     // Gas Benchmarks: ConnectorLib
     // ═══════════════════════════════════════════════════════════════════
@@ -177,7 +165,7 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
 
     function test_gas_topUpStake() public {
         uint256 g0 = gasleft();
-        service.topUpConnectorStake{value: 0.5 ether}(channelId, connectorAddr);
+        service.topUpConnectorStake{value: 0.5 ether}(channelId, connectorAddr, 0.5 ether);
         uint256 gasTopUp = g0 - gasleft();
 
         console.log("=== ConnectorLib Gas Benchmark ===");
@@ -186,7 +174,7 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
 
     function test_gas_removeConnector() public {
         // Top up to have more stake
-        service.topUpConnectorStake{value: 1 ether}(channelId, connectorAddr);
+        service.topUpConnectorStake{value: 1 ether}(channelId, connectorAddr, 1 ether);
 
         uint256 g0 = gasleft();
         service.removeConnector(channelId, connectorAddr, address(this));
@@ -222,7 +210,9 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         minimalVerifier.setVerifyBundleResult(meta, payloads);
 
@@ -258,7 +248,9 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 5,
+            lastMessageRunningHash: hash
         });
         minimalVerifier.setVerifyBundleResult(meta, payloads);
 
@@ -293,7 +285,9 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         minimalVerifier.setVerifyBundleResult(meta, payloads);
 
@@ -417,7 +411,9 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 2,
+            lastMessageRunningHash: hash
         });
         minimalVerifier.setVerifyBundleResult(meta, payloads);
 
@@ -530,7 +526,9 @@ contract ClprServicesGasBenchmarkTest is ClprTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 5,
+            lastMessageRunningHash: hash
         });
         minimalVerifier.setVerifyBundleResult(meta, payloads);
 

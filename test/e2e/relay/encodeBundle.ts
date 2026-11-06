@@ -19,6 +19,8 @@ export interface QueueMetadata {
     receivedRunningHash: Hex;    // bytes32
     state: number;               // ClprTypes.ChannelStatus
     endpointManifestVersion: bigint; // source Channel.endpointManifestVersion (proto field 7)
+    lastMessageId: bigint;       // id of the bundle's last message; 0 when the bundle carries no messages
+    lastMessageRunningHash: Hex; // bytes32; sender's running hash after lastMessageId, zero when empty
 }
 
 /// Build the bundle protobuf bytes by asking the chain to encode them.

@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {ClprTypes} from "@hiero-ledger/clpr/libraries/ClprTypes.sol";
 import {ConnectorLib} from "@hiero-ledger/clpr/libraries/service/ConnectorLib.sol";
+import {ExactGasCall} from "@hiero-ledger/clpr/libraries/service/ExactGasCall.sol";
 import {MockClprConnector} from "@test/mocks/MockClprConnector.sol";
 
 /// @dev Contract that unconditionally rejects ETH — used to simulate non-payable recipients.
@@ -16,16 +17,24 @@ contract RejectingEth {
 
 /// @dev Minimal harness that exposes ConnectorLib functions for unit-level testing.
 contract ConnectorLibHarness {
+    /// @dev The default `connectorInboundGasStipend`, the gas `payForExecution` receives.
+    uint256 private constant PAY_GAS = 500_000;
+
     mapping(bytes32 => ClprTypes.Connector) internal _connectors;
     mapping(bytes32 => bool) internal _connectorExists;
     mapping(address => uint256) public pendingWithdrawals;
 
     address private _fallback = address(this);
+    ClprTypes.FeeAsset private _feeAsset;
 
     receive() external payable {}
 
     function setFallback(address fb) external {
         _fallback = fb;
+    }
+
+    function setFeeToken(address token) external {
+        _feeAsset.token = token;
     }
 
     function setupConnector(bytes32 channelId, bytes32 connectorId, address connectorContract, uint256 stake) external {
@@ -52,6 +61,7 @@ contract ConnectorLibHarness {
             _connectors,
             _connectorExists,
             pendingWithdrawals,
+            _feeAsset,
             _fallback,
             channelId,
             connectorId,
@@ -66,8 +76,31 @@ contract ConnectorLibHarness {
         external
         returns (bool success)
     {
+        return _charge(channelId, connectorId, amount, recipient, PAY_GAS);
+    }
+
+    function chargeWithGas(bytes32 channelId, bytes32 connectorId, uint256 amount, address recipient, uint256 payGas)
+        external
+        returns (bool success)
+    {
+        return _charge(channelId, connectorId, amount, recipient, payGas);
+    }
+
+    function _charge(bytes32 channelId, bytes32 connectorId, uint256 amount, address recipient, uint256 payGas)
+        private
+        returns (bool)
+    {
         return ConnectorLib.charge(
-            _connectors, _connectorExists, pendingWithdrawals, _fallback, channelId, connectorId, amount, recipient
+            _connectors,
+            _connectorExists,
+            pendingWithdrawals,
+            _feeAsset,
+            _fallback,
+            channelId,
+            connectorId,
+            amount,
+            recipient,
+            payGas
         );
     }
 
@@ -314,6 +347,39 @@ contract ConnectorLibTest is Test {
         harness.setupConnector(connId, cid, address(dummyConnector), 1 ether);
         bool ok = harness.charge(connId, cid, 0.01 ether, address(this));
         assertFalse(ok, "charge should return false when connector has insufficient balance");
+    }
+
+    /// A connector that sends the amount straight back pays within the smallest payment budget the
+    /// configuration accepts.
+    function test_charge_succeeds_withTheMinimumPaymentGasLimit() public {
+        harness.setupConnector(connId, cid, address(dummyConnector), 1 ether);
+        vm.deal(address(dummyConnector), 1 ether);
+        bool ok =
+            harness.chargeWithGas(connId, cid, 0.01 ether, address(this), ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT);
+        assertTrue(ok, "a plain payment must fit the minimum payment budget");
+    }
+
+    /// The payment gets its whole budget or the charge reverts: a caller left with too little gas
+    /// cannot make a funded connector's payment fail into a slash.
+    function test_charge_reverts_whenThePaymentCannotGetItsFullGas() public {
+        harness.setupConnector(connId, cid, address(dummyConnector), 1 ether);
+        vm.deal(address(dummyConnector), 1 ether);
+        uint256 payGas = ClprTypes.MIN_CONNECTOR_PAYMENT_GAS_LIMIT;
+        (bool ok, bytes memory ret) = address(harness).call{gas: payGas}(
+            abi.encodeCall(harness.chargeWithGas, (connId, cid, 0.01 ether, address(this), payGas))
+        );
+        assertFalse(ok, "the charge must not run short");
+        // forge-lint: disable-next-line(unsafe-typecast)
+        assertEq(bytes4(ret), ExactGasCall.InsufficientGasForCall.selector, "refused by the gas check");
+    }
+
+    /// An EIP-7702 account that cleared its delegation has no code: the call runs nothing and pays
+    /// nothing, so the charge fails instead of reverting the bundle.
+    function test_charge_returnsFalse_whenConnectorHasNoCode() public {
+        address codeless = makeAddr("codeless-connector");
+        harness.setupConnector(connId, cid, codeless, 1 ether);
+        vm.deal(codeless, 1 ether);
+        assertFalse(harness.charge(connId, cid, 0.01 ether, address(this)), "a connector without code pays nothing");
     }
 
     function test_charge_returnsFalse_whenPayReverts() public {

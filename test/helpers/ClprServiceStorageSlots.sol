@@ -38,9 +38,13 @@ library ClprServiceStorageSlots {
     ///      Base 17 + member 1 = absolute slot 18 = ClprEvmBundleVerifier.ENDPOINT_MANIFEST_COMMITMENT_SLOT.
     uint256 internal constant ENDPOINT_MANIFEST_COMMITMENT_MEMBER = 1;
 
+    /// @dev `_feeAsset` (ClprTypes.FeeAsset: token in the low 160 bits, decimals above it).
+    ///      BundleLogic passes this slot to BundleLib, which reads it with a raw `sload`.
+    uint256 internal constant FEE_ASSET = 38;
+
     /// @dev OpenZeppelin `Ownable._owner`, sequential slot after all `ClprServiceStorage`
     ///      vars. Read via raw `sload` in `ClprServiceStorage._getOwner()`; both must match.
-    uint256 internal constant OWNER = 38;
+    uint256 internal constant OWNER = 39;
 
     /// @dev Byte offset of `_clprEnabled` within `PACKED_MISC` (see storage-layout.json).
     uint256 internal constant CLPR_ENABLED_BYTE_OFFSET = 20;
@@ -48,7 +52,7 @@ library ClprServiceStorageSlots {
 
     /// @dev Sequential slot of Ownable._owner, inherited after ClprServiceStorage fields.
     ///      Must match ClprServiceStorage._getOwner() hardcoded slot.
-    uint256 internal constant OWNER_SLOT = 38;
+    uint256 internal constant OWNER_SLOT = 39;
 }
 
 /// @notice Storage slot derivations for mappings used in invariant `vm.load` reads.

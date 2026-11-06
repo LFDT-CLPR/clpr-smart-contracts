@@ -36,7 +36,9 @@ contract BundleLogic_Configuration is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
         });
         bytes[] memory msgs = new bytes[](0);
         verifier.setVerifyBundleResult(meta, msgs);
@@ -56,6 +58,42 @@ contract BundleLogic_Configuration is BundleLogicTestBase {
         assertEq(uint8(ClprProtobuf.getMessageType(slot.payload)), uint8(ClprTypes.MessageType.CONTROL));
         // runningHashAfterProcessing should reflect the enqueued CONTROL payload
         assertTrue(slot.runningHashAfterProcessing != bytes32(0), "running hash should be updated");
+    }
+
+    /// @dev A config update pending while CLOSING/DRAINED must not enqueue a new
+    /// outbound CONTROL message, or DRAINED -> CLOSED would wait forever on a peer that has no
+    /// reason to ack a message sent after it already reported itself DRAINED.
+    function test_lazyConfigPropagation_skippedWhileClosing_allowsDrainedToClosed() public {
+        vm.warp(block.timestamp + 10);
+        service.updateLedgerConfiguration(hex"BEEF", defaultThrottles, "", "");
+
+        // No Data Messages were ever sent, so admin-close advances straight to DRAINED.
+        service.closeChannel(channelId);
+        assertEq(
+            uint8(service.getChannel(channelId).status),
+            uint8(ClprTypes.ChannelStatus.DRAINED),
+            "channel should be DRAINED before the bundle"
+        );
+
+        // Peer already reports DRAINED with nothing outstanding; with nextMessageId still 1,
+        // every prior outbound message is trivially acked.
+        ClprTypes.QueueMetadata memory meta = ClprTypes.QueueMetadata({
+            nextMessageId: 1,
+            sentRunningHash: bytes32(0),
+            receivedMessageId: 0,
+            receivedRunningHash: bytes32(0),
+            state: ClprTypes.ChannelStatus.DRAINED,
+            endpointManifestVersion: 0,
+            lastMessageId: 0,
+            lastMessageRunningHash: bytes32(0)
+        });
+        bytes[] memory msgs = new bytes[](0);
+        verifier.setVerifyBundleResult(meta, msgs);
+        service.submitBundle(channelId, hex"00FF");
+
+        ClprTypes.Channel memory channel = service.getChannel(channelId);
+        assertEq(channel.nextMessageId, 1, "config propagation must not enqueue a CONTROL message");
+        assertEq(uint8(channel.status), uint8(ClprTypes.ChannelStatus.CLOSED), "channel should reach CLOSED");
     }
 
     // NOTE: test_refreshPeerRoster_badKeyLength_endpointSkipped removed — roster refresh via
@@ -112,7 +150,9 @@ contract BundleLogic_Configuration is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: runningHash
         });
         verifier.setVerifyBundleResult(meta, msgs);
 
@@ -143,7 +183,9 @@ contract BundleLogic_Configuration is BundleLogicTestBase {
             receivedMessageId: 0,
             receivedRunningHash: bytes32(0),
             state: ClprTypes.ChannelStatus.ACTIVE,
-            endpointManifestVersion: 0
+            endpointManifestVersion: 0,
+            lastMessageId: 1,
+            lastMessageRunningHash: hash
         });
         verifier.setVerifyBundleResult(meta, msgs);
         vm.expectRevert(ClprTypes.ClprInvalidConfiguration.selector);

@@ -22,6 +22,10 @@ import {ClprProtobufHelpers as PB} from "@hiero-ledger/clpr/libraries/codec/Clpr
 ///        field 3 (VARINT): received_message_id → QueueMetadata.receivedMessageId
 ///        field 4 (LEN):    received_running_hash (32 bytes) → QueueMetadata.receivedRunningHash
 ///        field 5 (VARINT): state (enum) → QueueMetadata.state
+///
+///      ClprQueueMetadata has no last-message fields, so a message-bearing bundle is taken to end at
+///      the sender's latest message: lastMessageId = nextMessageId - 1, lastMessageRunningHash =
+///      sentRunningHash (the same fallback as ClprProtobuf.decodeBundleContent).
 contract StubClprVerifier is IClprVerifier {
     bytes8 private constant STUB_PREFIX = "CLPRSTUB";
 
@@ -94,6 +98,10 @@ contract StubClprVerifier is IClprVerifier {
         require(prefix == STUB_PREFIX, "StubVerifier: missing CLPRSTUB prefix");
 
         (metadata, messagePayloads) = _decodeClprBundleContent(data, 8);
+        if (messagePayloads.length > 0 && metadata.nextMessageId > 0) {
+            metadata.lastMessageId = metadata.nextMessageId - 1;
+            metadata.lastMessageRunningHash = metadata.sentRunningHash;
+        }
         newTrustAnchorId = new bytes(0);
         newTrustAnchor = new bytes(0);
     }
